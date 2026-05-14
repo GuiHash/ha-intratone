@@ -1,3 +1,5 @@
 pytest-homeassistant-custom-component
 aioresponses
 firebase-messaging>=0.4.0
+# HA's camera component imports turbojpeg unconditionally → required for tests.
+PyTurboJPEG
