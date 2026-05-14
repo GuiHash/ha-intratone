@@ -7,12 +7,15 @@ import time
 from dataclasses import dataclass
 
 import voluptuous as vol
+from homeassistant.components.network import async_get_source_ip
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
+from .call_manager import CallManager
 from .const import DOMAIN
 from .coordinator import IntratoneCoordinator
 from .fcm_listener import FcmListener
@@ -41,6 +44,7 @@ class IntratoneRuntime:
     api: IntratoneAPI
     coordinator: IntratoneCoordinator
     fcm: FcmListener
+    call_manager: CallManager
 
 
 type IntratoneConfigEntry = ConfigEntry[IntratoneRuntime]
@@ -89,10 +93,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: IntratoneConfigEntry) ->
     coordinator = IntratoneCoordinator(hass, entry, api)
     await coordinator.async_config_entry_first_refresh()
 
+    # CallManager owns the SIP UDP endpoint + audio bridge. We need a real LAN
+    # IP to advertise in SIP From/Contact and the SDP `c=` line — falling back
+    # to 127.0.0.1 here would make Asterisk send RTP into its own loopback and
+    # the call would set up cleanly with zero audio, no error logged.
+    local_ip = await async_get_source_ip(hass)
+    if not local_ip or local_ip.startswith("127."):
+        raise ConfigEntryNotReady(
+            f"Could not determine a routable LAN IP for SIP advertisements "
+            f"(async_get_source_ip returned {local_ip!r})."
+        )
+    call_manager = CallManager(
+        local_host=local_ip,
+        on_call_active=lambda call_id, url: coordinator.set_stream_url(call_id, url),
+        on_call_ended=lambda call_id: coordinator.set_stream_url(call_id, None),
+    )
+    await call_manager.async_start()
+    coordinator.attach_call_manager(call_manager)
+
     fcm = FcmListener(hass, entry, coordinator)
     await fcm.async_start()
 
-    entry.runtime_data = IntratoneRuntime(api=api, coordinator=coordinator, fcm=fcm)
+    entry.runtime_data = IntratoneRuntime(
+        api=api, coordinator=coordinator, fcm=fcm, call_manager=call_manager
+    )
 
     api.async_start_jwt_refresh()
 
@@ -106,5 +130,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: IntratoneConfigEntry) -
     if unload_ok:
         runtime: IntratoneRuntime = entry.runtime_data
         await runtime.fcm.async_stop()
+        await runtime.call_manager.async_stop()
         runtime.api.async_stop()
     return unload_ok

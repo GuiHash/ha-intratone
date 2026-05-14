@@ -16,7 +16,7 @@ def aiomock():
 
 
 async def test_full_setup_push_open_door(
-    hass, mock_entry, mock_fcm_client, aiomock
+    hass, mock_entry, mock_fcm_client, mock_call_manager, aiomock
 ) -> None:
     mock_entry.add_to_hass(hass)
 
@@ -86,7 +86,7 @@ async def test_full_setup_push_open_door(
 
 
 async def test_simulate_ring_service(
-    hass, mock_entry, mock_fcm_client, aiomock
+    hass, mock_entry, mock_fcm_client, mock_call_manager, aiomock
 ) -> None:
     from custom_components.intratone.const import DOMAIN
 

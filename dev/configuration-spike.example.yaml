@@ -1,7 +1,14 @@
-# HomeKit audio spike — Phase 2 prerequisite.
-# Minimal config to avoid macOS-specific crashes (bluetooth, etc.).
+# Phase 2 dev configuration.
+#
+# Minimal config (no `default_config:` — `bluetooth` makes macOS' TCC kill the
+# Python process; the `dev/custom_components/bluetooth/` stub handles the rest).
+#
+# Hosts:
+#   - HA Spike Bridge: fake_doorbell from go2rtc (audio path regression test)
+#   - Intratone entities: uncomment after adding the integration and replace
+#     REPLACEME with the apartment numeric_id (data.id from /registercodes,
+#     visible in entity_ids in HA dev).
 
-# Core only, no default_config (bluetooth on macOS makes the process die).
 frontend:
 api:
 config:
@@ -15,6 +22,7 @@ logger:
   logs:
     homeassistant.components.homekit: debug
     homeassistant.components.ffmpeg: debug
+    custom_components.intratone: debug
 
 camera:
   - platform: ffmpeg
@@ -27,6 +35,12 @@ homekit:
     filter:
       include_entities:
         - camera.fake_doorbell
+        # - camera.intratone_REPLACEME_interphone
+        # - event.intratone_REPLACEME_sonnette
+        # - lock.intratone_REPLACEME_porte
     entity_config:
       camera.fake_doorbell:
         support_audio: true
+      # camera.intratone_REPLACEME_interphone:
+      #   support_audio: true
+      #   linked_doorbell_sensor: event.intratone_REPLACEME_sonnette

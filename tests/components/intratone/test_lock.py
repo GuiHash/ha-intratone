@@ -17,7 +17,7 @@ def aiomock():
 
 
 async def test_unlock_calls_open_door_and_reverts(
-    hass, mock_entry, mock_fcm_client, aiomock
+    hass, mock_entry, mock_fcm_client, mock_call_manager, aiomock
 ) -> None:
     mock_entry.add_to_hass(hass)
     aiomock.post(

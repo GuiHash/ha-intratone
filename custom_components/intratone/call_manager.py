@@ -1,0 +1,190 @@
+"""Orchestrates the SIP UAC, audio bridge, and HA-facing callbacks for one entry.
+
+Owns the long-lived SIP UDP socket (so Asterisk can reach us across multiple
+calls without per-call port churn) and one AudioBridge whose ffmpeg process
+cycles per call.
+
+Flow per ring:
+
+    FCM push  → CallManager.start_call(target_uri, sip_server_ip, user, pass)
+              → IntratoneSipClient.call() → INVITE → 407 → INVITE+auth → 200 OK
+    sip_client.on_call_established(rtp_endpoint)
+              → AudioBridge.start(local_rtp_port) → RTSP URL
+              → on_call_active(rtsp_url) callback (coordinator sets camera state)
+    [audio flows; HomeKit pulls RTSP]
+    hang_up()  ← coordinator.async_open_door() (user accepted)
+       or
+    BYE        ← server (visitor or timeout)
+              → AudioBridge.stop()
+              → on_call_ended() callback
+
+Local RTP port: picked once per call from a small range; race with another
+binder is rare and handled by the SIP call simply failing — the doorbell will
+ring again on retry.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import socket
+from typing import Callable
+
+from .audio_bridge import AudioBridge
+from .sip_client import CallEstablished, IntratoneSipClient
+
+_LOGGER = logging.getLogger(__name__)
+
+_RTP_PORT_RANGE = range(16384, 16484, 2)  # even ports (RTP convention)
+
+
+class CallManager:
+    """One SIP UDP endpoint + one AudioBridge per Intratone config entry."""
+
+    def __init__(
+        self,
+        local_host: str,
+        on_call_active: Callable[[str, str], None],
+        on_call_ended: Callable[[str], None],
+        sip_port: int = 0,
+        audio_bridge: AudioBridge | None = None,
+    ) -> None:
+        self._local_host = local_host
+        self._sip_port_request = sip_port
+        self._on_call_active = on_call_active
+        self._on_call_ended = on_call_ended
+        self._bridge = audio_bridge or AudioBridge()
+        self._transport: asyncio.DatagramTransport | None = None
+        self._sip_client: IntratoneSipClient | None = None
+        self._active_call_id: str | None = None
+
+    @property
+    def is_running(self) -> bool:
+        return self._transport is not None
+
+    @property
+    def active_call_id(self) -> str | None:
+        return self._active_call_id
+
+    async def async_start(self) -> None:
+        """Bind the SIP UDP socket. Idempotent."""
+        if self._transport is not None:
+            return
+
+        loop = asyncio.get_running_loop()
+        self._sip_client = IntratoneSipClient(
+            local_host=self._local_host,
+            local_port=self._sip_port_request,
+            on_call_established=self._handle_call_established,
+            on_call_terminated=self._handle_call_terminated,
+        )
+        transport, _ = await loop.create_datagram_endpoint(
+            lambda: self._sip_client,  # type: ignore[return-value]
+            local_addr=("0.0.0.0", self._sip_port_request),
+            family=socket.AF_INET,
+        )
+        self._transport = transport
+        bound_host, bound_port = transport.get_extra_info("sockname")
+        # SIP client uses the actual bound port in its Via/Contact headers.
+        self._sip_client._local_port = bound_port  # noqa: SLF001
+        _LOGGER.debug("SIP UDP endpoint bound on %s:%d", bound_host, bound_port)
+
+    async def async_stop(self) -> None:
+        """Tear down audio bridge and SIP socket. Idempotent."""
+        await self._bridge.stop()
+        if self._transport is not None:
+            self._transport.close()
+            self._transport = None
+        self._sip_client = None
+        self._active_call_id = None
+
+    async def start_call(
+        self,
+        target_uri: str,
+        target_host: str,
+        sip_username: str,
+        sip_password: str,
+        target_port: int = 5060,
+    ) -> str | None:
+        """Send INVITE for an incoming doorbell ring. Returns Call-ID or None."""
+        if self._sip_client is None or self._transport is None:
+            _LOGGER.warning("CallManager not started; cannot place call")
+            return None
+        if self._active_call_id is not None:
+            _LOGGER.info(
+                "Call %s already active; ignoring overlapping ring", self._active_call_id
+            )
+            return None
+
+        rtp_port = _pick_rtp_port()
+        call_id = self._sip_client.call(
+            target_uri=target_uri,
+            target_host=target_host,
+            target_port=target_port,
+            local_rtp_port=rtp_port,
+            sip_username=sip_username,
+            sip_password=sip_password,
+        )
+        self._active_call_id = call_id
+        _LOGGER.info("Outgoing SIP INVITE: call_id=%s target=%s", call_id, target_uri)
+        return call_id
+
+    async def hang_up(self) -> None:
+        """End the active call (user accepted via door open, or explicit hangup)."""
+        if self._sip_client is None or self._active_call_id is None:
+            return
+        self._sip_client.hang_up(self._active_call_id)
+        # _handle_call_terminated will fire from the protocol path on confirmation,
+        # but hang_up is fire-and-forget from the caller's POV; clean up eagerly.
+        await self._bridge.stop()
+
+    # --- IntratoneSipClient callbacks (sync — must not await) -----------
+
+    def _handle_call_established(self, info: CallEstablished) -> None:
+        if info.call_id != self._active_call_id:
+            _LOGGER.debug("Ignoring stale call_established for %s", info.call_id)
+            return
+        # ffmpeg start is async; schedule on the loop.
+        asyncio.create_task(self._spawn_bridge(info))
+
+    def _handle_call_terminated(self, call_id: str) -> None:
+        if call_id != self._active_call_id:
+            return
+        self._active_call_id = None
+        asyncio.create_task(self._teardown_bridge(call_id))
+
+    async def _spawn_bridge(self, info: CallEstablished) -> None:
+        try:
+            rtsp_url = await self._bridge.start(
+                local_rtp_port=info.local_rtp_port,
+                remote_rtp_ip=info.remote_rtp_ip,
+                remote_rtp_port=info.remote_rtp_port,
+            )
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.exception("Audio bridge failed to start: %s", err)
+            if self._sip_client is not None:
+                self._sip_client.hang_up(info.call_id)
+            return
+        _LOGGER.info(
+            "Audio bridge up: %s (RTP peer %s:%d, keepalive on)",
+            rtsp_url,
+            info.remote_rtp_ip,
+            info.remote_rtp_port,
+        )
+        self._on_call_active(info.call_id, rtsp_url)
+
+    async def _teardown_bridge(self, call_id: str) -> None:
+        await self._bridge.stop()
+        self._on_call_ended(call_id)
+
+
+def _pick_rtp_port() -> int:
+    """Return a free port from the RTP range by transient-binding to test it."""
+    for port in _RTP_PORT_RANGE:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            try:
+                probe.bind(("0.0.0.0", port))
+            except OSError:
+                continue
+            return port
+    raise RuntimeError("No free RTP port in range")

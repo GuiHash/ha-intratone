@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import DOMAIN
 
 if TYPE_CHECKING:
+    from .call_manager import CallManager
     from .rest_api import IntratoneAPI
 
 _LOGGER = logging.getLogger(__name__)
@@ -25,6 +27,8 @@ class CallState:
 
     `ring_seq` is a monotonic counter; entities use it to detect new rings
     rather than a transient flag (which would race with state writes).
+    `stream_url` is set once the SIP call is confirmed and audio bridge up,
+    None before that and after hang-up.
     """
 
     call_id: str
@@ -32,6 +36,7 @@ class CallState:
     caller_login: str
     received_at: datetime
     ring_seq: int
+    stream_url: str | None = None
 
 
 class IntratoneCoordinator(DataUpdateCoordinator[CallState | None]):
@@ -52,13 +57,22 @@ class IntratoneCoordinator(DataUpdateCoordinator[CallState | None]):
         self.entry = entry
         self.api = api
         self._ring_seq = 0
+        self._call_manager: CallManager | None = None
+
+    def attach_call_manager(self, call_manager: CallManager) -> None:
+        """Wire the SIP/audio orchestrator in after construction.
+
+        Done after construction so the call_manager can take a reference to
+        coordinator callbacks without a circular import.
+        """
+        self._call_manager = call_manager
 
     async def _async_update_data(self) -> CallState | None:
         # No periodic refresh; coordinator data is set by async_handle_push.
         return self.data
 
     async def async_handle_push(self, payload: dict) -> None:
-        """Convert an FCM payload into a CallState and notify listeners."""
+        """Convert an FCM payload into a CallState and start the SIP call."""
         call_id = payload.get("call_id")
         if not call_id:
             _LOGGER.debug("Push without call_id, ignoring: %s", _redact(payload))
@@ -80,6 +94,43 @@ class IntratoneCoordinator(DataUpdateCoordinator[CallState | None]):
         )
         self.async_set_updated_data(state)
 
+        # Kick off the SIP call if we have the orchestrator and creds.
+        await self._maybe_start_sip_call(payload)
+
+    async def _maybe_start_sip_call(self, payload: dict) -> None:
+        if self._call_manager is None:
+            return
+        sip_target_user = payload.get("LOGIN_TO_CALL")
+        sip_user = payload.get("LOGIN")
+        sip_pass = payload.get("PASS")
+        sip_server_ip = payload.get("ip_adress")
+        if not all((sip_target_user, sip_user, sip_pass, sip_server_ip)):
+            _LOGGER.debug("Push missing SIP creds; skipping audio call")
+            return
+        target_uri = f"sip:{sip_target_user}@{sip_server_ip}"
+        try:
+            await self._call_manager.start_call(
+                target_uri=target_uri,
+                target_host=sip_server_ip,
+                sip_username=sip_user,
+                sip_password=sip_pass,
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Failed to initiate SIP call")
+
+    @callback
+    def set_stream_url(self, call_id: str, url: str | None) -> None:
+        """Update the active call's stream URL (called by CallManager callbacks).
+
+        Ignored if the call_id doesn't match the current call state, which can
+        happen if a stale call_established fires after a fast hang-up.
+        """
+        if self.data is None or self.data.call_id != call_id:
+            return
+        if self.data.stream_url == url:
+            return
+        self.async_set_updated_data(dataclasses.replace(self.data, stream_url=url))
+
     async def async_open_door(self) -> bool:
         """Answer the current call to trigger the door relay."""
         if self.data is None:
@@ -92,6 +143,12 @@ class IntratoneCoordinator(DataUpdateCoordinator[CallState | None]):
             return False
         if ok:
             _LOGGER.info("Door opened for call %s", self.data.call_id)
+            # User accepted → tear down the SIP call and audio bridge.
+            if self._call_manager is not None:
+                try:
+                    await self._call_manager.hang_up()
+                except Exception:  # noqa: BLE001
+                    _LOGGER.exception("Hang-up after door open failed")
         else:
             _LOGGER.warning("Open door returned non-ok for call %s", self.data.call_id)
         return ok
