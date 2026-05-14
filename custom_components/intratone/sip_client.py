@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import re
 import secrets
 import time
 from dataclasses import dataclass
@@ -36,6 +38,18 @@ _LOGGER = logging.getLogger(__name__)
 _CRLF = "\r\n"
 _USER_AGENT = "intratone-ha/0.1"
 _INITIAL_CSEQ = 50
+
+# Set INTRATONE_SIP_DEBUG=1 to dump the full SIP exchange. Authorization headers
+# are masked to keep credentials out of logs.
+_SIP_DEBUG = bool(int(os.environ.get("INTRATONE_SIP_DEBUG", "0") or "0"))
+_AUTH_MASK_RE = re.compile(
+    r"(?im)^((?:proxy-)?authorization):.*$", re.MULTILINE
+)
+
+
+def _redact_sip(message: bytes) -> str:
+    text = message.decode("utf-8", errors="replace")
+    return _AUTH_MASK_RE.sub(lambda m: f"{m.group(1)}: <redacted>", text)
 
 
 class CallState(Enum):
@@ -98,6 +112,8 @@ class IntratoneSipClient(asyncio.DatagramProtocol):
         self._transport = transport  # type: ignore[assignment]
 
     def datagram_received(self, data: bytes, addr: tuple[str, int]) -> None:
+        if _SIP_DEBUG:
+            _LOGGER.info("SIP RX from %s:\n%s", addr, _redact_sip(data))
         try:
             msg = SipMessage.parse_sip(data.decode("utf-8", errors="replace"))
         except Exception:  # noqa: BLE001 — malformed input must not crash the protocol
@@ -391,4 +407,6 @@ class IntratoneSipClient(asyncio.DatagramProtocol):
 
     def _send(self, data: bytes, addr: tuple[str, int]) -> None:
         assert self._transport is not None
+        if _SIP_DEBUG:
+            _LOGGER.info("SIP TX to %s:\n%s", addr, _redact_sip(data))
         self._transport.sendto(data, addr)

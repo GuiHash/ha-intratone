@@ -45,6 +45,7 @@ _RTP_HEADER_FMT = ">BBHII"  # version+flags, marker+PT, seq, timestamp, SSRC
 _RTP_HEADER_SIZE = 12
 
 _FFMPEG_TERMINATE_TIMEOUT = 3.0
+_STATS_INTERVAL_S = 5.0  # how often to log RTP rx/tx counts during a call
 
 
 def _build_rtp_packet(seq: int, timestamp: int, ssrc: int, payload: bytes) -> bytes:
@@ -140,19 +141,24 @@ class AudioBridge:
         self,
         ffmpeg_binary: str = "ffmpeg",
         rtsp_path: str = "intratone",
-        rtsp_port: int = 8556,
+        rtsp_relay_url: str = "rtsp://127.0.0.1:8554",
     ) -> None:
         self._ffmpeg_binary = ffmpeg_binary
         self._rtsp_path = rtsp_path
-        self._rtsp_port = rtsp_port
+        # External RTSP server (go2rtc by default) we PUSH to. HomeKit pulls
+        # from the same URL. ffmpeg's `-rtsp_flags listen` mode is broken in
+        # recent builds (tries to connect instead of listen), so we relay
+        # through go2rtc which handles the (re)connect lifecycle cleanly.
+        self._rtsp_relay_url = rtsp_relay_url.rstrip("/")
         self._process: asyncio.subprocess.Process | None = None
         self._stderr_task: asyncio.Task | None = None
+        self._stats_task: asyncio.Task | None = None
         self._rtp: _RtpProtocol | None = None
         self._rtp_transport: asyncio.DatagramTransport | None = None
 
     @property
     def rtsp_url(self) -> str:
-        return f"rtsp://127.0.0.1:{self._rtsp_port}/{self._rtsp_path}"
+        return f"{self._rtsp_relay_url}/{self._rtsp_path}"
 
     @property
     def is_running(self) -> bool:
@@ -168,14 +174,17 @@ class AudioBridge:
 
     async def start(
         self,
-        local_rtp_port: int,
+        rtp_socket,
         remote_rtp_ip: str,
         remote_rtp_port: int,
     ) -> str:
-        """Spawn ffmpeg, bind UDP RTP socket, start keepalive. Returns RTSP URL.
+        """Spawn ffmpeg + wrap a pre-bound RTP socket in an asyncio endpoint.
+
+        Caller (CallManager) is responsible for binding the socket so the
+        bind/probe race is impossible. We take ownership: on stop() or on
+        bind/spawn failure the socket is closed.
 
         Idempotent: if already running, returns the URL without restarting.
-        On bind failure ffmpeg is killed so we don't leak a subprocess.
         """
         if self.is_running:
             return self.rtsp_url
@@ -201,20 +210,26 @@ class AudioBridge:
         try:
             self._rtp_transport, _ = await loop.create_datagram_endpoint(
                 lambda: self._rtp,  # type: ignore[return-value]
-                local_addr=("0.0.0.0", local_rtp_port),
+                sock=rtp_socket,
             )
         except OSError:
-            _LOGGER.exception("RTP bind failed on :%d — killing ffmpeg", local_rtp_port)
+            _LOGGER.exception("RTP wrap failed — killing ffmpeg + closing socket")
             await self._kill_ffmpeg_now()
             self._rtp = None
+            try:
+                rtp_socket.close()
+            except OSError:
+                pass
             raise
+        local_port = rtp_socket.getsockname()[1]
 
         _LOGGER.info(
             "RTP endpoint bound on :%d, peer %s:%d, keepalive started",
-            local_rtp_port,
+            local_port,
             remote_rtp_ip,
             remote_rtp_port,
         )
+        self._stats_task = asyncio.create_task(self._log_stats_loop())
         return self.rtsp_url
 
     async def stop(self) -> None:
@@ -223,10 +238,15 @@ class AudioBridge:
         transport = self._rtp_transport
         process = self._process
         stderr_task = self._stderr_task
+        stats_task = self._stats_task
         self._rtp = None
         self._rtp_transport = None
         self._process = None
         self._stderr_task = None
+        self._stats_task = None
+
+        if stats_task is not None and not stats_task.done():
+            stats_task.cancel()
 
         if rtp is not None:
             rtp.close()
@@ -272,12 +292,15 @@ class AudioBridge:
             stderr_task.cancel()
 
     async def _spawn_ffmpeg(self) -> asyncio.subprocess.Process:
+        # HomeKit's Camera service requires a video stream alongside audio,
+        # even if the underlying intercom has no camera (Intratone is
+        # audio-only over SIP). We synthesize a dark placeholder frame at low
+        # fps/bitrate so HomeKit's ffmpeg pipeline can still `-map 0:v:0`.
         args = [
             "-hide_banner",
             "-loglevel",
             "warning",
-            # Input: raw µ-law (G.711) at 8 kHz mono from our stdin —
-            # straight from the RTP payload, no Python-side decode.
+            # Input 0: raw µ-law (G.711) at 8 kHz mono from stdin.
             "-f",
             "mulaw",
             "-ar",
@@ -286,20 +309,50 @@ class AudioBridge:
             "1",
             "-i",
             "pipe:0",
-            # Output: opus, HomeKit-friendly, low-latency
+            # Input 1: synthetic dark-gray placeholder video at 10 fps, 640x360.
+            "-f",
+            "lavfi",
+            "-i",
+            "color=color=0x202020:size=640x360:rate=10",
+            # Map: audio from input 0, video from input 1.
+            "-map",
+            "0:a",
             "-c:a",
             "libopus",
+            "-application",
+            "voip",
             "-b:a",
             "24k",
-            "-ar",
-            "48000",
-            "-ac",
-            "2",
+            # Per-stream specifiers (`:a:0`) force libopus to obey: without
+            # the stream specifier ffmpeg's libopus wrapper silently emits
+            # 48 kHz stereo regardless of `-ac 1`.
+            "-ar:a:0",
+            "16000",
+            "-ac:a:0",
+            "1",
+            "-channel_layout:a:0",
+            "mono",
+            "-map",
+            "1:v",
+            "-c:v",
+            "libx264",
+            "-tune",
+            "zerolatency",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            "-profile:v",
+            "baseline",
+            "-level",
+            "3.1",
+            "-g",
+            "20",
+            "-rtsp_transport",
+            "tcp",
             "-f",
             "rtsp",
-            "-rtsp_flags",
-            "listen",
-            f"rtsp://0.0.0.0:{self._rtsp_port}/{self._rtsp_path}",
+            self.rtsp_url,
         ]
         _LOGGER.debug("Spawning ffmpeg: %s %s", self._ffmpeg_binary, " ".join(args))
         return await asyncio.create_subprocess_exec(
@@ -309,6 +362,23 @@ class AudioBridge:
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
+
+    async def _log_stats_loop(self) -> None:
+        """Periodic visibility into RTP traffic. If `received` stays at 0 while
+        `sent` grows, NAT punching has not yet succeeded — Asterisk hasn't
+        learned our public endpoint."""
+        try:
+            while self._rtp is not None:
+                await asyncio.sleep(_STATS_INTERVAL_S)
+                if self._rtp is None:
+                    return
+                _LOGGER.info(
+                    "RTP stats: received=%d, sent=%d",
+                    self._rtp.packets_received,
+                    self._rtp.packets_sent,
+                )
+        except asyncio.CancelledError:
+            raise
 
     async def _drain_stderr(self, process: asyncio.subprocess.Process) -> None:
         """Read ffmpeg's stderr line by line and log it. Without this the pipe

@@ -33,6 +33,13 @@ SIMULATE_RING_SCHEMA = vol.Schema(
         vol.Optional("door_name", default="PORTE TEST"): cv.string,
         vol.Optional("call_id"): cv.string,
         vol.Optional("entry_id"): cv.string,
+        # Optional SIP creds — when provided, the full INVITE flow fires (lets us
+        # test against `dev/mock_asterisk.py` or any other SIP server without
+        # waiting for a real intercom ring).
+        vol.Optional("sip_server_ip"): cv.string,
+        vol.Optional("sip_target_user", default="MOCK"): cv.string,
+        vol.Optional("sip_user", default="cogelecTest"): cv.string,
+        vol.Optional("sip_pass", default="CogeleC"): cv.string,
     }
 )
 
@@ -73,9 +80,15 @@ async def async_setup(hass: HomeAssistant, _config: dict) -> bool:
         payload = {
             "call_id": call.data.get("call_id") or f"sim-{int(time.time())}",
             "message": call.data["door_name"],
-            "LOGIN_TO_CALL": "SIMULATED",
+            "LOGIN_TO_CALL": call.data.get("sip_target_user", "SIMULATED"),
             "TYPE": "24",
         }
+        sip_server = call.data.get("sip_server_ip")
+        if sip_server:
+            # Full SIP flow against an arbitrary server (typically the mock).
+            payload["ip_adress"] = sip_server
+            payload["LOGIN"] = call.data.get("sip_user", "cogelecTest")
+            payload["PASS"] = call.data.get("sip_pass", "CogeleC")
         for entry in entries:
             await entry.runtime_data.coordinator.async_handle_push(payload)
 

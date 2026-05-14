@@ -46,7 +46,15 @@ class IntratoneCamera(IntratoneEntity, Camera):
     async def stream_source(self) -> str | None:
         if self.coordinator.data is None:
             return None
-        return self.coordinator.data.stream_url
+        url = self.coordinator.data.stream_url
+        if not url:
+            return None
+        # HomeKit Bridge spawns ffmpeg with our URL as the input. go2rtc's
+        # RTSP server rejects UDP transport on SETUP (461 Unsupported
+        # transport), so we force TCP by returning a fully-formed `-i` arg
+        # — homekit/type_cameras.py preserves it verbatim when it starts
+        # with `-i `.
+        return f"-rtsp_transport tcp -i {url}"
 
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None

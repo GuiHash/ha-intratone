@@ -76,6 +76,10 @@ async def manager(fake_bridge, active_calls, ended_calls):
         proto.connection_made(transport)
         return transport, proto
 
+    fake_rtp_sock = MagicMock()
+    fake_rtp_sock.getsockname = MagicMock(return_value=("0.0.0.0", 16400))
+    fake_rtp_sock.close = MagicMock()
+
     with (
         patch.object(
             asyncio.get_running_loop(),
@@ -83,8 +87,8 @@ async def manager(fake_bridge, active_calls, ended_calls):
             side_effect=fake_create_datagram_endpoint,
         ),
         patch(
-            "custom_components.intratone.call_manager._pick_rtp_port",
-            return_value=16400,
+            "custom_components.intratone.call_manager._bind_rtp_socket",
+            return_value=fake_rtp_sock,
         ),
     ):
         await mgr.async_start()
@@ -161,11 +165,12 @@ async def test_call_established_spawns_bridge_and_fires_active(
     await asyncio.sleep(0)
     await asyncio.sleep(0)
 
-    fake_bridge.start.assert_awaited_once_with(
-        local_rtp_port=local_rtp,
-        remote_rtp_ip="178.32.84.99",
-        remote_rtp_port=20002,
-    )
+    fake_bridge.start.assert_awaited_once()
+    call_kwargs = fake_bridge.start.await_args.kwargs
+    assert call_kwargs["remote_rtp_ip"] == "178.32.84.99"
+    assert call_kwargs["remote_rtp_port"] == 20002
+    # The bound socket allocated in start_call is what gets handed to the bridge.
+    assert "rtp_socket" in call_kwargs
     assert active_calls == [(call_id, "rtsp://127.0.0.1:8556/intratone")]
 
 
@@ -230,17 +235,19 @@ async def test_async_stop_is_idempotent(manager, fake_bridge):
     await manager.async_stop()  # Must not raise.
 
 
-# --- port picker ----------------------------------------------------------
+# --- socket binder --------------------------------------------------------
 
 
-def test_pick_rtp_port_returns_free_port(socket_enabled):
-    """Verify the port picker against the real socket layer.
+def test_bind_rtp_socket_returns_bound_socket(socket_enabled):
+    """`_bind_rtp_socket` returns a UDP socket already bound to a free port —
+    eliminating the bind/probe race the older `_pick_rtp_port` had."""
+    from custom_components.intratone.call_manager import _bind_rtp_socket
 
-    Uses the pytest-socket `socket_enabled` fixture to unblock socket use only
-    for this test; the rest of the suite stays sandboxed.
-    """
-    from custom_components.intratone.call_manager import _pick_rtp_port
-
-    port = _pick_rtp_port()
-    assert 16384 <= port < 16484
-    assert port % 2 == 0  # RTP convention: even ports
+    sock = _bind_rtp_socket()
+    try:
+        host, port = sock.getsockname()
+        assert host in ("0.0.0.0", "")
+        assert 16384 <= port < 16484
+        assert port % 2 == 0  # RTP convention: even ports
+    finally:
+        sock.close()

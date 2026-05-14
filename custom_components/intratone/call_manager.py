@@ -38,6 +38,29 @@ _LOGGER = logging.getLogger(__name__)
 _RTP_PORT_RANGE = range(16384, 16484, 2)  # even ports (RTP convention)
 
 
+def _bind_rtp_socket() -> socket.socket:
+    """Bind a UDP socket on a free port in the RTP range and hand it back.
+
+    Returns the bound socket; ownership transfers to the caller (must close).
+    Eliminates the bind/probe race that a separate `_pick_rtp_port` helper
+    would introduce — the port is held continuously from probe to use.
+    """
+    last_error: OSError | None = None
+    for port in _RTP_PORT_RANGE:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setblocking(False)
+        try:
+            sock.bind(("0.0.0.0", port))
+            return sock
+        except OSError as err:
+            last_error = err
+            sock.close()
+            continue
+    raise RuntimeError(
+        f"No free RTP port in range {_RTP_PORT_RANGE!r}: {last_error}"
+    )
+
+
 class CallManager:
     """One SIP UDP endpoint + one AudioBridge per Intratone config entry."""
 
@@ -57,6 +80,9 @@ class CallManager:
         self._transport: asyncio.DatagramTransport | None = None
         self._sip_client: IntratoneSipClient | None = None
         self._active_call_id: str | None = None
+        # Sockets held from start_call until handed to AudioBridge in
+        # _spawn_bridge. Closed on hang_up if the call never reaches CONFIRMED.
+        self._pending_rtp_sockets: dict[str, socket.socket] = {}
 
     @property
     def is_running(self) -> bool:
@@ -116,17 +142,30 @@ class CallManager:
             )
             return None
 
-        rtp_port = _pick_rtp_port()
-        call_id = self._sip_client.call(
-            target_uri=target_uri,
-            target_host=target_host,
-            target_port=target_port,
-            local_rtp_port=rtp_port,
-            sip_username=sip_username,
-            sip_password=sip_password,
-        )
+        # Bind the RTP socket NOW so the port we advertise in SDP is exactly
+        # the one ffmpeg will receive on — no probe/use race.
+        rtp_socket = _bind_rtp_socket()
+        rtp_port = rtp_socket.getsockname()[1]
+        try:
+            call_id = self._sip_client.call(
+                target_uri=target_uri,
+                target_host=target_host,
+                target_port=target_port,
+                local_rtp_port=rtp_port,
+                sip_username=sip_username,
+                sip_password=sip_password,
+            )
+        except Exception:
+            rtp_socket.close()
+            raise
         self._active_call_id = call_id
-        _LOGGER.info("Outgoing SIP INVITE: call_id=%s target=%s", call_id, target_uri)
+        self._pending_rtp_sockets[call_id] = rtp_socket
+        _LOGGER.info(
+            "Outgoing SIP INVITE: call_id=%s target=%s local_rtp_port=%d",
+            call_id,
+            target_uri,
+            rtp_port,
+        )
         return call_id
 
     async def hang_up(self) -> None:
@@ -151,12 +190,29 @@ class CallManager:
         if call_id != self._active_call_id:
             return
         self._active_call_id = None
+        # If the call never reached CONFIRMED, the RTP socket was bound but
+        # never handed to AudioBridge — close it here to avoid a leak.
+        leftover_socket = self._pending_rtp_sockets.pop(call_id, None)
+        if leftover_socket is not None:
+            try:
+                leftover_socket.close()
+            except OSError:
+                pass
         asyncio.create_task(self._teardown_bridge(call_id))
 
     async def _spawn_bridge(self, info: CallEstablished) -> None:
+        rtp_socket = self._pending_rtp_sockets.pop(info.call_id, None)
+        if rtp_socket is None:
+            _LOGGER.warning(
+                "No pending RTP socket for call %s — bridge cannot start",
+                info.call_id,
+            )
+            if self._sip_client is not None:
+                self._sip_client.hang_up(info.call_id)
+            return
         try:
             rtsp_url = await self._bridge.start(
-                local_rtp_port=info.local_rtp_port,
+                rtp_socket=rtp_socket,
                 remote_rtp_ip=info.remote_rtp_ip,
                 remote_rtp_port=info.remote_rtp_port,
             )

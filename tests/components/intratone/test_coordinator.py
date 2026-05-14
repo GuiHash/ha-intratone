@@ -89,20 +89,29 @@ async def test_push_without_sip_creds_does_not_call_sip(
     cm.start_call.assert_not_awaited()
 
 
-async def test_set_stream_url_updates_call_state(coordinator) -> None:
-    await coordinator.async_handle_push({"call_id": "1", "message": "X"})
+async def test_set_stream_url_updates_call_state(coordinator_with_cm) -> None:
+    """set_stream_url matches against the SIP call_id captured during the
+    push handling, not the FCM-side call_id used for the door REST endpoint."""
+    coordinator, cm = coordinator_with_cm
+    cm.start_call.return_value = "sip-call-abc"
+    await coordinator.async_handle_push(_FULL_PUSH)
     assert coordinator.data.stream_url is None
 
-    coordinator.set_stream_url("1", "rtsp://127.0.0.1:8556/intratone")
+    # Callback fires with the SIP call_id, which the coordinator remembered.
+    coordinator.set_stream_url("sip-call-abc", "rtsp://127.0.0.1:8556/intratone")
     assert coordinator.data.stream_url == "rtsp://127.0.0.1:8556/intratone"
 
-    coordinator.set_stream_url("1", None)
+    coordinator.set_stream_url("sip-call-abc", None)
     assert coordinator.data.stream_url is None
 
 
-async def test_set_stream_url_ignored_for_stale_call_id(coordinator) -> None:
-    await coordinator.async_handle_push({"call_id": "current", "message": "X"})
-    coordinator.set_stream_url("stale", "rtsp://x")
+async def test_set_stream_url_ignored_for_stale_sip_call_id(
+    coordinator_with_cm,
+) -> None:
+    coordinator, cm = coordinator_with_cm
+    cm.start_call.return_value = "sip-call-current"
+    await coordinator.async_handle_push(_FULL_PUSH)
+    coordinator.set_stream_url("sip-call-stale", "rtsp://x")
     assert coordinator.data.stream_url is None
 
 

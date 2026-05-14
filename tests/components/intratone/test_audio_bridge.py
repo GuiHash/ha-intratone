@@ -65,6 +65,14 @@ class _FakeTransport:
         return self.closed
 
 
+def _fake_rtp_socket(port: int) -> MagicMock:
+    """A mock socket that reports a bound port without actually binding."""
+    sock = MagicMock()
+    sock.getsockname = MagicMock(return_value=("0.0.0.0", port))
+    sock.close = MagicMock()
+    return sock
+
+
 @pytest.fixture
 async def rtp_setup():
     payloads: list[bytes] = []
@@ -205,13 +213,13 @@ def fake_datagram_endpoint():
 
 
 async def test_start_returns_rtsp_url(mock_subprocess, fake_datagram_endpoint):
-    bridge = AudioBridge(rtsp_port=8556, rtsp_path="intratone")
+    bridge = AudioBridge(rtsp_relay_url="rtsp://127.0.0.1:8554", rtsp_path="intratone")
     url = await bridge.start(
-        local_rtp_port=16384,
+        rtp_socket=_fake_rtp_socket(16384),
         remote_rtp_ip="178.32.84.135",
         remote_rtp_port=20000,
     )
-    assert url == "rtsp://127.0.0.1:8556/intratone"
+    assert url == "rtsp://127.0.0.1:8554/intratone"
     assert bridge.is_running
 
 
@@ -220,26 +228,38 @@ async def test_start_spawns_ffmpeg_with_mulaw_stdin_input(
 ):
     bridge = AudioBridge(ffmpeg_binary="ffmpeg")
     await bridge.start(
-        local_rtp_port=16384, remote_rtp_ip="178.32.84.135", remote_rtp_port=20000
+        rtp_socket=_fake_rtp_socket(16384),
+        remote_rtp_ip="178.32.84.135",
+        remote_rtp_port=20000
     )
     args = mock_subprocess.call_args.args
     binary, *rest = args
     assert binary == "ffmpeg"
     joined = " ".join(rest)
-    # ffmpeg decodes µ-law itself, no Python audioop needed.
+    # ffmpeg decodes µ-law itself (no Python audioop needed) and synthesizes
+    # a dark placeholder video so HomeKit's Camera service has something to map.
     assert "-f mulaw -ar 8000 -ac 1 -i pipe:0" in joined
+    assert "-f lavfi -i color=" in joined
     assert "-c:a libopus" in joined
-    assert "-rtsp_flags listen" in joined
-    assert "rtsp://0.0.0.0:8556/intratone" in joined
+    assert "-c:v libx264" in joined
+    # ffmpeg pushes to go2rtc relay over TCP RTSP (no listen flag — that mode
+    # is broken in recent builds, doesn't actually listen).
+    assert "-rtsp_transport tcp" in joined
+    assert "-f rtsp" in joined
+    assert "rtsp://127.0.0.1:8554/intratone" in joined
 
 
 async def test_start_is_idempotent(mock_subprocess, fake_datagram_endpoint):
     bridge = AudioBridge()
     await bridge.start(
-        local_rtp_port=16384, remote_rtp_ip="178.32.84.135", remote_rtp_port=20000
+        rtp_socket=_fake_rtp_socket(16384),
+        remote_rtp_ip="178.32.84.135",
+        remote_rtp_port=20000
     )
     await bridge.start(
-        local_rtp_port=16384, remote_rtp_ip="178.32.84.135", remote_rtp_port=20000
+        rtp_socket=_fake_rtp_socket(16384),
+        remote_rtp_ip="178.32.84.135",
+        remote_rtp_port=20000
     )
     assert mock_subprocess.call_count == 1
 
@@ -249,7 +269,9 @@ async def test_received_rtp_forwards_ulaw_to_ffmpeg_stdin(
 ):
     bridge = AudioBridge()
     await bridge.start(
-        local_rtp_port=16384, remote_rtp_ip="178.32.84.135", remote_rtp_port=20000
+        rtp_socket=_fake_rtp_socket(16384),
+        remote_rtp_ip="178.32.84.135",
+        remote_rtp_port=20000
     )
     assert bridge._rtp is not None
     payload = _ULAW_SILENCE_BYTE * _SAMPLES_PER_PACKET
@@ -267,7 +289,9 @@ async def test_stop_sends_sigterm_and_closes_socket(
 ):
     bridge = AudioBridge()
     await bridge.start(
-        local_rtp_port=16384, remote_rtp_ip="178.32.84.135", remote_rtp_port=20000
+        rtp_socket=_fake_rtp_socket(16384),
+        remote_rtp_ip="178.32.84.135",
+        remote_rtp_port=20000
     )
     transport = bridge._rtp_transport
     assert transport is not None
@@ -285,7 +309,9 @@ async def test_stop_kills_if_ffmpeg_hangs(
 ):
     bridge = AudioBridge()
     await bridge.start(
-        local_rtp_port=16384, remote_rtp_ip="178.32.84.135", remote_rtp_port=20000
+        rtp_socket=_fake_rtp_socket(16384),
+        remote_rtp_ip="178.32.84.135",
+        remote_rtp_port=20000
     )
     waits = [asyncio.get_running_loop().create_future()]
     call_count = 0
@@ -316,7 +342,9 @@ async def test_stop_safe_when_called_twice(
 ):
     bridge = AudioBridge()
     await bridge.start(
-        local_rtp_port=16384, remote_rtp_ip="178.32.84.135", remote_rtp_port=20000
+        rtp_socket=_fake_rtp_socket(16384),
+        remote_rtp_ip="178.32.84.135",
+        remote_rtp_port=20000
     )
     await bridge.stop()
     await bridge.stop()  # idempotent — no second SIGTERM
@@ -331,14 +359,16 @@ async def test_bind_failure_kills_ffmpeg(mock_subprocess, fake_process):
 
     bridge = AudioBridge()
     loop = asyncio.get_event_loop()
+    rtp_sock = _fake_rtp_socket(16384)
     with patch.object(loop, "create_datagram_endpoint", side_effect=_create_fails):
         with pytest.raises(OSError):
             await bridge.start(
-                local_rtp_port=16384,
+                rtp_socket=rtp_sock,
                 remote_rtp_ip="178.32.84.135",
                 remote_rtp_port=20000,
             )
     fake_process.kill.assert_called_once()
+    rtp_sock.close.assert_called_once()
     assert bridge._process is None
     assert not bridge.is_running
 
@@ -357,7 +387,7 @@ async def test_stderr_is_drained_to_logger(
     bridge = AudioBridge()
     with caplog.at_level(logging.WARNING, logger="custom_components.intratone.audio_bridge"):
         await bridge.start(
-            local_rtp_port=16384,
+            rtp_socket=_fake_rtp_socket(16384),
             remote_rtp_ip="178.32.84.135",
             remote_rtp_port=20000,
         )
