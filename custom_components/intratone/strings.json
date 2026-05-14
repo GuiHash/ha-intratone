@@ -1,0 +1,68 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Pair with your Intratone apartment",
+        "description": "Open the official Intratone app → 'Mes infos' → 'Ajouter un appareil' to generate an invitation code (format: `448789-1206`).",
+        "data": {
+          "invite_code": "Invitation code"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-pair with Intratone",
+        "description": "Your Intratone credentials have expired. Generate a new invitation code in the official app and enter it below.",
+        "data": {
+          "invite_code": "Invitation code"
+        }
+      }
+    },
+    "error": {
+      "invalid_format": "Invalid format. Expected `XXXXXX-XXXX`.",
+      "invalid_code": "The invitation code was rejected by Intratone. Generate a fresh one and try again.",
+      "fcm_failed": "Could not register with Firebase Cloud Messaging. Check your internet connection.",
+      "auth_failed": "Could not authenticate with Intratone after registration.",
+      "unknown": "Unexpected error. Check the logs."
+    },
+    "abort": {
+      "already_configured": "This Intratone device is already configured.",
+      "reauth_successful": "Re-pairing successful."
+    }
+  },
+  "services": {
+    "simulate_ring": {
+      "name": "Simulate doorbell ring",
+      "description": "Inject a fake doorbell push for testing without the physical intercom.",
+      "fields": {
+        "door_name": {
+          "name": "Door name",
+          "description": "Human label shown on the event payload."
+        },
+        "call_id": {
+          "name": "Call ID",
+          "description": "Override the generated fake call_id."
+        },
+        "entry_id": {
+          "name": "Config entry ID",
+          "description": "Target a specific Intratone entry."
+        }
+      }
+    }
+  },
+  "entity": {
+    "event": {
+      "doorbell": {
+        "name": "Doorbell"
+      }
+    },
+    "camera": {
+      "intercom": {
+        "name": "Intercom"
+      }
+    },
+    "lock": {
+      "door": {
+        "name": "Door"
+      }
+    }
+  }
+}

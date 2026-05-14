@@ -1,0 +1,27 @@
+# Example HA dev config. Copy to dev_config/configuration.yaml and adjust:
+#
+#   mkdir -p dev_config
+#   cp dev_config.example.yaml dev_config/configuration.yaml
+#   ln -sfn ../custom_components dev_config/custom_components
+#   .venv/bin/hass -c dev_config
+#
+# After pairing the Intratone integration, replace <ID> below by the suffix
+# in the entity_ids you see (e.g. the numeric_id of your apartment).
+
+default_config:
+
+logger:
+  default: info
+  logs:
+    custom_components.intratone: debug
+    homeassistant.components.event: info
+
+homekit:
+  - filter:
+      include_entities:
+        - camera.intratone_<ID>_interphone
+        - event.intratone_<ID>_sonnette
+        - lock.intratone_<ID>_porte
+    entity_config:
+      camera.intratone_<ID>_interphone:
+        linked_doorbell_sensor: event.intratone_<ID>_sonnette

@@ -1,0 +1,68 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Coupler votre appartement Intratone",
+        "description": "Ouvrez l'application Intratone officielle → « Mes infos » → « Ajouter un appareil » pour générer un code d'invitation (format : `448789-1206`).",
+        "data": {
+          "invite_code": "Code d'invitation"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-coupler avec Intratone",
+        "description": "Vos identifiants Intratone ont expiré. Générez un nouveau code d'invitation dans l'application officielle et saisissez-le ci-dessous.",
+        "data": {
+          "invite_code": "Code d'invitation"
+        }
+      }
+    },
+    "error": {
+      "invalid_format": "Format invalide. Attendu : `XXXXXX-XXXX`.",
+      "invalid_code": "Le code d'invitation a été refusé par Intratone. Générez-en un nouveau et réessayez.",
+      "fcm_failed": "Impossible de s'enregistrer auprès de Firebase. Vérifiez votre connexion.",
+      "auth_failed": "Impossible de s'authentifier auprès d'Intratone après l'enregistrement.",
+      "unknown": "Erreur inattendue. Consultez les logs."
+    },
+    "abort": {
+      "already_configured": "Cet appareil Intratone est déjà configuré.",
+      "reauth_successful": "Re-couplage réussi."
+    }
+  },
+  "services": {
+    "simulate_ring": {
+      "name": "Simuler une sonnerie",
+      "description": "Injecte une fausse notification de sonnette pour tester sans l'intercom physique.",
+      "fields": {
+        "door_name": {
+          "name": "Nom de la porte",
+          "description": "Libellé affiché dans le payload de l'événement."
+        },
+        "call_id": {
+          "name": "ID d'appel",
+          "description": "Surcharge le call_id généré."
+        },
+        "entry_id": {
+          "name": "ID de configuration",
+          "description": "Cibler une entrée Intratone spécifique."
+        }
+      }
+    }
+  },
+  "entity": {
+    "event": {
+      "doorbell": {
+        "name": "Sonnette"
+      }
+    },
+    "camera": {
+      "intercom": {
+        "name": "Interphone"
+      }
+    },
+    "lock": {
+      "door": {
+        "name": "Porte"
+      }
+    }
+  }
+}

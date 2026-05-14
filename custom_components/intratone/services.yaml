@@ -1,0 +1,26 @@
+simulate_ring:
+  name: Simulate doorbell ring
+  description: >
+    Inject a fake FCM doorbell push into the coordinator to test the event /
+    HomeKit / automation flow without needing the physical intercom to ring.
+    Note: the resulting "Open door" call will hit the real Intratone API
+    with a fake call_id and will fail — useful only for the ring trigger.
+  fields:
+    door_name:
+      name: Door name
+      description: Human label shown on the event payload.
+      example: "PORTE RUE"
+      default: "PORTE TEST"
+      selector:
+        text:
+    call_id:
+      name: Call ID
+      description: Override the generated fake call_id (for repeatable tests).
+      example: "sim-42"
+      selector:
+        text:
+    entry_id:
+      name: Config entry ID
+      description: Target a specific Intratone entry. Defaults to all loaded entries.
+      selector:
+        text:

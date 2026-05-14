@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Local creds (CLI script artifact, never commit)
+intratone_credentials.json
+
+# Conductor
+.context/
+
+# Local dev HA config — entire dir gitignored (runtime DB/cache + user-specific
+# entity IDs may leak personal data e.g. phone numbers). Copy
+# dev_config.example.yaml → dev_config/configuration.yaml to bootstrap.
+dev_config/
