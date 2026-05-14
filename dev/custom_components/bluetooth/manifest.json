@@ -1,0 +1,9 @@
+{
+  "domain": "bluetooth",
+  "name": "Bluetooth (stub for macOS dev)",
+  "codeowners": [],
+  "documentation": "https://www.home-assistant.io/integrations/bluetooth",
+  "iot_class": "local_push",
+  "requirements": [],
+  "version": "0.0.1"
+}

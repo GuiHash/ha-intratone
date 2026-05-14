@@ -1,0 +1,32 @@
+# HomeKit audio spike — Phase 2 prerequisite.
+# Minimal config to avoid macOS-specific crashes (bluetooth, etc.).
+
+# Core only, no default_config (bluetooth on macOS makes the process die).
+frontend:
+api:
+config:
+http:
+person:
+auth:
+zeroconf:
+
+logger:
+  default: info
+  logs:
+    homeassistant.components.homekit: debug
+    homeassistant.components.ffmpeg: debug
+
+camera:
+  - platform: ffmpeg
+    name: fake_doorbell
+    input: -rtsp_transport tcp -i rtsp://127.0.0.1:8554/fake_doorbell
+
+homekit:
+  - name: HA Spike Bridge
+    port: 21065
+    filter:
+      include_entities:
+        - camera.fake_doorbell
+    entity_config:
+      camera.fake_doorbell:
+        support_audio: true
