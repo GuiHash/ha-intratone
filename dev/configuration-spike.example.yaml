@@ -1,7 +1,8 @@
 # Phase 2 dev configuration.
 #
 # Minimal config (no `default_config:` — `bluetooth` makes macOS' TCC kill the
-# Python process; the `dev/custom_components/bluetooth/` stub handles the rest).
+# Python process; the `dev/ha_overrides/bluetooth/` stub handles the rest —
+# kept outside `custom_components/` so hassfest doesn't try to validate it).
 #
 # Hosts:
 #   - HA Spike Bridge: fake_doorbell from go2rtc (audio path regression test)

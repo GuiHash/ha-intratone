@@ -29,7 +29,7 @@ fi
 
 # 2. Set up dev_config (preserves .storage/ pairing data across reruns)
 mkdir -p dev_config/custom_components
-ln -sfn ../../dev/custom_components/bluetooth dev_config/custom_components/bluetooth
+ln -sfn ../../dev/ha_overrides/bluetooth dev_config/custom_components/bluetooth
 ln -sfn ../../custom_components/intratone dev_config/custom_components/intratone
 
 if [ ! -f dev_config/configuration.yaml ]; then

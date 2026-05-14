@@ -9,7 +9,7 @@ spikes. Files here are gitignored counterparts under `dev_config/` and
 
 | Path | Purpose |
 |---|---|
-| `custom_components/bluetooth/` | No-op stub that overrides HA's core `bluetooth` integration **only in dev_config/**. macOS' TCC SIGKILLs any Python process that touches Core Bluetooth without `NSBluetoothAlwaysUsageDescription` in its Info.plist, which `hass` from a venv doesn't have. The stub prevents the auto-load crash. **Never ship this** under the project-root `custom_components/` — that would break real Linux/HA OS installs. |
+| `ha_overrides/bluetooth/` | No-op stub that overrides HA's core `bluetooth` integration **only in dev_config/**. macOS' TCC SIGKILLs any Python process that touches Core Bluetooth without `NSBluetoothAlwaysUsageDescription` in its Info.plist, which `hass` from a venv doesn't have. The stub prevents the auto-load crash. **Never ship this** under the project-root `custom_components/` — that would break real Linux/HA OS installs. |
 | `go2rtc.yaml` | Mock RTSP server config used by the HomeKit one-way audio spike. Generates `sine 440Hz + smptebars` at `rtsp://127.0.0.1:8554/fake_doorbell`. |
 | `configuration-spike.example.yaml` | Minimal HA config for the spike (camera.ffmpeg + homekit bridge with `support_audio: true`). Copied to `dev_config/configuration.yaml` on first run if missing. |
 | `spike-up.sh` | Idempotent launcher: downloads `go2rtc` binary if needed, sets up symlinks, starts go2rtc + HA detached. |
