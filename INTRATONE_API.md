@@ -1,0 +1,408 @@
+# Intratone API — Reverse Engineering Notes
+
+Reverse-engineered from APK `com.cogelec.notificationpush` (v4.6.3) and live
+traffic analysis. Goal: build a virtual device (e.g. Home Assistant integration)
+that receives doorbell push notifications, answers SIP calls, and opens doors
+without a physical phone.
+
+---
+
+## 1. Architecture
+
+```mermaid
+flowchart TD
+    phone[Intratone<br/>phone app]
+    rest[Intratone REST<br/>sip.intratone.info]
+    sched[Intratone push<br/>scheduler]
+    bell[Cogelec doorbell<br/>in building]
+    fcm[Google FCM/MCS<br/>mtalk.google.com]
+    client[Your client<br/>firebase-msg +<br/>SIP UAC]
+    pbx[SIP PBX<br/>Asterisk]
+    door([door unlocked])
+
+    phone -- "invite code<br/>register device" --> rest
+    rest -- "POST /registercodes<br/>(id_fcm = FCM token)" --> sched
+    bell -- "ring event" --> sched
+    sched -- "FCM data push<br/>via Firebase" --> fcm
+    fcm -- "MCS push (TCP 5228)" --> client
+    client -- "SIP INVITE" --> pbx
+    pbx -- "200 OK + SDP" --> client
+    client <-. "RTP audio" .-> pbx
+    client -- "POST /calls/{id}/answer" --> door
+```
+
+Three protocols are involved:
+
+| Protocol     | Purpose                                       | Endpoint                       |
+| ------------ | --------------------------------------------- | ------------------------------ |
+| HTTPS REST   | Device registration, JWT auth, door commands  | `sip.intratone.info`           |
+| FCM / MCS    | Doorbell push notification                    | `mtalk.google.com:5228` (TLS)  |
+| SIP/UDP+RTP  | Voice (intercom audio)                        | `178.32.84.135:5060`           |
+
+---
+
+## 2. Firebase / FCM configuration
+
+Extracted from `strings.xml` and `google-services.json` in the APK:
+
+| Key                | Value                                              |
+| ------------------ | -------------------------------------------------- |
+| `project_id`       | `android-ipvideo-studio`                           |
+| `app_id`           | `1:676502914290:android:5393f05ec7f22bd6`          |
+| `api_key`          | `AIzaSyB7RtCyt6LZWMruWKj7Z_9Ii7_VAIVdSKU`          |
+| `messaging_sender_id` | `676502914290`                                  |
+| `package_name`     | `com.cogelec.notificationpush`                     |
+| `cert_sha1`        | `353F1762E3AE0B2DD83DC74D282BA77EC6A934D4`         |
+
+**Important**: the `bundle_id` passed to FCM registration MUST be
+`com.cogelec.notificationpush`. Using anything else (e.g. `org.chromium.linux`
+or the default `receiver.push.com`) yields a token Intratone won't push to.
+
+---
+
+## 3. Receiving FCM pushes without an Android device
+
+Standard approach: use Google's MCS protocol (the same TCP socket Google Play
+Services maintains on real devices) to receive FCM data messages bound to a
+specific `(android_id, FCM token)` pair.
+
+**Don't roll your own MCS client.** Use [`firebase-messaging`][fbmsg] (Python)
+or [`push-receiver`][pr] (Node). They handle:
+
+- Firebase Installation Service (FIS) registration
+- GCM check-in (`android.clients.google.com/checkin`) — gets `android_id` + `security_token`
+- FCM token registration (`fcmregistrations.googleapis.com` or legacy `iid/register`)
+- MCS LoginRequest with the correct proto field numbers (#1 `id`, #2 `domain`,
+  #3 `user`, #4 `resource`, #5 `auth_token`, #6 `device_id="android-{hex}"`,
+  #13 `use_rmq2=true`, #15 `auth_service=ANDROID_ID`)
+- Heartbeats (client-initiated every 5 min by default)
+- `persistent_id` tracking + selective ACKs (without this Google stops sending
+  new pushes after a few queued messages)
+
+[fbmsg]: https://pypi.org/project/firebase-messaging/
+[pr]: https://github.com/MatthieuLemoine/push-receiver
+
+### Minimal Python example
+
+```python
+from firebase_messaging import FcmPushClient, FcmRegisterConfig
+
+config = FcmRegisterConfig(
+    project_id="android-ipvideo-studio",
+    app_id="1:676502914290:android:5393f05ec7f22bd6",
+    api_key="AIzaSyB7RtCyt6LZWMruWKj7Z_9Ii7_VAIVdSKU",
+    messaging_sender_id="676502914290",
+    bundle_id="com.cogelec.notificationpush",
+)
+
+def on_push(notification, persistent_id, ctx):
+    data = notification["data"]          # <- payload is nested here
+    print("LOGIN_TO_CALL =", data["LOGIN_TO_CALL"])
+    print("call_id       =", data["call_id"])
+
+client = FcmPushClient(on_push, config,
+                       credentials=saved_creds_or_None,
+                       credentials_updated_callback=persist_creds)
+fcm_token = await client.checkin_or_register()   # pass to Intratone /registercodes
+await client.start()
+```
+
+### Credentials persistence
+
+`firebase-messaging` returns a dict with this shape; persist it as JSON and
+pass it back on next run to avoid re-registering:
+
+```jsonc
+{
+  "keys":  { "private": "...", "public": "...", "secret": "...", "authSecret": "..." },
+  "gcm":   { "android_id": 5042706006057121824, "security_token": ..., "token": "AC..." },
+  "fcm":   { "installation": { ... }, "registration": { "token": "cCuan7vQLHKC-..." } }
+}
+```
+
+The FCM token (`fcm.registration.token`) is what Intratone needs.
+
+---
+
+## 4. Intratone REST API
+
+Base URL: `https://sip.intratone.info/`
+
+All POST endpoints use `application/x-www-form-urlencoded` (NOT JSON).
+Authenticated endpoints expect `Authorization: Bearer <JWT>`.
+
+### App credentials (hardcoded in APK)
+
+```
+app_id    = app_apisip_android
+app_token = >KompY95?oijeIKR8049?OLysIekjpceKejLAHhh
+```
+
+### 4.1 — `POST /api/auth/registercodes`  (Invite-code registration)
+
+Register a new virtual device on an existing apartment using an invite code
+generated in the official app (Mes infos → Ajouter un appareil → format
+`448789 - 1206`).
+
+Body fields:
+
+| field                  | value                                |
+| ---------------------- | ------------------------------------ |
+| `app_id`               | `app_apisip_android`                 |
+| `app_token`            | (constant above)                     |
+| `code`                 | first part of invite code (`448789`) |
+| `codepass`             | second part (`1206`)                 |
+| `os`                   | `android`                            |
+| `osv`                  | `29`                                 |
+| `model`                | any string (`HA-Bridge`)             |
+| `manufacturer`         | any string                           |
+| `device_id`            | your stable client UUID              |
+| `description`          | any string                           |
+| `appversion`           | `4.6.3`                              |
+| `id_fcm`               | your FCM token                       |
+| `id_wonderpush`        | empty                                |
+| `pushkit_id`           | empty (iOS only)                     |
+| `bundleid`             | `com.cogelec.notificationpush`       |
+| `device_country`       | `FRA`                                |
+| `device_language`      | `fr`                                 |
+| `carrier_name`         | `Orange`                             |
+| `carrier_countrycode`  | `FR`                                 |
+| `carrier_countryiso`   | `fr`                                 |
+| `carrier_networkcode`  | `20801`                              |
+
+Response:
+```json
+{ "v": "1.5.0", "error": 0, "state": "ok",
+  "data": { "id": "3844428", "tel": "0671124546" } }
+```
+
+- `data.id` is the **numeric_id** (used as `smartphone_id` later)
+- `data.tel` is the phone number tied to the apartment
+
+### 4.2 — `POST /api/auth/device`  (Authenticate + JWT refresh)
+
+**This is also the JWT refresh endpoint.** Call it whenever your JWT is near
+expiry. No SMS or invite code needed because the `device_id` is persistent.
+
+Body:
+
+| field         | value                       |
+| ------------- | --------------------------- |
+| `app_id`      | `app_apisip_android`        |
+| `app_token`   | (constant)                  |
+| `tel`         | phone from registercodes    |
+| `device_id`   | same as registration        |
+| `appversion`  | `4.6.3`                     |
+
+Response:
+```json
+{ "v": "1.5.0", "error": 0, "state": "ok",
+  "data": {
+    "indicatif": "33",
+    "id": "3844428",
+    "tel": "0671124546",
+    "code": "-1",
+    "device_id": "ha-intratone-bridge-v1",
+    "device": "HA-Bridge",
+    "lift": 0, "floor": 0,
+    "jwt": "eyJhbGciOiJIUzUxMiJ9...",
+    "expire_at": "2026-05-21 10:34:00",
+    "expire_gmt_at": "2026-05-21 08:34:00",
+    "openingaccess": 0,
+    "access_refresh": 0
+  } }
+```
+
+### 4.3 — `POST /api/calls/{call_id}/answer`  (Open door)
+
+Triggers the relay that unlocks the door. Send this when you decide to "answer"
+an incoming call. Works while the call is active (typically 30s after the FCM
+push).
+
+Body:
+
+| field           | value                              |
+| --------------- | ---------------------------------- |
+| `smartphone_id` | the `numeric_id` from registration |
+
+Header: `Authorization: Bearer <JWT>`
+
+Response: `{ "error": 0, "state": "ok", ... }` → door opened.
+
+### 4.4 — Other endpoints
+
+| Method | Path                             | Purpose                                 |
+| ------ | -------------------------------- | --------------------------------------- |
+| GET    | `/api/access`                    | List remote-opening accesses ("Clé mobile") |
+| GET    | `/api/calls?page=1&limit=20`     | Recent call history                     |
+| POST   | `/api/access/open/clemobil`      | Open door without ringing (badge mobile, needs `phonenumber` + `access_id`) |
+| POST   | `/api/auth/verify`               | SMS-based registration: send SMS code   |
+| POST   | `/api/auth/register`             | SMS flow: register device (waits for code) |
+| POST   | `/api/auth/validate`             | SMS flow: validate received code        |
+
+---
+
+## 5. JWT structure
+
+`HS512`-signed, 7-day lifetime. Claims:
+
+```json
+{
+  "indicatif": "33",
+  "id": "3844428",
+  "tel": "0671124546",
+  "code": "-1",
+  "device_id": "ha-intratone-bridge-v1",
+  "device": "HA-Bridge",
+  "exp": 1779352440,
+  "iat": 1778747640,
+  "jti": "6a0588f813cf34.94237504",
+  "nbf": 1778747640
+}
+```
+
+### Refresh strategy
+
+Re-call `POST /api/auth/device` with `(app_id, app_token, tel, device_id, appversion)`
+whenever the JWT has < ~24h left. The endpoint always returns a fresh JWT
+without requiring the user to do anything. A daily cron-style refresh is safe.
+
+---
+
+## 6. FCM push payload (doorbell ring)
+
+What firebase-messaging delivers when the bell rings:
+
+```python
+{
+  "fcmMessageId": "0d434d98-bb44-4e42-8a1b-87401cfcffdb",
+  "from":         "676502914290",            # = messaging_sender_id
+  "priority":     "normal",
+  "data": {
+    "ip_adress":        "178.32.84.135",      # SIP server
+    "NOTIFICATION_UUID":"6a0593365af09",
+    "LOGIN_TO_CALL":    "2DO77UAO49XTGJ5Y93TFIZ8YLPIMXN36",  # SIP To: URI user part
+    "LOGIN":            "cogelecTest",        # SIP digest username
+    "PASS":             "CogeleC",            # SIP digest password
+    "TYPE":             "24",
+    "message":          "PORTE RUE",          # human-readable door name
+    "sound":            "fireman.mp3",
+    "nbcodes":          "1",
+    "DATE":             "1778750262000",      # epoch ms
+    "call_id":          "300705065",          # pass to /calls/{id}/answer
+    "lv":               "1",
+    "NBPORTE":          "2",
+    "codes":            "*"
+  }
+}
+```
+
+The interesting fields:
+
+| Field            | Use                                                          |
+| ---------------- | ------------------------------------------------------------ |
+| `LOGIN_TO_CALL`  | SIP target: `INVITE sip:<LOGIN_TO_CALL>@178.32.84.135`       |
+| `LOGIN`, `PASS`  | SIP Digest credentials (same for all users globally!)        |
+| `ip_adress`      | SIP proxy IP                                                 |
+| `call_id`        | Pass to `/api/calls/{id}/answer` to open the door            |
+| `message`        | Door name to show in the UI                                  |
+| `NBPORTE`        | Door index / position                                        |
+
+---
+
+## 7. SIP audio bridge
+
+The push only notifies; voice goes via SIP/RTP. The doorbell unit registers
+on `178.32.84.135:5060` as a SIP UA and is reachable by the `LOGIN_TO_CALL`
+URI user part. To get a two-way audio path, your client must send an INVITE.
+
+### SIP credentials
+
+**Global, hardcoded in the APK**, same for every Intratone customer:
+
+```
+username = cogelecTest
+password = CogeleC
+```
+
+Proxy-Authorization uses HTTP Digest (`MD5(HA1:nonce:HA2)`).
+
+### Flow
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant P as SIP PBX<br/>178.32.84.135:5060
+
+    C->>P: INVITE sip:LOGIN_TO_CALL@server
+    P-->>C: 407 Proxy-Auth-Required (realm, nonce)
+    C->>P: ACK
+    C->>P: INVITE (Proxy-Authorization: Digest ...)
+    P-->>C: 100 Trying / 180 Ringing
+    P-->>C: 200 OK + SDP (server RTP IP/port)
+    C->>P: ACK
+    Note over C,P: RTP G.711 (PCMU) bidirectional audio
+```
+
+SDP offer codecs: `PCMU/8000` (payload type 0) and `PCMA/8000` (payload type 8).
+The server's 200 OK contains the `c=IN IP4 <ip>` and `m=audio <port>` of its
+RTP endpoint — you receive incoming audio there and send your microphone
+audio back to that endpoint on the symmetric port.
+
+The local RTP port advertised in the offer SDP must actually be open and
+listening on the client side.
+
+---
+
+## 8. End-to-end flow
+
+### When the doorbell rings
+
+1. **FCM push arrives** with `LOGIN_TO_CALL`, `call_id`, `LOGIN`, `PASS`.
+2. **(Optional) SIP INVITE** to `sip:<LOGIN_TO_CALL>@178.32.84.135` with
+   Digest auth `cogelecTest:CogeleC`. Bridge the resulting RTP stream
+   (e.g. into go2rtc / Home Assistant camera).
+3. **To open the door**: `POST /api/calls/{call_id}/answer` with
+   `smartphone_id=<numeric_id>` and the current JWT.
+
+### Maintenance
+
+| Task                            | Trigger                                                |
+| ------------------------------- | ------------------------------------------------------ |
+| Refresh JWT                     | Daily, or on first 401 response                        |
+| Re-register FCM token w/ Intratone | Only if you regenerate FCM credentials (re-run `/registercodes` with a new invite code) |
+| Re-checkin GCM (refresh `security_token`) | Handled automatically by firebase-messaging  |
+
+---
+
+## 9. Gotchas & lessons learned
+
+1. **Don't write your own MCS client.** It works for the LoginResponse but
+   Google silently stops delivering pushes if you miss any of: correct proto
+   field numbers (especially `device_id` as string `"android-{hex}"` in field 6,
+   not the int64 in field 9 which is `compress`), `use_rmq2=true`,
+   `auth_service=ANDROID_ID`, or selective ACKs of `persistent_id`s.
+
+2. **FCM token must be bound to `bundle_id=com.cogelec.notificationpush`.**
+   Tokens registered as Chrome (`org.chromium.linux`) won't receive Intratone
+   pushes even if `messaging_sender_id` is correct, because Intratone targets
+   the app's specific token.
+
+3. **Re-running `/registercodes` creates a NEW device** on the apartment. The
+   old one stays registered (and keeps receiving pushes) until removed in the
+   official app. Each invite code is single-use.
+
+4. **FCM payload data is nested.** `notification["data"]["call_id"]`, not
+   `notification["call_id"]`.
+
+5. **SIP digest creds are global** (`cogelecTest`/`CogeleC`). Authentication
+   to a *specific* doorbell unit is done via the per-call `LOGIN_TO_CALL`
+   identifier in the request URI, not via per-user SIP creds.
+
+6. **JWT refresh = re-auth.** There's no dedicated `/refresh` endpoint;
+   `/api/auth/device` returns a fresh JWT every time as long as
+   `(tel, device_id)` is still registered.
+
+7. **`openingaccess: 0` in the JWT** doesn't prevent opening the door via
+   `/calls/{id}/answer`. It controls only the "Clé mobile" badge-style open
+   (the `/api/access/open/clemobil` endpoint).

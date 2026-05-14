@@ -1,0 +1,13 @@
+{
+  "domain": "intratone",
+  "name": "Intratone Doorbell",
+  "version": "0.1.0",
+  "config_flow": true,
+  "iot_class": "cloud_push",
+  "documentation": "https://github.com/guihash/hacs-intratone",
+  "issue_tracker": "https://github.com/guihash/hacs-intratone/issues",
+  "codeowners": ["@guihash"],
+  "requirements": ["firebase-messaging>=0.4.0"],
+  "dependencies": ["camera", "event", "lock"],
+  "integration_type": "device"
+}
