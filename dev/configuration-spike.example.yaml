@@ -1,0 +1,47 @@
+# Phase 2 dev configuration.
+#
+# Minimal config (no `default_config:` — `bluetooth` makes macOS' TCC kill the
+# Python process; the `dev/ha_overrides/bluetooth/` stub handles the rest —
+# kept outside `custom_components/` so hassfest doesn't try to validate it).
+#
+# Hosts:
+#   - HA Spike Bridge: fake_doorbell from go2rtc (audio path regression test)
+#   - Intratone entities: uncomment after adding the integration and replace
+#     REPLACEME with the apartment numeric_id (data.id from /registercodes,
+#     visible in entity_ids in HA dev).
+
+frontend:
+api:
+config:
+http:
+person:
+auth:
+zeroconf:
+
+logger:
+  default: info
+  logs:
+    homeassistant.components.homekit: debug
+    homeassistant.components.ffmpeg: debug
+    custom_components.intratone: debug
+
+camera:
+  - platform: ffmpeg
+    name: fake_doorbell
+    input: -rtsp_transport tcp -i rtsp://127.0.0.1:8554/fake_doorbell
+
+homekit:
+  - name: HA Spike Bridge
+    port: 21065
+    filter:
+      include_entities:
+        - camera.fake_doorbell
+        # - camera.intratone_REPLACEME_interphone
+        # - event.intratone_REPLACEME_sonnette
+        # - lock.intratone_REPLACEME_porte
+    entity_config:
+      camera.fake_doorbell:
+        support_audio: true
+      # camera.intratone_REPLACEME_interphone:
+      #   support_audio: true
+      #   linked_doorbell_sensor: event.intratone_REPLACEME_sonnette

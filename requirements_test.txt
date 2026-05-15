@@ -1,5 +1,8 @@
 pytest-homeassistant-custom-component
 aioresponses
 firebase-messaging>=0.4.0
+# Imported in custom_components/intratone/sip_client.py for the SipMessage
+# parser + RTP info helper — not a transitive dep of HA core.
+voip-utils>=0.3.0
 # HA's camera component imports turbojpeg unconditionally → required for tests.
 PyTurboJPEG

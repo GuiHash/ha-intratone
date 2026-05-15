@@ -23,8 +23,11 @@ jobs:
           cache: pip
           cache-dependency-path: requirements_test.txt
 
-      - name: Install system dependency (libturbojpeg)
-        run: sudo apt-get update && sudo apt-get install -y libturbojpeg0-dev
+      - name: Install system dependencies
+        # libturbojpeg: HA's camera component imports turbojpeg unconditionally.
+        # libopus0:     voip-utils imports opuslib which dlopen()s the native
+        #               libopus C library at module import time.
+        run: sudo apt-get update && sudo apt-get install -y libturbojpeg0-dev libopus0
 
       - name: Install Python dependencies
         run: |

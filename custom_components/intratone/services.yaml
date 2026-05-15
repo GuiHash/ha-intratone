@@ -1,10 +1,11 @@
 simulate_ring:
   name: Simulate doorbell ring
   description: >
-    Inject a fake FCM doorbell push into the coordinator to test the event /
-    HomeKit / automation flow without needing the physical intercom to ring.
-    Note: the resulting "Open door" call will hit the real Intratone API
-    with a fake call_id and will fail — useful only for the ring trigger.
+    Inject a fake FCM doorbell push into the coordinator. By default this only
+    fires the ring event (so the open-door REST call would fail since the
+    call_id is fake). If you also fill in `sip_server_ip`, the full SIP flow
+    fires — pair with `dev/mock_asterisk.py` running on 127.0.0.1 for full
+    end-to-end testing without the physical intercom.
   fields:
     door_name:
       name: Door name
@@ -22,5 +23,32 @@ simulate_ring:
     entry_id:
       name: Config entry ID
       description: Target a specific Intratone entry. Defaults to all loaded entries.
+      selector:
+        text:
+    sip_server_ip:
+      name: SIP server IP (mock)
+      description: >
+        When set, the coordinator triggers a real SIP INVITE to this IP
+        instead of skipping the SIP path. Use `127.0.0.1` with `dev/mock_asterisk.py`.
+      example: "127.0.0.1"
+      selector:
+        text:
+    sip_target_user:
+      name: SIP target user (LOGIN_TO_CALL)
+      description: User part of the INVITE Request-URI.
+      default: "MOCK"
+      example: "MOCK"
+      selector:
+        text:
+    sip_user:
+      name: SIP Digest username
+      description: Username for the optional Digest auth challenge.
+      default: "cogelecTest"
+      selector:
+        text:
+    sip_pass:
+      name: SIP Digest password
+      description: Password for the optional Digest auth challenge.
+      default: "CogeleC"
       selector:
         text:

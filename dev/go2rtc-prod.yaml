@@ -1,0 +1,11 @@
+# Minimal go2rtc config for Phase 2 audio relay.
+# Stream pre-declared as empty so go2rtc accepts incoming RTSP PUBLISH on it.
+
+api:
+  listen: "127.0.0.1:1984"
+
+rtsp:
+  listen: "127.0.0.1:8554"
+
+streams:
+  intratone: ""

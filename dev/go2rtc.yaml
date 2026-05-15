@@ -1,0 +1,18 @@
+# Mock doorbell RTSP server for HomeKit audio spike.
+# Generates a continuous 440Hz sine wave (audio) + color-bars test pattern (video)
+# and exposes it as rtsp://127.0.0.1:8554/fake_doorbell
+
+api:
+  listen: ":1984"
+
+rtsp:
+  listen: ":8554"
+
+streams:
+  fake_doorbell:
+    - exec:ffmpeg -hide_banner -loglevel warning -re
+        -f lavfi -i sine=frequency=440:sample_rate=48000
+        -f lavfi -i smptebars=size=640x480:rate=15
+        -map 1:v -c:v libx264 -tune zerolatency -pix_fmt yuv420p -profile:v baseline -level 3.1 -g 30
+        -map 0:a -c:a libopus -b:a 64k -ar 48000 -ac 1
+        -f rtsp -rtsp_transport tcp {output}

@@ -54,3 +54,28 @@ def mock_fcm_client():
     with patch("firebase_messaging.FcmPushClient", return_value=client) as cls:
         cls.instance = client
         yield cls
+
+
+@pytest.fixture
+def mock_call_manager():
+    """Patch CallManager so async_setup_entry can run without binding a UDP socket.
+
+    pytest-socket blocks real socket creation in the suite. Returns the
+    MagicMock so tests can assert on start_call / hang_up if they want.
+    """
+    cm = MagicMock()
+    cm.async_start = AsyncMock()
+    cm.async_stop = AsyncMock()
+    cm.start_call = AsyncMock(return_value="fake-call-id")
+    cm.hang_up = AsyncMock()
+    with (
+        patch(
+            "custom_components.intratone.CallManager", return_value=cm
+        ) as cm_cls,
+        patch(
+            "custom_components.intratone.async_get_source_ip",
+            new=AsyncMock(return_value="192.0.2.10"),
+        ),
+    ):
+        cm_cls.instance = cm
+        yield cm_cls

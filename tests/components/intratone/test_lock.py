@@ -17,8 +17,14 @@ def aiomock():
 
 
 async def test_unlock_calls_open_door_and_reverts(
-    hass, mock_entry, mock_fcm_client, aiomock
+    hass, mock_entry, mock_fcm_client, mock_call_manager, aiomock
 ) -> None:
+    """End-to-end: ring → tap Unlock → /answer fires (lazy SIP) → SIP MESSAGE.
+
+    With the deferred-INVITE refactor, `/answer` is no longer called at
+    push time. It fires only when the user actually interacts — either by
+    opening live view OR by tapping Unlock. This test exercises the
+    Unlock-first path."""
     mock_entry.add_to_hass(hass)
     aiomock.post(
         f"{API_BASE}api/auth/device",
@@ -33,11 +39,16 @@ async def test_unlock_calls_open_door_and_reverts(
     assert await hass.config_entries.async_setup(mock_entry.entry_id)
     await hass.async_block_till_done()
 
-    # Trigger a ring so the coordinator has a call_id to answer.
+    # Trigger a ring WITH SIP creds so the coordinator parks a pending
+    # invite (the only path that exercises /answer via lazy SIP).
     await hass.services.async_call(
         DOMAIN,
         "simulate_ring",
-        {"call_id": "sim-test", "door_name": "PORTE RUE"},
+        {
+            "call_id": "sim-test",
+            "door_name": "PORTE RUE",
+            "sip_server_ip": "1.2.3.4",
+        },
         blocking=True,
     )
     await hass.async_block_till_done()
@@ -49,11 +60,18 @@ async def test_unlock_calls_open_door_and_reverts(
     assert lock_eid is not None
     assert hass.states.get(lock_eid).state == LockState.LOCKED
 
-    await hass.services.async_call(
-        "lock", "unlock", {"entity_id": lock_eid}, blocking=True
-    )
+    # Patch the bridge readiness timeout down to a tick so the test doesn't
+    # spend 5s waiting for the mocked CallManager that never fires
+    # `set_stream_url`.
+    from custom_components.intratone import coordinator as coord_mod
+    from unittest.mock import patch
 
-    # The answer endpoint was called.
+    with patch.object(coord_mod, "_STREAM_READY_TIMEOUT_S", 0.05):
+        await hass.services.async_call(
+            "lock", "unlock", {"entity_id": lock_eid}, blocking=True
+        )
+
+    # /answer fired as part of the lazy-INVITE path.
     answer_url = f"{API_BASE}api/calls/sim-test/answer"
     matching = [
         c for key, calls in aiomock.requests.items()

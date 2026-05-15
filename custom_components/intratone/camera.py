@@ -1,7 +1,9 @@
-"""Static-image camera for the Intratone intercom (Phase 1).
+"""Camera entity for the Intratone intercom.
 
-Phase 2 will add `stream_source` for one-way audio. Phase 3 will enable
-two-way audio via `support_audio: true` in the HomeKit Bridge config.
+Phase 2: returns the audio-only RTSP URL exposed by `AudioBridge` when a
+SIP call is active, so HomeKit Bridge (with `support_audio: true`) plays
+visitor audio. Outside of an active call, `stream_source` returns None so
+HomeKit falls back to the still-image placeholder.
 """
 
 from __future__ import annotations
@@ -9,7 +11,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from homeassistant.components.camera import Camera
+from homeassistant.components.camera import Camera, CameraEntityFeature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -30,19 +32,33 @@ async def async_setup_entry(
 
 
 class IntratoneCamera(IntratoneEntity, Camera):
-    """Image-only camera placeholder.
-
-    No `CameraEntityFeature.STREAM` — exposing a `stream_source` that
-    points at a non-existent RTSP would break the HomeKit Bridge tile.
-    """
+    """Doorbell camera. Audio stream only during active calls."""
 
     _attr_translation_key = "intercom"
+    _attr_supported_features = CameraEntityFeature.STREAM
 
     def __init__(self, coordinator) -> None:
         IntratoneEntity.__init__(self, coordinator)
         Camera.__init__(self)
         self._attr_unique_id = f"{coordinator.entry.entry_id}_camera"
         self._cached_image: bytes | None = None
+
+    async def stream_source(self) -> str | None:
+        if self.coordinator.data is None:
+            return None
+        # Lazy SIP: HomeKit asking for the stream IS the "user picked up"
+        # signal. Trigger the INVITE now (if not already), then wait for
+        # the audio bridge to come up before handing HomeKit the URL.
+        await self.coordinator.async_ensure_call_started()
+        url = await self.coordinator.async_wait_for_stream()
+        if not url:
+            return None
+        # HomeKit Bridge spawns ffmpeg with our URL as the input. go2rtc's
+        # RTSP server rejects UDP transport on SETUP (461 Unsupported
+        # transport), so we force TCP by returning a fully-formed `-i` arg
+        # — homekit/type_cameras.py preserves it verbatim when it starts
+        # with `-i `.
+        return f"-rtsp_transport tcp -i {url}"
 
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None
