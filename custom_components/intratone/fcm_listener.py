@@ -30,6 +30,10 @@ _LOGGER = logging.getLogger(__name__)
 
 BACKOFF_INITIAL_S = 5
 BACKOFF_MAX_S = 300
+# How often the supervisor polls the underlying FcmPushClient run state.
+# The library shuts itself down after 3 sequential connection errors and
+# does NOT raise — we have to inspect run_state to notice and reconnect.
+HEALTHCHECK_INTERVAL_S = 30
 
 
 def _fcm_config():
@@ -128,6 +132,7 @@ class FcmListener:
 
     async def _run_once(self) -> None:
         from firebase_messaging import FcmPushClient
+        from firebase_messaging.fcmpushclient import FcmPushClientRunState
 
         creds = self._entry.data.get(CONF_FCM_CREDS)
 
@@ -147,8 +152,17 @@ class FcmListener:
         await self._client.checkin_or_register()
         await self._client.start()
 
+        # Poll the client's run_state. The library's _listen task swallows
+        # connection errors and after 3 in a row sets run_state=STOPPED
+        # without raising — without this check the supervisor would sleep
+        # forever and pushes would be silently dropped.
         while not self._stopping:
-            await asyncio.sleep(60)
+            await asyncio.sleep(HEALTHCHECK_INTERVAL_S)
+            state = getattr(self._client, "run_state", None)
+            if state == FcmPushClientRunState.STOPPED:
+                raise RuntimeError(
+                    "FcmPushClient stopped itself (likely connection errors)"
+                )
 
     @callback
     def _persist_creds(self, new_creds: dict) -> None:

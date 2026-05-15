@@ -235,6 +235,31 @@ async def test_async_stop_is_idempotent(manager, fake_bridge):
     await manager.async_stop()  # Must not raise.
 
 
+async def test_max_call_duration_forces_teardown(manager, fake_bridge, ended_calls):
+    """A call that never receives BYE is auto-terminated after the cap so
+    the next ring isn't silently dropped by the `already active` guard."""
+    from custom_components.intratone import call_manager as cm_mod
+
+    call_id = await manager.start_call(TARGET_URI, SERVER_IP, SIP_USER, SIP_PASS)
+    assert call_id is not None
+    sip_client = manager._sip_client
+    sip_client._calls[call_id].state = sip_client._calls[call_id].state.CONFIRMED
+
+    with patch.object(cm_mod, "_MAX_CALL_DURATION_S", 0.01):
+        # Re-arm the task with the patched delay.
+        if manager._max_duration_task is not None:
+            manager._max_duration_task.cancel()
+        manager._max_duration_task = asyncio.create_task(
+            manager._auto_terminate_after(call_id, 0.01)
+        )
+        await asyncio.sleep(0.05)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    assert manager.active_call_id is None
+    assert ended_calls == [call_id]
+
+
 # --- socket binder --------------------------------------------------------
 
 

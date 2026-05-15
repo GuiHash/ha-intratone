@@ -36,6 +36,11 @@ from .sip_client import CallEstablished, IntratoneSipClient
 _LOGGER = logging.getLogger(__name__)
 
 _RTP_PORT_RANGE = range(16384, 16484, 2)  # even ports (RTP convention)
+# Intratone doorbell calls don't last more than ~30 s in real life; if we never
+# see a BYE the call is wedged (e.g. ghost from a stale `simulate_ring` or a
+# missed Asterisk teardown). Hard-stop after this so the next ring isn't
+# blocked by the "Call already active" guard in `start_call`.
+_MAX_CALL_DURATION_S = 120
 
 
 def _bind_rtp_socket() -> socket.socket:
@@ -83,6 +88,7 @@ class CallManager:
         # Sockets held from start_call until handed to AudioBridge in
         # _spawn_bridge. Closed on hang_up if the call never reaches CONFIRMED.
         self._pending_rtp_sockets: dict[str, socket.socket] = {}
+        self._max_duration_task: asyncio.Task | None = None
 
     @property
     def is_running(self) -> bool:
@@ -160,6 +166,12 @@ class CallManager:
             raise
         self._active_call_id = call_id
         self._pending_rtp_sockets[call_id] = rtp_socket
+        # Defensive max-duration timer: if no BYE arrives within N seconds we
+        # tear the call down ourselves. Without this a missed teardown leaves
+        # `_active_call_id` set and the next ring is silently dropped.
+        self._max_duration_task = asyncio.create_task(
+            self._auto_terminate_after(call_id, _MAX_CALL_DURATION_S)
+        )
         _LOGGER.info(
             "Outgoing SIP INVITE: call_id=%s target=%s local_rtp_port=%d",
             call_id,
@@ -167,6 +179,19 @@ class CallManager:
             rtp_port,
         )
         return call_id
+
+    async def _auto_terminate_after(self, call_id: str, delay_s: float) -> None:
+        try:
+            await asyncio.sleep(delay_s)
+        except asyncio.CancelledError:
+            return
+        if self._active_call_id != call_id:
+            return
+        _LOGGER.warning(
+            "Call %s exceeded %ds without BYE — forcing teardown", call_id, delay_s
+        )
+        if self._sip_client is not None:
+            self._sip_client.hang_up(call_id)
 
     async def hang_up(self) -> None:
         """End the active call (user accepted via door open, or explicit hangup)."""
@@ -190,6 +215,9 @@ class CallManager:
         if call_id != self._active_call_id:
             return
         self._active_call_id = None
+        if self._max_duration_task is not None and not self._max_duration_task.done():
+            self._max_duration_task.cancel()
+        self._max_duration_task = None
         # If the call never reached CONFIRMED, the RTP socket was bound but
         # never handed to AudioBridge — close it here to avoid a leak.
         leftover_socket = self._pending_rtp_sockets.pop(call_id, None)
