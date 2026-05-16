@@ -1,10 +1,19 @@
-"""Push-driven coordinator for Intratone doorbell calls."""
+"""Push-driven coordinator for Intratone doorbell calls.
+
+The SIP INVITE is **deferred** until the user actually interacts (taps live
+view in HomeKit, or taps Unlock). This matches the Cogelec Android app, which
+launches `NotificationCallActivity` (UI only, no SIP) on FCM push and only
+fires the INVITE when the user taps "Pick Up" in `CallActivity`. Doing it
+this way means the doorbell hardware's ~19s call timeout doesn't start
+ticking while the user is still racing to see the HomeKit notification.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -19,6 +28,11 @@ if TYPE_CHECKING:
     from .rest_api import IntratoneAPI
 
 _LOGGER = logging.getLogger(__name__)
+
+# How long to wait for the audio bridge to come up after triggering the lazy
+# INVITE. Includes TCP connect, INVITE → 200 OK round-trip, and ffmpeg spawn
+# / first RTP frame. Real-world setups land in 1-2s; allow 5s slack.
+_STREAM_READY_TIMEOUT_S = 5.0
 
 
 @dataclass
@@ -37,6 +51,28 @@ class CallState:
     received_at: datetime
     ring_seq: int
     stream_url: str | None = None
+    # DTMF-like code from the FCM `codes` field — passed to `opendoor:<code>`
+    # in the in-dialog SIP MESSAGE that actually triggers the relay. Defaults
+    # to `*` (the most common Intratone setup).
+    door_code: str = "*"
+
+
+@dataclass
+class _PendingInvite:
+    """SIP/REST credentials parked at FCM push time, used when the user
+    actually interacts. Mirrors what `NotificationCallActivity` would have
+    in its Intent extras until the user taps Pick Up."""
+
+    fcm_call_id: str
+    target_uri: str
+    target_host: str
+    sip_username: str
+    sip_password: str
+    started: bool = False
+    answer_called: bool = False
+    # Set when the audio bridge is up and `stream_url` is on `CallState`.
+    # Camera/Lock entities await this before talking to HomeKit.
+    stream_ready: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class IntratoneCoordinator(DataUpdateCoordinator[CallState | None]):
@@ -63,21 +99,22 @@ class IntratoneCoordinator(DataUpdateCoordinator[CallState | None]):
         # for the SIP dialog). We remember the SIP one here so the audio
         # bridge's on_call_active callback can match its arg against ours.
         self._active_sip_call_id: str | None = None
+        self._pending: _PendingInvite | None = None
 
     def attach_call_manager(self, call_manager: CallManager) -> None:
-        """Wire the SIP/audio orchestrator in after construction.
-
-        Done after construction so the call_manager can take a reference to
-        coordinator callbacks without a circular import.
-        """
+        """Wire the SIP/audio orchestrator in after construction."""
         self._call_manager = call_manager
 
     async def _async_update_data(self) -> CallState | None:
-        # No periodic refresh; coordinator data is set by async_handle_push.
         return self.data
 
     async def async_handle_push(self, payload: dict) -> None:
-        """Convert an FCM payload into a CallState and start the SIP call."""
+        """FCM push handler.
+
+        Stores SIP creds + fires the HomeKit doorbell event so the iPhone
+        rings. Does NOT open the SIP dialog — that happens lazily when the
+        user taps live view or Unlock.
+        """
         call_id = payload.get("call_id")
         if not call_id:
             _LOGGER.debug("Push without call_id, ignoring: %s", _redact(payload))
@@ -90,38 +127,94 @@ class IntratoneCoordinator(DataUpdateCoordinator[CallState | None]):
             caller_login=payload.get("LOGIN_TO_CALL", ""),
             received_at=datetime.now(UTC),
             ring_seq=self._ring_seq,
+            door_code=payload.get("codes") or "*",
         )
         _LOGGER.info(
-            "Doorbell ring: door=%s call_id=%s seq=%d",
+            "Doorbell ring: door=%s call_id=%s seq=%d (SIP deferred)",
             state.door_name,
             state.call_id,
             state.ring_seq,
         )
-        self.async_set_updated_data(state)
 
-        # Kick off the SIP call if we have the orchestrator and creds.
-        await self._maybe_start_sip_call(payload)
-
-    async def _maybe_start_sip_call(self, payload: dict) -> None:
-        if self._call_manager is None:
-            return
+        # Park the SIP creds; pending dispatch on first user interaction.
         sip_target_user = payload.get("LOGIN_TO_CALL")
         sip_user = payload.get("LOGIN")
         sip_pass = payload.get("PASS")
         sip_server_ip = payload.get("ip_adress")
-        if not all((sip_target_user, sip_user, sip_pass, sip_server_ip)):
-            _LOGGER.debug("Push missing SIP creds; skipping audio call")
-            return
-        target_uri = f"sip:{sip_target_user}@{sip_server_ip}"
-        try:
-            self._active_sip_call_id = await self._call_manager.start_call(
-                target_uri=target_uri,
+        if all((sip_target_user, sip_user, sip_pass, sip_server_ip)):
+            self._pending = _PendingInvite(
+                fcm_call_id=str(call_id),
+                target_uri=f"sip:{sip_target_user}@{sip_server_ip}",
                 target_host=sip_server_ip,
                 sip_username=sip_user,
                 sip_password=sip_pass,
             )
+        else:
+            _LOGGER.debug(
+                "Push missing SIP creds; lazy INVITE will be skipped on tap"
+            )
+            self._pending = None
+
+        # Fire the HomeKit doorbell event (ring on iPhone).
+        self.async_set_updated_data(state)
+
+    async def async_ensure_call_started(self) -> bool:
+        """Trigger the SIP INVITE on first user interaction (live view or
+        unlock tap). Idempotent: subsequent calls within the same ring just
+        wait on the existing `stream_ready` event.
+
+        Returns True if a call is started (or already was), False if there
+        are no pending creds or the call manager is missing.
+        """
+        if self._pending is None or self._call_manager is None:
+            return False
+        pending = self._pending
+        if pending.started:
+            return True
+        pending.started = True
+
+        _LOGGER.info(
+            "User interaction → starting SIP INVITE for FCM call %s",
+            pending.fcm_call_id,
+        )
+        try:
+            self._active_sip_call_id = await self._call_manager.start_call(
+                target_uri=pending.target_uri,
+                target_host=pending.target_host,
+                sip_username=pending.sip_username,
+                sip_password=pending.sip_password,
+            )
         except Exception:  # noqa: BLE001
             _LOGGER.exception("Failed to initiate SIP call")
+            return False
+
+        # Tell Intratone "user picked up" — matches the Cogelec app, which
+        # calls /answer on the `Connected` SIP state. We fire it in parallel
+        # with the INVITE; the server processes both fine.
+        if not pending.answer_called:
+            pending.answer_called = True
+            try:
+                picked_up = await self.api.answer_call(pending.fcm_call_id)
+                if picked_up:
+                    _LOGGER.debug(
+                        "Call %s marked as picked up", pending.fcm_call_id
+                    )
+            except Exception:  # noqa: BLE001
+                _LOGGER.warning("informCallPickedUp failed", exc_info=True)
+        return True
+
+    async def async_wait_for_stream(self, timeout: float = _STREAM_READY_TIMEOUT_S) -> str | None:
+        """Wait up to `timeout` seconds for the audio bridge to be up, then
+        return the RTSP stream URL. Used by the camera entity in HomeKit's
+        stream_source path."""
+        if self._pending is None:
+            return self.data.stream_url if self.data else None
+        try:
+            await asyncio.wait_for(self._pending.stream_ready.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            _LOGGER.warning("Stream not ready within %ss", timeout)
+            return None
+        return self.data.stream_url if self.data else None
 
     @callback
     def set_stream_url(self, sip_call_id: str, url: str | None) -> None:
@@ -129,37 +222,59 @@ class IntratoneCoordinator(DataUpdateCoordinator[CallState | None]):
 
         Matches against the tracked SIP call_id (NOT the FCM `call_id` exposed
         to /answer), so a stale call_established after a fast hang-up is
-        ignored. When `url` is None we also clear the tracker.
+        ignored. When `url` is None we also clear the tracker AND the pending
+        invite (next ring will need a fresh user tap to start).
         """
         if self.data is None or self._active_sip_call_id != sip_call_id:
             return
         if url is None:
             self._active_sip_call_id = None
+            if self._pending is not None:
+                self._pending.stream_ready.clear()
+                self._pending = None
+        else:
+            if self._pending is not None:
+                self._pending.stream_ready.set()
         if self.data.stream_url == url:
             return
         self.async_set_updated_data(dataclasses.replace(self.data, stream_url=url))
 
     async def async_open_door(self) -> bool:
-        """Answer the current call to trigger the door relay."""
+        """Send `opendoor:<code>` as an in-dialog SIP MESSAGE.
+
+        If the user taps Unlock without having opened live view first, we
+        first kick off the SIP call (lazy INVITE) and wait briefly for it to
+        confirm. Then we send the MESSAGE.
+        """
         if self.data is None:
             _LOGGER.warning("Open door requested but no active call known")
             return False
-        try:
-            ok = await self.api.answer_call(self.data.call_id)
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.error("Open door failed: %s", err)
+        if self._call_manager is None:
+            _LOGGER.warning("Open door requested but no call manager attached")
             return False
-        if ok:
-            _LOGGER.info("Door opened for call %s", self.data.call_id)
-            # User accepted → tear down the SIP call and audio bridge.
-            if self._call_manager is not None:
-                try:
-                    await self._call_manager.hang_up()
-                except Exception:  # noqa: BLE001
-                    _LOGGER.exception("Hang-up after door open failed")
+
+        # Lazy: start the SIP call if the user is jumping straight to unlock.
+        if self._pending is not None and not self._pending.started:
+            await self.async_ensure_call_started()
+            # Wait for the bridge to be up before sending the MESSAGE — needs
+            # the dialog to be CONFIRMED (200 OK received + ACK sent).
+            await self.async_wait_for_stream()
+
+        door_opened = self._call_manager.send_open_door(self.data.door_code)
+
+        if door_opened:
+            _LOGGER.info(
+                "Door opened for call %s (code=%s)",
+                self.data.call_id,
+                self.data.door_code,
+            )
         else:
-            _LOGGER.warning("Open door returned non-ok for call %s", self.data.call_id)
-        return ok
+            _LOGGER.warning(
+                "Open door failed for call %s — no confirmed SIP call to send "
+                "MESSAGE in (call may have BYE'd already)",
+                self.data.call_id,
+            )
+        return door_opened
 
 
 _REDACT_KEYS = {"LOGIN", "PASS", "ip_adress"}

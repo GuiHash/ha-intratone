@@ -1,8 +1,9 @@
-"""Tests for CallManager — orchestration of SIP UAC + AudioBridge.
+"""Tests for CallManager — orchestration of SIP UAC (TCP) + AudioBridge.
 
-We mock the AudioBridge so no ffmpeg is spawned and patch
-`create_datagram_endpoint` so no real socket is opened. The IntratoneSipClient
-is exercised end-to-end via injected datagrams.
+We mock the AudioBridge so no ffmpeg is spawned, patch
+`loop.create_connection` so no real TCP socket is opened, and patch
+`_bind_rtp_socket` so no real UDP port is bound. The IntratoneSipClient
+itself is exercised through the manager via the fake TCP transport.
 """
 
 from __future__ import annotations
@@ -23,19 +24,22 @@ SERVER_IP = "178.32.84.135"
 TARGET_URI = f"sip:LOGIN_TO_CALL_TOKEN@{SERVER_IP}"
 
 
-class _FakeDatagramTransport:
-    """Records every sendto() so tests can introspect outgoing SIP traffic."""
+class _FakeTcpTransport:
+    """Records writes; tests introspect outgoing SIP bytes via `.written`."""
 
-    def __init__(self, bound_port: int = 5070) -> None:
-        self.sent: list[tuple[bytes, tuple[str, int]]] = []
+    def __init__(self, bound_port: int = 54321) -> None:
+        self.written: list[bytes] = []
         self._bound_port = bound_port
         self._closed = False
 
-    def sendto(self, data: bytes, addr: tuple[str, int]) -> None:
-        self.sent.append((data, addr))
+    def write(self, data: bytes) -> None:
+        self.written.append(data)
 
     def close(self) -> None:
         self._closed = True
+
+    def is_closing(self) -> bool:
+        return self._closed
 
     def get_extra_info(self, name: str, default=None):
         if name == "sockname":
@@ -63,6 +67,9 @@ def ended_calls():
 
 @pytest.fixture
 async def manager(fake_bridge, active_calls, ended_calls):
+    """A started CallManager whose `create_connection` is mocked to install
+    a fake TCP transport on the protocol. Also stubs `_bind_rtp_socket` so
+    pytest-socket's network ban doesn't trip."""
     mgr = CallManager(
         local_host=LOCAL_HOST,
         on_call_active=lambda call_id, url: active_calls.append((call_id, url)),
@@ -70,10 +77,13 @@ async def manager(fake_bridge, active_calls, ended_calls):
         audio_bridge=fake_bridge,
     )
 
-    async def fake_create_datagram_endpoint(protocol_factory, **_kwargs):
+    fake_transports: list[_FakeTcpTransport] = []
+
+    async def fake_create_connection(protocol_factory, **_kwargs):
         proto = protocol_factory()
-        transport = _FakeDatagramTransport()
+        transport = _FakeTcpTransport()
         proto.connection_made(transport)
+        fake_transports.append(transport)
         return transport, proto
 
     fake_rtp_sock = MagicMock()
@@ -83,8 +93,8 @@ async def manager(fake_bridge, active_calls, ended_calls):
     with (
         patch.object(
             asyncio.get_running_loop(),
-            "create_datagram_endpoint",
-            side_effect=fake_create_datagram_endpoint,
+            "create_connection",
+            side_effect=fake_create_connection,
         ),
         patch(
             "custom_components.intratone.call_manager._bind_rtp_socket",
@@ -92,22 +102,22 @@ async def manager(fake_bridge, active_calls, ended_calls):
         ),
     ):
         await mgr.async_start()
+        # Expose the transports so tests can assert on writes.
+        mgr._test_transports = fake_transports  # type: ignore[attr-defined]
         yield mgr
-    await mgr.async_stop()
+        await mgr.async_stop()
 
 
-async def test_async_start_creates_sip_client(manager):
+async def test_async_start_marks_running(manager):
     assert manager.is_running
-    assert manager._sip_client is not None
 
 
 async def test_async_start_is_idempotent(manager):
-    transport_before = manager._transport
     await manager.async_start()
-    assert manager._transport is transport_before
+    assert manager.is_running
 
 
-async def test_start_call_when_not_started(fake_bridge):
+async def test_start_call_without_starting_returns_none(fake_bridge):
     mgr = CallManager(
         local_host=LOCAL_HOST,
         on_call_active=lambda *_: None,
@@ -119,20 +129,21 @@ async def test_start_call_when_not_started(fake_bridge):
     assert call_id is None
 
 
-async def test_start_call_sends_invite(manager):
+async def test_start_call_opens_tcp_and_sends_invite(manager):
     call_id = await manager.start_call(TARGET_URI, SERVER_IP, SIP_USER, SIP_PASS)
     assert call_id is not None
     assert manager.active_call_id == call_id
 
-    transport = manager._transport
-    sent = transport.sent  # type: ignore[attr-defined]
-    assert len(sent) == 1
-    data, addr = sent[0]
-    assert addr == (SERVER_IP, 5060)
-    assert data.startswith(f"INVITE {TARGET_URI} SIP/2.0".encode())
-    # PCMU codec in SDP body, not Opus.
-    assert b"PCMU/8000" in data
-    assert b"opus" not in data.lower()
+    transports = manager._test_transports  # type: ignore[attr-defined]
+    assert len(transports) == 1
+    invite = transports[0].written[0]
+    assert invite.startswith(f"INVITE {TARGET_URI} SIP/2.0".encode())
+    # PCMU codec in SDP, not Opus.
+    assert b"PCMU/8000" in invite
+    assert b"opus" not in invite.lower()
+    # Transport is TCP throughout.
+    assert b"SIP/2.0/TCP" in invite
+    assert b"transport=tcp" in invite
 
 
 async def test_second_overlapping_ring_is_ignored(manager):
@@ -140,8 +151,41 @@ async def test_second_overlapping_ring_is_ignored(manager):
     second = await manager.start_call(TARGET_URI, SERVER_IP, SIP_USER, SIP_PASS)
     assert first is not None
     assert second is None
-    transport = manager._transport
-    assert len(transport.sent) == 1  # type: ignore[attr-defined]
+    # Only one TCP connection opened.
+    assert len(manager._test_transports) == 1  # type: ignore[attr-defined]
+
+
+async def test_sip_tcp_connect_failure_returns_none(fake_bridge):
+    """If `create_connection` raises (DNS failure, refused), `start_call`
+    returns None and the RTP socket is closed — next ring isn't blocked."""
+    mgr = CallManager(
+        local_host=LOCAL_HOST,
+        on_call_active=lambda *_: None,
+        on_call_ended=lambda *_: None,
+        audio_bridge=fake_bridge,
+    )
+    fake_rtp_sock = MagicMock()
+    fake_rtp_sock.getsockname = MagicMock(return_value=("0.0.0.0", 16400))
+    fake_rtp_sock.close = MagicMock()
+
+    async def boom(*_args, **_kwargs):
+        raise OSError("connection refused")
+
+    with (
+        patch.object(
+            asyncio.get_running_loop(), "create_connection", side_effect=boom
+        ),
+        patch(
+            "custom_components.intratone.call_manager._bind_rtp_socket",
+            return_value=fake_rtp_sock,
+        ),
+    ):
+        await mgr.async_start()
+        result = await mgr.start_call(TARGET_URI, SERVER_IP, SIP_USER, SIP_PASS)
+
+    assert result is None
+    assert mgr.active_call_id is None
+    fake_rtp_sock.close.assert_called_once()
 
 
 async def test_call_established_spawns_bridge_and_fires_active(
@@ -151,7 +195,7 @@ async def test_call_established_spawns_bridge_and_fires_active(
     assert call_id is not None
     sip_client = manager._sip_client
     assert sip_client is not None
-    local_rtp = sip_client._calls[call_id].local_rtp_port  # type: ignore[union-attr]
+    local_rtp = sip_client._call.local_rtp_port  # type: ignore[union-attr]
 
     sip_client._on_call_established(  # type: ignore[union-attr]
         CallEstablished(
@@ -161,7 +205,7 @@ async def test_call_established_spawns_bridge_and_fires_active(
             local_rtp_port=local_rtp,
         )
     )
-    # Let the create_task in _handle_call_established run.
+    # Let the create_task'd bridge start run.
     await asyncio.sleep(0)
     await asyncio.sleep(0)
 
@@ -169,7 +213,6 @@ async def test_call_established_spawns_bridge_and_fires_active(
     call_kwargs = fake_bridge.start.await_args.kwargs
     assert call_kwargs["remote_rtp_ip"] == "178.32.84.99"
     assert call_kwargs["remote_rtp_port"] == 20002
-    # The bound socket allocated in start_call is what gets handed to the bridge.
     assert "rtp_socket" in call_kwargs
     assert active_calls == [(call_id, "rtsp://127.0.0.1:8556/intratone")]
 
@@ -189,19 +232,26 @@ async def test_bridge_start_failure_hangs_up(manager, fake_bridge, active_calls)
     )
     await asyncio.sleep(0)
     await asyncio.sleep(0)
-    # No callback fired and the call_id is still tracked (will tear down on BYE).
     assert active_calls == []
 
 
-async def test_call_terminated_fires_ended_and_clears_active(
+async def test_call_terminated_fires_ended_after_grace(
     manager, fake_bridge, ended_calls
 ):
+    """SIP teardown does NOT immediately clear active_call_id — we hold the
+    bridge alive for `_POST_BYE_GRACE_S` so a slow iPhone live-view tap still
+    sees a valid stream URL. After the grace, both bridge and tracker clear."""
+    from custom_components.intratone import call_manager as cm_mod
+
     call_id = await manager.start_call(TARGET_URI, SERVER_IP, SIP_USER, SIP_PASS)
     sip_client = manager._sip_client
 
-    sip_client._on_call_terminated(call_id)  # type: ignore[union-attr]
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
+    with patch.object(cm_mod, "_POST_BYE_GRACE_S", 0.01):
+        sip_client._on_call_terminated(call_id)  # type: ignore[union-attr]
+        # During the grace period, the active_call_id is still set.
+        assert manager.active_call_id == call_id
+        await asyncio.sleep(0.05)
+        await asyncio.sleep(0)
 
     fake_bridge.stop.assert_awaited()
     assert ended_calls == [call_id]
@@ -209,25 +259,29 @@ async def test_call_terminated_fires_ended_and_clears_active(
 
 
 async def test_hang_up_stops_bridge(manager, fake_bridge):
+    from custom_components.intratone.sip_client import CallState
+
     call_id = await manager.start_call(TARGET_URI, SERVER_IP, SIP_USER, SIP_PASS)
     sip_client = manager._sip_client
 
     # Promote the call to CONFIRMED so hang_up actually sends BYE.
-    sip_client._calls[call_id].state = sip_client._calls[call_id].state.CONFIRMED  # type: ignore[union-attr]
+    sip_client._call.state = CallState.CONFIRMED  # type: ignore[union-attr]
+    sip_client._call.remote_to_header = f"<{TARGET_URI}>;tag=srv"  # type: ignore[union-attr]
 
     await manager.hang_up()
 
     fake_bridge.stop.assert_awaited()
 
 
-async def test_async_stop_closes_transport_and_stops_bridge(
-    manager, fake_bridge
-):
-    transport = manager._transport
+async def test_async_stop_closes_transport_and_stops_bridge(manager, fake_bridge):
+    call_id = await manager.start_call(TARGET_URI, SERVER_IP, SIP_USER, SIP_PASS)
+    assert call_id is not None
+    transports = manager._test_transports  # type: ignore[attr-defined]
     await manager.async_stop()
-    assert manager._transport is None
-    assert transport._closed is True  # type: ignore[attr-defined]
+    assert manager._sip_transport is None
+    assert transports[0]._closed is True
     fake_bridge.stop.assert_awaited()
+    assert not manager.is_running
 
 
 async def test_async_stop_is_idempotent(manager, fake_bridge):
@@ -239,19 +293,25 @@ async def test_max_call_duration_forces_teardown(manager, fake_bridge, ended_cal
     """A call that never receives BYE is auto-terminated after the cap so
     the next ring isn't silently dropped by the `already active` guard."""
     from custom_components.intratone import call_manager as cm_mod
+    from custom_components.intratone.sip_client import CallState
 
     call_id = await manager.start_call(TARGET_URI, SERVER_IP, SIP_USER, SIP_PASS)
     assert call_id is not None
     sip_client = manager._sip_client
-    sip_client._calls[call_id].state = sip_client._calls[call_id].state.CONFIRMED
+    sip_client._call.state = CallState.CONFIRMED  # type: ignore[union-attr]
+    sip_client._call.remote_to_header = f"<{TARGET_URI}>;tag=srv"  # type: ignore[union-attr]
 
-    with patch.object(cm_mod, "_MAX_CALL_DURATION_S", 0.01):
+    with (
+        patch.object(cm_mod, "_MAX_CALL_DURATION_S", 0.01),
+        patch.object(cm_mod, "_POST_BYE_GRACE_S", 0.01),
+    ):
         # Re-arm the task with the patched delay.
         if manager._max_duration_task is not None:
             manager._max_duration_task.cancel()
         manager._max_duration_task = asyncio.create_task(
             manager._auto_terminate_after(call_id, 0.01)
         )
+        # Wait for: max-duration timer + grace period after BYE.
         await asyncio.sleep(0.05)
         await asyncio.sleep(0)
         await asyncio.sleep(0)

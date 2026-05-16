@@ -46,7 +46,11 @@ class IntratoneCamera(IntratoneEntity, Camera):
     async def stream_source(self) -> str | None:
         if self.coordinator.data is None:
             return None
-        url = self.coordinator.data.stream_url
+        # Lazy SIP: HomeKit asking for the stream IS the "user picked up"
+        # signal. Trigger the INVITE now (if not already), then wait for
+        # the audio bridge to come up before handing HomeKit the URL.
+        await self.coordinator.async_ensure_call_started()
+        url = await self.coordinator.async_wait_for_stream()
         if not url:
             return None
         # HomeKit Bridge spawns ffmpeg with our URL as the input. go2rtc's
