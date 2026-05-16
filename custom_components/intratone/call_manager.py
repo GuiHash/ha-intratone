@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import socket
 from typing import Callable
 
@@ -33,6 +34,12 @@ from .sip_client import CallEstablished, IntratoneSipClient
 _LOGGER = logging.getLogger(__name__)
 
 _RTP_PORT_RANGE = range(16384, 16484, 2)  # even ports (RTP convention)
+
+# Roll-out gate: when unset the integration behaves like Phase 2 strict (audio
+# only, no m=video in SDP, no video socket allocated). Flip to 1 to opt in to
+# the VP8 video path. Lets us validate audio+HomeKit playback first before
+# stacking the video pipeline on top.
+_VIDEO_ENABLED = bool(int(os.environ.get("INTRATONE_VIDEO_ENABLED", "0") or "0"))
 # Intratone doorbell calls don't last more than ~30 s in real life; if we never
 # see a BYE the call is wedged. Hard-stop after this so the next ring isn't
 # blocked by the "Call already active" guard.
@@ -89,6 +96,7 @@ class CallManager:
         self._sip_transport: asyncio.Transport | None = None
         self._active_call_id: str | None = None
         self._pending_rtp_socket: socket.socket | None = None
+        self._pending_video_rtp_socket: socket.socket | None = None
         self._max_duration_task: asyncio.Task | None = None
         self._started = False
 
@@ -113,13 +121,19 @@ class CallManager:
         self._sip_transport = None
         self._sip_client = None
         self._active_call_id = None
-        if self._pending_rtp_socket is not None:
-            try:
-                self._pending_rtp_socket.close()
-            except OSError:
-                pass
-            self._pending_rtp_socket = None
+        self._close_pending_sockets()
         self._started = False
+
+    def _close_pending_sockets(self) -> None:
+        """Close any RTP sockets we bound but haven't yet handed to AudioBridge."""
+        for attr in ("_pending_rtp_socket", "_pending_video_rtp_socket"):
+            sock = getattr(self, attr)
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+                setattr(self, attr, None)
 
     async def start_call(
         self,
@@ -140,11 +154,19 @@ class CallManager:
             )
             return None
 
-        # Bind the RTP socket NOW so the port we advertise in SDP is exactly
-        # the one ffmpeg will receive on — no probe/use race.
+        # Bind the audio RTP socket NOW so the port we advertise in SDP is
+        # exactly the one ffmpeg will receive on — no probe/use race.
         rtp_socket = _bind_rtp_socket()
         rtp_port = rtp_socket.getsockname()[1]
         self._pending_rtp_socket = rtp_socket
+
+        # Video: only allocated when the feature is enabled. The downstream
+        # code (sip_client SDP builder, AudioBridge) treats None as "no video".
+        video_rtp_port: int | None = None
+        if _VIDEO_ENABLED:
+            video_rtp_socket = _bind_rtp_socket()
+            video_rtp_port = video_rtp_socket.getsockname()[1]
+            self._pending_video_rtp_socket = video_rtp_socket
 
         loop = asyncio.get_running_loop()
         sip_client = IntratoneSipClient(
@@ -166,8 +188,7 @@ class CallManager:
                 target_port,
                 err,
             )
-            rtp_socket.close()
-            self._pending_rtp_socket = None
+            self._close_pending_sockets()
             return None
 
         self._sip_client = sip_client
@@ -178,10 +199,10 @@ class CallManager:
                 local_rtp_port=rtp_port,
                 sip_username=sip_username,
                 sip_password=sip_password,
+                local_video_rtp_port=video_rtp_port,
             )
         except Exception:
-            rtp_socket.close()
-            self._pending_rtp_socket = None
+            self._close_pending_sockets()
             transport.close()
             self._sip_transport = None
             self._sip_client = None
@@ -246,15 +267,9 @@ class CallManager:
         if self._max_duration_task is not None and not self._max_duration_task.done():
             self._max_duration_task.cancel()
         self._max_duration_task = None
-        # If the call never reached CONFIRMED, the RTP socket was bound but
-        # never handed to AudioBridge — close it here to avoid a leak.
-        leftover = self._pending_rtp_socket
-        self._pending_rtp_socket = None
-        if leftover is not None:
-            try:
-                leftover.close()
-            except OSError:
-                pass
+        # If the call never reached CONFIRMED, both RTP sockets were bound but
+        # never handed to AudioBridge — close them here to avoid leaks.
+        self._close_pending_sockets()
         # The TCP transport closes itself in sip_client._terminate; clear our
         # reference. Keep `_active_call_id` set during the grace period so the
         # camera entity continues advertising the stream URL.
@@ -275,19 +290,36 @@ class CallManager:
     async def _spawn_bridge(self, info: CallEstablished) -> None:
         rtp_socket = self._pending_rtp_socket
         self._pending_rtp_socket = None
+        video_rtp_socket = self._pending_video_rtp_socket
+        self._pending_video_rtp_socket = None
         if rtp_socket is None:
             _LOGGER.warning(
                 "No pending RTP socket for call %s — bridge cannot start",
                 info.call_id,
             )
+            if video_rtp_socket is not None:
+                try:
+                    video_rtp_socket.close()
+                except OSError:
+                    pass
             if self._sip_client is not None:
                 self._sip_client.hang_up(info.call_id)
             return
+        # If the server rejected our m=video offer, drop the unused socket.
+        if info.remote_video_rtp_port is None and video_rtp_socket is not None:
+            try:
+                video_rtp_socket.close()
+            except OSError:
+                pass
+            video_rtp_socket = None
         try:
             rtsp_url = await self._bridge.start(
                 rtp_socket=rtp_socket,
                 remote_rtp_ip=info.remote_rtp_ip,
                 remote_rtp_port=info.remote_rtp_port,
+                video_socket=video_rtp_socket,
+                remote_video_rtp_ip=info.remote_video_rtp_ip,
+                remote_video_rtp_port=info.remote_video_rtp_port,
             )
         except Exception as err:  # noqa: BLE001
             _LOGGER.exception("Audio bridge failed to start: %s", err)
@@ -295,10 +327,15 @@ class CallManager:
                 self._sip_client.hang_up(info.call_id)
             return
         _LOGGER.info(
-            "Audio bridge up: %s (RTP peer %s:%d, keepalive on)",
+            "Bridge up: %s (audio peer %s:%d%s)",
             rtsp_url,
             info.remote_rtp_ip,
             info.remote_rtp_port,
+            (
+                f", video peer {info.remote_video_rtp_ip}:{info.remote_video_rtp_port}"
+                if info.remote_video_rtp_port is not None
+                else ", video disabled"
+            ),
         )
         self._on_call_active(info.call_id, rtsp_url)
 

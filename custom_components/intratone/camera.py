@@ -44,15 +44,29 @@ class IntratoneCamera(IntratoneEntity, Camera):
         self._cached_image: bytes | None = None
 
     async def stream_source(self) -> str | None:
+        import time
+        t0 = time.monotonic()
+        _LOGGER.info("HOMEKIT_PULL: stream_source() called by HomeKit")
         if self.coordinator.data is None:
+            _LOGGER.warning("HOMEKIT_PULL: coordinator has no data — refusing")
             return None
         # Lazy SIP: HomeKit asking for the stream IS the "user picked up"
         # signal. Trigger the INVITE now (if not already), then wait for
         # the audio bridge to come up before handing HomeKit the URL.
         await self.coordinator.async_ensure_call_started()
         url = await self.coordinator.async_wait_for_stream()
+        elapsed_ms = (time.monotonic() - t0) * 1000
         if not url:
+            _LOGGER.warning(
+                "HOMEKIT_PULL: stream URL not available after %.0fms — HomeKit will see infinite loading",
+                elapsed_ms,
+            )
             return None
+        _LOGGER.info(
+            "HOMEKIT_PULL: handing URL %s to HomeKit (waited %.0fms for bridge)",
+            url,
+            elapsed_ms,
+        )
         # HomeKit Bridge spawns ffmpeg with our URL as the input. go2rtc's
         # RTSP server rejects UDP transport on SETUP (461 Unsupported
         # transport), so we force TCP by returning a fully-formed `-i` arg

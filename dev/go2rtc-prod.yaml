@@ -9,3 +9,14 @@ rtsp:
 
 streams:
   intratone: ""
+  # A/B reference stream — identical to the Phase 2 audio spike that was
+  # validated audible (sine 440 Hz @ 48 kHz Opus mono + color-bars). Lets
+  # us test the HA → HomeKit Bridge → AudioProxy → iPhone path WITHOUT a
+  # real intercom ring, isolating push-side issues from receive-side.
+  fake_doorbell:
+    - exec:ffmpeg -hide_banner -loglevel warning -re
+        -f lavfi -i sine=frequency=440:sample_rate=48000
+        -f lavfi -i smptebars=size=640x480:rate=15
+        -map 1:v -c:v libx264 -tune zerolatency -pix_fmt yuv420p -profile:v baseline -level 3.1 -g 30
+        -map 0:a -c:a libopus -b:a 64k -ar 48000 -ac 1
+        -f rtsp -rtsp_transport tcp {output}
