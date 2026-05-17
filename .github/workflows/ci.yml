@@ -52,3 +52,5 @@ jobs:
       - uses: hacs/action@main
         with:
           category: integration
+        env:
+          REPOSITORY_REF: ${{ github.head_ref || github.ref_name }}
