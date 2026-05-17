@@ -40,12 +40,53 @@ The unlock action sends a SIP MESSAGE inside the active call dialog. It only wor
 1. **Home Assistant Core 2026.5.x** (the only version actually tested — older versions may work but YMMV).
 2. **`ffmpeg`** binary available to HA, built with `libx264` and `libopus`. Pre-installed on HA OS and HA Container.
 3. **HA's built-in HomeKit Bridge integration** configured (used to expose entities to iPhone Home.app).
-4. **go2rtc add-on** running on `127.0.0.1:8554` (RTSP) and `127.0.0.1:1984` (API) with a pre-declared empty stream named `intratone`. On HA OS install via Add-on Store; on other deployments install separately. Minimal config:
+4. **A reachable go2rtc instance** the integration can push its transcoded stream to. There are three common setups — pick whichever you already have, then point the integration at it (see [go2rtc setup](#go2rtc-setup)).
+5. **Access to the official Intratone account** that's already paired to your apartment, on a phone where the Intratone app is logged in. You'll use that app to generate a one-time invite code for the HA pairing (see below).
+
+## go2rtc setup
+
+The integration pushes its transcoded RTSP stream (audio + optional VP8 video) to a go2rtc server and HA's HomeKit Bridge pulls from the same URL. You need go2rtc running, with a stream slot named `intratone` pre-declared (go2rtc rejects publishes on undeclared stream names).
+
+There's no standalone "go2rtc" add-on in HA's default Add-on Store. Use one of:
+
+### Option 1 — AlexxIT go2rtc add-on (recommended for HA OS)
+
+The smallest dependency. Add a custom add-on repository:
+
+1. **Settings → Add-ons → Add-on Store → ⋮ → Repositories**, add `https://github.com/AlexxIT/hassio-addons`
+2. Install the **go2rtc** add-on
+3. Configure it with the stream slot:
    ```yaml
    streams:
      intratone: ""
    ```
-5. **Access to the official Intratone account** that's already paired to your apartment, on a phone where the Intratone app is logged in. You'll use that app to generate a one-time invite code for the HA pairing (see below).
+4. Start the add-on. It listens on `rtsp://127.0.0.1:8554` (no env var needed — this is the integration's default).
+
+### Option 2 — Frigate add-on (if you already use Frigate for NVR)
+
+Frigate bundles go2rtc on `127.0.0.1:8554`. Add to your `frigate.yaml`:
+
+```yaml
+go2rtc:
+  streams:
+    intratone: ""
+```
+
+### Option 3 — Own deployment (HA Core, Docker)
+
+Run go2rtc binary or container yourself with:
+```yaml
+rtsp:
+  listen: "127.0.0.1:8554"
+streams:
+  intratone: ""
+```
+
+If your go2rtc isn't on `127.0.0.1:8554`, set `INTRATONE_GO2RTC_URL` in HA's environment (e.g. `INTRATONE_GO2RTC_URL=rtsp://10.0.0.5:8554`).
+
+### Note on HA's embedded go2rtc (since 2024.x)
+
+HA Core ships a bundled go2rtc binary that auto-starts in Docker / HA OS environments on port `18554`. Its config is HA-managed and **doesn't accept user `streams:` declarations**, so it can't accept our RTSP publish today. Use one of the options above instead.
 
 ## Installation
 

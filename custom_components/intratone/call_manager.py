@@ -35,6 +35,15 @@ _LOGGER = logging.getLogger(__name__)
 
 _RTP_PORT_RANGE = range(16384, 16484, 2)  # even ports (RTP convention)
 
+# go2rtc RTSP relay URL. The integration pushes its transcoded audio+video
+# stream here and HA's HomeKit Bridge ffmpeg pulls from the same URL.
+# Default targets the standalone go2rtc on its conventional port; HA OS users
+# who rely on HA's embedded go2rtc (since 2024.x) should override to
+# `rtsp://127.0.0.1:18554` — see README "go2rtc setup".
+_GO2RTC_URL = (
+    os.environ.get("INTRATONE_GO2RTC_URL", "rtsp://127.0.0.1:8554").rstrip("/")
+)
+
 # Roll-out gate: when unset the integration behaves like Phase 2 strict (audio
 # only, no m=video in SDP, no video socket allocated). Flip to 1 to opt in to
 # the VP8 video path. Lets us validate audio+HomeKit playback first before
@@ -91,7 +100,7 @@ class CallManager:
         self._local_host = local_host
         self._on_call_active = on_call_active
         self._on_call_ended = on_call_ended
-        self._bridge = audio_bridge or AudioBridge()
+        self._bridge = audio_bridge or AudioBridge(rtsp_relay_url=_GO2RTC_URL)
         self._sip_client: IntratoneSipClient | None = None
         self._sip_transport: asyncio.Transport | None = None
         self._active_call_id: str | None = None
