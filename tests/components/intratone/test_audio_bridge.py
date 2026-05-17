@@ -172,9 +172,12 @@ def fake_process():
     proc.stdin.is_closing = MagicMock(return_value=False)
     proc.stdin.close = MagicMock()
     proc.stdin.write = MagicMock()
-    # stderr reader — empty stream so the drainer task exits cleanly.
+    # stderr reader emits the marker that `start()` waits for (push to go2rtc
+    # established), then EOF — so the drainer task exits cleanly and start()
+    # doesn't wait its 5s timeout.
+    stderr_lines = iter([b"Output #0, rtsp, to 'rtsp://test':\n", b""])
     proc.stderr = MagicMock()
-    proc.stderr.readline = AsyncMock(return_value=b"")
+    proc.stderr.readline = AsyncMock(side_effect=lambda: next(stderr_lines))
     proc.send_signal = MagicMock(
         side_effect=lambda sig: setattr(proc, "_last_signal", sig)
     )
@@ -221,6 +224,7 @@ async def test_start_returns_rtsp_url(mock_subprocess, fake_datagram_endpoint):
     )
     assert url == "rtsp://127.0.0.1:8554/intratone"
     assert bridge.is_running
+    await bridge.stop()
 
 
 async def test_start_spawns_ffmpeg_with_mulaw_stdin_input(
@@ -247,6 +251,7 @@ async def test_start_spawns_ffmpeg_with_mulaw_stdin_input(
     assert "-rtsp_transport tcp" in joined
     assert "-f rtsp" in joined
     assert "rtsp://127.0.0.1:8554/intratone" in joined
+    await bridge.stop()
 
 
 async def test_start_is_idempotent(mock_subprocess, fake_datagram_endpoint):
@@ -262,6 +267,7 @@ async def test_start_is_idempotent(mock_subprocess, fake_datagram_endpoint):
         remote_rtp_port=20000
     )
     assert mock_subprocess.call_count == 1
+    await bridge.stop()
 
 
 async def test_received_rtp_forwards_ulaw_to_ffmpeg_stdin(
@@ -282,6 +288,7 @@ async def test_received_rtp_forwards_ulaw_to_ffmpeg_stdin(
     written = fake_process.stdin.write.call_args.args[0]
     # µ-law forwarded as-is (no Python decode).
     assert written == payload
+    await bridge.stop()
 
 
 async def test_stop_sends_sigterm_and_closes_socket(
@@ -376,7 +383,11 @@ async def test_bind_failure_kills_ffmpeg(mock_subprocess, fake_process):
 async def test_stderr_is_drained_to_logger(
     mock_subprocess, fake_process, fake_datagram_endpoint, caplog
 ):
-    """ffmpeg stderr is read line-by-line and logged so the pipe never fills."""
+    """ffmpeg stderr is read line-by-line and logged so the pipe never fills.
+
+    Routine ffmpeg lines (Stream mapping, Output #N, frame= progress) go to
+    DEBUG; only lines containing Error/Invalid/Failed/Broken/fatal get WARNING.
+    """
     import logging
 
     lines = iter(
@@ -385,7 +396,7 @@ async def test_stderr_is_drained_to_logger(
     fake_process.stderr.readline = AsyncMock(side_effect=lambda: next(lines))
 
     bridge = AudioBridge()
-    with caplog.at_level(logging.WARNING, logger="custom_components.intratone.audio_bridge"):
+    with caplog.at_level(logging.DEBUG, logger="custom_components.intratone.audio_bridge"):
         await bridge.start(
             rtp_socket=_fake_rtp_socket(16384),
             remote_rtp_ip="178.32.84.135",

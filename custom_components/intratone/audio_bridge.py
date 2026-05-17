@@ -132,7 +132,7 @@ class _RtpProtocol(asyncio.DatagramProtocol):
                 except Exception:  # noqa: BLE001
                     _LOGGER.exception("AUDIO_STUN response build/send failed")
             if self.stun_count <= 3:
-                _LOGGER.warning(
+                _LOGGER.debug(
                     "AUDIO_RX_STUN[#%d]: Binding Request from %s:%d total_len=%d — responded",
                     self.stun_count, addr[0], addr[1], len(data),
                 )
@@ -141,7 +141,7 @@ class _RtpProtocol(asyncio.DatagramProtocol):
         if len(data) < _RTP_HEADER_SIZE:
             self.non_rtp_count += 1
             if self.non_rtp_count <= 5:
-                _LOGGER.warning(
+                _LOGGER.debug(
                     "AUDIO_RX_NONRTP[#%d]: short packet from %s:%d len=%d hex=%s",
                     self.non_rtp_count,
                     addr[0],
@@ -158,7 +158,7 @@ class _RtpProtocol(asyncio.DatagramProtocol):
         if version != 2:
             self.non_rtp_count += 1
             if self.non_rtp_count <= 5:
-                _LOGGER.warning(
+                _LOGGER.debug(
                     "AUDIO_RX_NONRTP[#%d]: V=%d (not RTP) from %s:%d len=%d hex=%s",
                     self.non_rtp_count,
                     version,
@@ -195,7 +195,7 @@ class _RtpProtocol(asyncio.DatagramProtocol):
                 "ssrcs": set(),
                 "first_seen_packet": self.packets_received,
             }
-            _LOGGER.warning(
+            _LOGGER.debug(
                 "AUDIO_RX_NEW_PT[%d]: first packet #%d M=%d cc=%d x=%d "
                 "header_len=%d payload_len=%d ssrc=0x%08x src=%s:%d first16=%s",
                 pt, self.packets_received, marker, cc, x, header_len,
@@ -209,7 +209,7 @@ class _RtpProtocol(asyncio.DatagramProtocol):
         # SSRC stats: log on first occurrence.
         if ssrc not in self.ssrc_stats:
             self.ssrc_stats[ssrc] = {"count": 0, "pts": set()}
-            _LOGGER.warning(
+            _LOGGER.debug(
                 "AUDIO_RX_NEW_SSRC[0x%08x]: first packet #%d PT=%d payload_len=%d",
                 ssrc, self.packets_received, pt, len(payload),
             )
@@ -230,7 +230,7 @@ class _RtpProtocol(asyncio.DatagramProtocol):
         # First packet: full diagnostic, header + 64 byte raw hex.
         if not self._first_packet_logged:
             self._first_packet_logged = True
-            _LOGGER.warning(
+            _LOGGER.debug(
                 "AUDIO_RX_FIRST: total=%d header=%d payload=%d V=2 PT=%d M=%d "
                 "cc=%d x=%d seq=%d ts=%d ssrc=0x%08x src=%s:%d remote_advertised=%s:%d "
                 "first64=%s",
@@ -245,7 +245,7 @@ class _RtpProtocol(asyncio.DatagramProtocol):
             sample_min = min(payload)
             sample_max = max(payload)
             unique = len(set(payload))
-            _LOGGER.warning(
+            _LOGGER.debug(
                 "AUDIO_RX[#%d]: PT=%d payload=%d ssrc=0x%08x src=%s:%d "
                 "min=0x%02x max=0x%02x unique=%d/%d first16=%s",
                 self.packets_received, pt, len(payload), ssrc, addr[0], addr[1],
@@ -261,7 +261,7 @@ class _RtpProtocol(asyncio.DatagramProtocol):
     def dump_summary(self) -> None:
         """One-shot dump of all aggregated stats — call on close/stop."""
         elapsed = (time.monotonic() - self._start_time) if self._start_time else 0.0
-        _LOGGER.warning(
+        _LOGGER.info(
             "AUDIO_RX_SUMMARY: %d packets / %d bytes over %.1fs (avg %.0f B/s) "
             "from %d source(s); STUN=%d nonRTP=%d seq_gaps=%d",
             self.packets_received, self.bytes_received_total, elapsed,
@@ -270,9 +270,9 @@ class _RtpProtocol(asyncio.DatagramProtocol):
             self.seq_gaps,
         )
         for src in self.unique_sources:
-            _LOGGER.warning("AUDIO_RX_SUMMARY: source %s:%d", src[0], src[1])
+            _LOGGER.info("AUDIO_RX_SUMMARY: source %s:%d", src[0], src[1])
         for pt, st in sorted(self.pt_stats.items()):
-            _LOGGER.warning(
+            _LOGGER.info(
                 "AUDIO_RX_SUMMARY: PT=%d count=%d sizes=%s ssrcs=%s (first at packet #%d)",
                 pt, st["count"],
                 sorted(st["sizes"]),
@@ -280,7 +280,7 @@ class _RtpProtocol(asyncio.DatagramProtocol):
                 st["first_seen_packet"],
             )
         for ssrc, ss in self.ssrc_stats.items():
-            _LOGGER.warning(
+            _LOGGER.info(
                 "AUDIO_RX_SUMMARY: ssrc=0x%08x count=%d pts=%s",
                 ssrc, ss["count"], sorted(ss["pts"]),
             )
@@ -334,33 +334,127 @@ class _VideoRtpProtocol(asyncio.DatagramProtocol):
         self._transport: asyncio.DatagramTransport | None = None
         self.stun_requests = 0
         self.rtp_packets_forwarded = 0
+        self.non_rtp_count = 0
+        self.unique_sources: set[tuple[str, int]] = set()
+        self.pt_stats: dict[int, dict] = {}  # pt → {count, sizes:set, ssrcs:set}
+        self.ssrc_stats: dict[int, dict] = {}  # ssrc → {count, pts:set}
+        self._first_rtp_logged = False
+        self._start_time: float | None = None
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         self._transport = transport  # type: ignore[assignment]
+        _LOGGER.debug(
+            "VIDEO_RTP_LISTEN: bound, will forward to ffmpeg at %s:%d",
+            self._ffmpeg_target[0], self._ffmpeg_target[1],
+        )
 
     def datagram_received(self, data: bytes, addr: tuple[str, int]) -> None:
         if self._transport is None:
             return
+        if self._start_time is None:
+            self._start_time = time.monotonic()
+        self.unique_sources.add(addr)
+
         if is_stun_binding_request(data):
             self.stun_requests += 1
             try:
                 response = build_binding_response(data, addr)
                 self._transport.sendto(response, addr)
             except Exception:  # noqa: BLE001
-                _LOGGER.exception("STUN response build/send failed")
+                _LOGGER.exception("VIDEO_STUN: response build/send failed")
+            if self.stun_requests <= 3:
+                _LOGGER.debug(
+                    "VIDEO_RX_STUN[#%d]: Binding Request from %s:%d total_len=%d — responded",
+                    self.stun_requests, addr[0], addr[1], len(data),
+                )
             return
-        # Anything else with a valid RTP version (2) gets forwarded to ffmpeg.
-        if len(data) >= _RTP_HEADER_SIZE and (data[0] >> 6) & 0x03 == 2:
-            try:
-                self._transport.sendto(data, self._ffmpeg_target)
-                self.rtp_packets_forwarded += 1
-            except OSError:
-                pass
+
+        # Anything else needs V=2 (RTP). Non-RTP non-STUN = unexpected.
+        if len(data) < _RTP_HEADER_SIZE or (data[0] >> 6) & 0x03 != 2:
+            self.non_rtp_count += 1
+            if self.non_rtp_count <= 5:
+                _LOGGER.debug(
+                    "VIDEO_RX_NONRTP[#%d]: from %s:%d len=%d hex=%s",
+                    self.non_rtp_count, addr[0], addr[1], len(data),
+                    data[:32].hex(),
+                )
+            return
+
+        # Valid RTP — parse for diagnostics + forward to ffmpeg.
+        b1 = data[1]
+        marker = (b1 >> 7) & 0x01
+        pt = b1 & 0x7F
+        ssrc = int.from_bytes(data[8:12], "big")
+        payload_len = len(data) - 12  # ignore cc/x for stat purposes
+
+        if pt not in self.pt_stats:
+            self.pt_stats[pt] = {"count": 0, "sizes": set(), "ssrcs": set()}
+            _LOGGER.debug(
+                "VIDEO_RX_NEW_PT[%d]: first VP8 packet #%d M=%d ssrc=0x%08x "
+                "payload_len=%d src=%s:%d first16=%s",
+                pt, self.rtp_packets_forwarded + 1, marker, ssrc, payload_len,
+                addr[0], addr[1], data[12:28].hex(),
+            )
+        st = self.pt_stats[pt]
+        st["count"] += 1
+        st["sizes"].add(payload_len)
+        st["ssrcs"].add(ssrc)
+
+        if ssrc not in self.ssrc_stats:
+            self.ssrc_stats[ssrc] = {"count": 0, "pts": set()}
+            _LOGGER.debug(
+                "VIDEO_RX_NEW_SSRC[0x%08x]: first packet #%d PT=%d",
+                ssrc, self.rtp_packets_forwarded + 1, pt,
+            )
+        ss = self.ssrc_stats[ssrc]
+        ss["count"] += 1
+        ss["pts"].add(pt)
+
+        if not self._first_rtp_logged:
+            self._first_rtp_logged = True
+            _LOGGER.debug(
+                "VIDEO_RX_FIRST: total=%d V=2 PT=%d M=%d ssrc=0x%08x src=%s:%d "
+                "first48=%s",
+                len(data), pt, marker, ssrc, addr[0], addr[1],
+                data[:48].hex(),
+            )
+
+        try:
+            self._transport.sendto(data, self._ffmpeg_target)
+            self.rtp_packets_forwarded += 1
+            if self.rtp_packets_forwarded % 50 == 0:
+                _LOGGER.debug(
+                    "VIDEO_RX[#%d]: PT=%d M=%d payload_len=%d ssrc=0x%08x src=%s:%d",
+                    self.rtp_packets_forwarded, pt, marker, payload_len, ssrc,
+                    addr[0], addr[1],
+                )
+        except OSError:
+            pass
 
     def connection_lost(self, exc: Exception | None) -> None:
         self._transport = None
 
     def close(self) -> None:
+        # Dump video summary before closing — mirrors AUDIO_RX_SUMMARY pattern.
+        elapsed = (
+            time.monotonic() - self._start_time
+            if self._start_time is not None
+            else 0.0
+        )
+        _LOGGER.info(
+            "VIDEO_RX_SUMMARY: stun_requests=%d vp8_forwarded=%d non_rtp=%d "
+            "over %.1fs from %d source(s)",
+            self.stun_requests, self.rtp_packets_forwarded, self.non_rtp_count,
+            elapsed, len(self.unique_sources),
+        )
+        for src in self.unique_sources:
+            _LOGGER.info("VIDEO_RX_SUMMARY: source %s:%d", src[0], src[1])
+        for pt, st in sorted(self.pt_stats.items()):
+            _LOGGER.info(
+                "VIDEO_RX_SUMMARY: PT=%d count=%d sizes=%s ssrcs=%s",
+                pt, st["count"], sorted(st["sizes"]),
+                [f"0x{s:08x}" for s in st["ssrcs"]],
+            )
         if self._transport is not None:
             self._transport.close()
             self._transport = None
@@ -590,6 +684,10 @@ class AudioBridge:
         fd, path = tempfile.mkstemp(prefix="intratone-video-", suffix=".sdp")
         with os.fdopen(fd, "w") as f:
             f.write(sdp)
+        _LOGGER.debug(
+            "VIDEO_SDP_FILE: wrote %s for ffmpeg input — listens on 127.0.0.1:%d for VP8",
+            path, ffmpeg_listen_port,
+        )
         return path
 
     def _cleanup_video_sdp(self) -> None:
@@ -605,7 +703,7 @@ class AudioBridge:
         rtp = self._rtp
         if rtp is not None:
             rtp.dump_summary()
-            _LOGGER.warning(
+            _LOGGER.info(
                 "AUDIO_FFMPEG_SUMMARY: wrote %d bytes to stdin during call "
                 "(expected ~8000 B/s for G.711 µ-law 20ms)",
                 self._bytes_written_to_ffmpeg,
@@ -692,6 +790,19 @@ class AudioBridge:
                 # demuxers that aren't in ffmpeg's default safe list.
                 "-protocol_whitelist",
                 "file,udp,rtp",
+                # Low-latency input: ffmpeg's default `analyzeduration=5s` +
+                # `probesize=5MB` defer "Output #0, rtsp" emission by ~3-4 s
+                # since we have to wait for the demuxer to be confident. With
+                # VP8 in an SDP file we know the codec; 50 ms / 32 KB is
+                # enough to grab the first packet and start pushing.
+                "-analyzeduration",
+                "50000",
+                "-probesize",
+                "32768",
+                "-fflags",
+                "nobuffer",
+                "-flags",
+                "low_delay",
                 "-f",
                 "sdp",
                 "-i",
@@ -727,16 +838,17 @@ class AudioBridge:
             "0:a",
             "-c:a",
             "libopus",
-            # Opus at the RFC 7587 RTP clock rate (48 kHz) — matches the
-            # Phase 2 spike (sine 440Hz → audible iPhone). Encoding at 16 kHz
-            # directly produces RTP timestamps the HA AudioProxy can't
-            # resynthesise correctly, so iPhone receives but plays silence.
-            # HA's pull-side ffmpeg re-encodes to whatever HomeKit negotiates
-            # (typically 16 kHz mono).
+            "-application",
+            "voip",
             "-b:a",
-            "64k",
+            "24k",
+            # Per-stream specifiers (`:a:0`) force libopus to obey: without
+            # the stream specifier ffmpeg's libopus wrapper silently emits
+            # 48 kHz stereo regardless of `-ac 1`. HomeKit negotiates 16 kHz
+            # mono with the iPhone so encoding at the source rate keeps the
+            # re-encode on the HomeKit pull side cheap.
             "-ar:a:0",
-            "48000",
+            "16000",
             "-ac:a:0",
             "1",
             "-channel_layout:a:0",
@@ -755,8 +867,12 @@ class AudioBridge:
             "baseline",
             "-level",
             "3.1",
+            # Smaller keyframe interval (was 20) gives HomeKit a fresh I-frame
+            # faster after the pull starts, so the iPhone tile shows the first
+            # frame ~½ s sooner. Trade-off: ~10 % more bandwidth on the H.264
+            # output (acceptable on localhost relay).
             "-g",
-            "20",
+            "10",
             "-rtsp_transport",
             "tcp",
             "-f",
@@ -824,6 +940,11 @@ class AudioBridge:
         if process.stderr is None:
             return
         ready_event = self._ffmpeg_push_ready
+        # ffmpeg emits a lot of noise at -loglevel info (frame= progress, codec
+        # init, mapping). Real problems include words like "Error", "Invalid",
+        # "Failed", "Broken pipe". Forward those at WARNING so prod users see
+        # them without enabling debug; everything else stays at DEBUG.
+        warn_keywords = ("Error", "Invalid", "Failed", "Broken pipe", "fatal")
         try:
             while True:
                 line = await process.stderr.readline()
@@ -837,7 +958,10 @@ class AudioBridge:
                     and "rtsp" in text
                 ):
                     ready_event.set()
-                _LOGGER.warning("ffmpeg: %s", text)
+                if any(kw in text for kw in warn_keywords):
+                    _LOGGER.warning("ffmpeg: %s", text)
+                else:
+                    _LOGGER.debug("ffmpeg: %s", text)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001

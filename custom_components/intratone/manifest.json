@@ -1,13 +1,13 @@
 {
   "domain": "intratone",
   "name": "Intratone Doorbell",
-  "codeowners": ["@guihash"],
+  "codeowners": ["@GuiHash"],
   "config_flow": true,
   "dependencies": ["camera", "event", "lock", "network"],
-  "documentation": "https://github.com/guihash/hacs-intratone",
+  "documentation": "https://github.com/GuiHash/ha-intratone",
   "integration_type": "device",
   "iot_class": "cloud_push",
-  "issue_tracker": "https://github.com/guihash/hacs-intratone/issues",
+  "issue_tracker": "https://github.com/GuiHash/ha-intratone/issues",
   "requirements": ["firebase-messaging>=0.4.0", "voip-utils>=0.3.0"],
   "version": "0.1.0"
 }

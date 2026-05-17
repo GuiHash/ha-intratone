@@ -1,0 +1,7 @@
+{
+  "name": "Intratone Doorbell",
+  "render_readme": true,
+  "homeassistant": "2026.5.0",
+  "country": ["FR"],
+  "zip_release": false
+}

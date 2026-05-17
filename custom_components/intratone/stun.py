@@ -37,36 +37,6 @@ def is_stun_binding_request(data: bytes) -> bool:
     return msg_type == _BINDING_REQUEST and magic == _MAGIC_COOKIE
 
 
-def build_binding_request(txid: bytes | None = None) -> bytes:
-    """Build a STUN Binding Request (no attributes) for outbound checks.
-
-    Lets us reciprocate the server's connectivity checks ICE-style: the server
-    sends Binding Requests to validate our endpoint, but Intratone's Asterisk
-    seems to gate real audio behind US sending Binding Requests too. Without
-    them the path stays "tentatively validated" and only comfort-noise µ-law
-    is sent — the symptom we observed on 2026-05-16."""
-    if txid is None:
-        import os
-        txid = os.urandom(12)
-    if len(txid) != 12:
-        raise ValueError("STUN transaction ID must be exactly 12 bytes")
-    return struct.pack(
-        _STUN_HEADER_FMT,
-        _BINDING_REQUEST,
-        0,  # no attributes
-        _MAGIC_COOKIE,
-        txid,
-    )
-
-
-def is_stun_binding_response(data: bytes) -> bool:
-    """True iff `data` is a well-formed STUN Binding Response (success or err)."""
-    if len(data) < _STUN_HEADER_SIZE:
-        return False
-    msg_type, _, magic, _ = struct.unpack(_STUN_HEADER_FMT, data[:_STUN_HEADER_SIZE])
-    return msg_type in (_BINDING_RESPONSE, 0x0111) and magic == _MAGIC_COOKIE
-
-
 def build_binding_response(request: bytes, reflexive_addr: tuple[str, int]) -> bytes:
     """Build a Binding Response echoing the request's transaction ID.
 

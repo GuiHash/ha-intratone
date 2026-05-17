@@ -98,6 +98,7 @@ class CallManager:
         self._pending_rtp_socket: socket.socket | None = None
         self._pending_video_rtp_socket: socket.socket | None = None
         self._max_duration_task: asyncio.Task | None = None
+        self._grace_task: asyncio.Task | None = None
         self._started = False
 
     @property
@@ -121,6 +122,15 @@ class CallManager:
         self._sip_transport = None
         self._sip_client = None
         self._active_call_id = None
+        # Cancel any pending background tasks — without this they linger for
+        # up to `_MAX_CALL_DURATION_S` (120 s) or `_POST_BYE_GRACE_S` (60 s)
+        # after the integration stops, causing pytest-homeassistant to fail
+        # tests with "Lingering task" errors and leaking memory in prod.
+        for attr in ("_max_duration_task", "_grace_task"):
+            task = getattr(self, attr)
+            if task is not None and not task.done():
+                task.cancel()
+            setattr(self, attr, None)
         self._close_pending_sockets()
         self._started = False
 
@@ -275,7 +285,13 @@ class CallManager:
         # camera entity continues advertising the stream URL.
         self._sip_transport = None
         self._sip_client = None
-        asyncio.create_task(self._teardown_bridge_after_grace(call_id))
+        # Track the grace-period task so async_stop() can cancel it cleanly
+        # instead of leaving it lingering for `_POST_BYE_GRACE_S` (60 s).
+        if self._grace_task is not None and not self._grace_task.done():
+            self._grace_task.cancel()
+        self._grace_task = asyncio.create_task(
+            self._teardown_bridge_after_grace(call_id)
+        )
 
     async def _teardown_bridge_after_grace(self, call_id: str) -> None:
         try:
