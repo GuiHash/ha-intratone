@@ -75,6 +75,27 @@ _CONTENT_LENGTH_RE = re.compile(
 _RECORD_ROUTE_RE = re.compile(
     r"^Record-Route:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE
 )
+# `m=video <port> ...` in an SDP body. Port can legitimately be 0 (= media line
+# rejected by the answerer per RFC 3264 §6) — caller must check for > 0.
+_M_VIDEO_RE = re.compile(r"^m=video\s+(\d+)\b", re.MULTILINE)
+# Connection IP at the session level (`c=IN IP4 1.2.3.4`). SDP allows a per-
+# media `c=` override but Intratone's 200 OK has it only at session level.
+_SDP_CONN_IP_RE = re.compile(r"^c=IN\s+IP4\s+(\S+)", re.MULTILINE)
+
+
+def _extract_video_endpoint(sdp_body: str | bytes) -> tuple[str, int] | None:
+    """Return (ip, port) from the m=video line, or None if absent / rejected."""
+    text = sdp_body.decode("utf-8", errors="replace") if isinstance(sdp_body, bytes) else sdp_body
+    port_match = _M_VIDEO_RE.search(text)
+    if not port_match:
+        return None
+    port = int(port_match.group(1))
+    if port == 0:
+        return None
+    ip_match = _SDP_CONN_IP_RE.search(text)
+    if not ip_match:
+        return None
+    return ip_match.group(1), port
 
 
 def _redact_sip(message: bytes) -> str:
@@ -137,6 +158,13 @@ class CallEstablished:
     remote_rtp_ip: str
     remote_rtp_port: int
     local_rtp_port: int
+    # Video media endpoint, set only if the server accepted our m=video offer
+    # (port > 0 in its 200 OK SDP). Same IP as audio in practice (Intratone's
+    # gateway exposes both on 178.32.84.x) but parsed independently so a future
+    # change won't surprise us.
+    remote_video_rtp_ip: str | None = None
+    remote_video_rtp_port: int | None = None
+    local_video_rtp_port: int | None = None
 
 
 @dataclass
@@ -152,6 +180,11 @@ class _PendingCall:
     from_tag: str
     cseq: int
     state: CallState
+    # When set, the SDP offer adds an `m=video VP8` line. The server may
+    # accept (m=video > 0 in 200 OK) or reject (port 0 / absent). CallManager
+    # always allocates this socket so we can transparently fall back to
+    # audio-only when an account doesn't have video.
+    local_video_rtp_port: int | None = None
     # Server's tag from the To: header of the 200 OK on this dialog. Required
     # for the To header of in-dialog requests (MESSAGE, BYE).
     remote_to_header: str | None = None
@@ -282,6 +315,7 @@ class IntratoneSipClient(asyncio.Protocol):
         local_rtp_port: int,
         sip_username: str,
         sip_password: str,
+        local_video_rtp_port: int | None = None,
     ) -> str:
         """Send INVITE on the already-established TCP connection."""
         if self._transport is None:
@@ -304,6 +338,7 @@ class IntratoneSipClient(asyncio.Protocol):
             from_tag=token[:8],
             cseq=_INITIAL_CSEQ,
             state=CallState.INVITING,
+            local_video_rtp_port=local_video_rtp_port,
         )
         self._call = call
         self._send(self._build_invite(call, auth_header=None))
@@ -450,6 +485,13 @@ class IntratoneSipClient(asyncio.Protocol):
             self._terminate(call)
             return
 
+        video_endpoint = _extract_video_endpoint(msg.body) if call.local_video_rtp_port else None
+        if call.local_video_rtp_port and video_endpoint is None:
+            _LOGGER.info(
+                "Call %s: server rejected video media (no m=video > 0 in 200 OK)",
+                call.call_id,
+            )
+
         call.state = CallState.CONFIRMED
         self._on_call_established(
             CallEstablished(
@@ -457,6 +499,9 @@ class IntratoneSipClient(asyncio.Protocol):
                 remote_rtp_ip=rtp_info.rtp_ip,
                 remote_rtp_port=rtp_info.rtp_port,
                 local_rtp_port=call.local_rtp_port,
+                remote_video_rtp_ip=video_endpoint[0] if video_endpoint else None,
+                remote_video_rtp_port=video_endpoint[1] if video_endpoint else None,
+                local_video_rtp_port=call.local_video_rtp_port if video_endpoint else None,
             )
         )
 
@@ -547,23 +592,33 @@ class IntratoneSipClient(asyncio.Protocol):
 
     def _build_sdp(self, call: _PendingCall) -> str:
         session_id = call.call_id.split("@", 1)[0]
-        return _CRLF.join(
-            [
-                "v=0",
-                f"o={call.sip_username} {session_id} {session_id} IN IP4 {call.local_host}",
-                "s=Intratone Call",
-                f"c=IN IP4 {call.local_host}",
-                "t=0 0",
-                f"m=audio {call.local_rtp_port} RTP/AVP 0 8 101",
-                "a=rtpmap:0 PCMU/8000",
-                "a=rtpmap:8 PCMA/8000",
-                "a=rtpmap:101 telephone-event/8000",
-                "a=fmtp:101 0-15",
-                "a=ptime:20",
+        lines = [
+            "v=0",
+            f"o={call.sip_username} {session_id} {session_id} IN IP4 {call.local_host}",
+            "s=Intratone Call",
+            f"c=IN IP4 {call.local_host}",
+            "t=0 0",
+            f"m=audio {call.local_rtp_port} RTP/AVP 0 8 101",
+            "a=rtpmap:0 PCMU/8000",
+            "a=rtpmap:8 PCMA/8000",
+            "a=rtpmap:101 telephone-event/8000",
+            "a=fmtp:101 0-15",
+            "a=ptime:20",
+            "a=sendrecv",
+        ]
+        if call.local_video_rtp_port is not None:
+            # Offer VP8 video, mirroring the official Cogelec app's Linphone
+            # config (display=true, capture=false, VP8 whitelist; APK
+            # CallManager.java:354-452). We send `sendrecv` like the app does
+            # even though we never transmit — some Intratone servers reject
+            # `recvonly` in offers. PT 96 is the conventional dynamic value.
+            lines += [
+                f"m=video {call.local_video_rtp_port} RTP/AVP 96",
+                "a=rtpmap:96 VP8/90000",
                 "a=sendrecv",
-                "",
             ]
-        )
+        lines.append("")
+        return _CRLF.join(lines)
 
     def _build_ack(
         self,

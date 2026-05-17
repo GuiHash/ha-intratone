@@ -1,4 +1,4 @@
-# Minimal go2rtc config for Phase 2 audio relay.
+# Minimal go2rtc config for Phase 2/3 audio+video relay.
 # Stream pre-declared as empty so go2rtc accepts incoming RTSP PUBLISH on it.
 
 api:

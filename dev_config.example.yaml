@@ -24,4 +24,9 @@ homekit:
         - lock.intratone_<ID>_porte
     entity_config:
       camera.intratone_<ID>_interphone:
+        support_audio: true
         linked_doorbell_sensor: event.intratone_<ID>_sonnette
+        # HomeKit ffmpeg encodes Opus at 24 kbps with frame_duration 60 ms
+        # → 180-byte frames. Default RTP packet size 188 (= 176 max payload)
+        # rejects them, killing the audio output task. Bump to fit + margin.
+        audio_packet_size: 384
