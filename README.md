@@ -4,13 +4,14 @@ Native Home Assistant integration for the **Intratone** intercom system (manufac
 
 ## Features
 
-After pairing, the integration creates three entities under one device:
+After pairing, the integration creates these entities under one device:
 
 | Entity | What you can do |
 |---|---|
-| `event.intratone_<ID>_sonnette` | Fires every time a visitor rings the intercom. Usable as automation trigger. |
+| `event.intratone_<ID>_sonnette` | Fires every time a visitor rings the intercom. Payload includes `door_name`, `door_number` (NBPORTE), `caller`, `call_id`. Usable as automation trigger. |
 | `camera.intratone_<ID>_interphone` | Placeholder image when idle. Live audio + video stream during a call. |
-| `lock.intratone_<ID>_porte` | Tap *Unlock* → opens the door (sends `opendoor:*` SIP MESSAGE, same backend as the official Intratone app). |
+| `lock.intratone_<ID>_porte` | Tap *Unlock* → opens the door (sends `opendoor:<code>` SIP MESSAGE, same backend as the official Intratone app). |
+| `binary_sensor.intratone_<ID>_push_channel_connected` | Diagnostic — `on` while the FCM push channel is up. If it goes `off`, you won't be notified of rings. |
 
 Exposed to HomeKit via HA's HomeKit Bridge, the camera tile on iPhone Home.app delivers:
 
@@ -19,21 +20,37 @@ Exposed to HomeKit via HA's HomeKit Bridge, the camera tile on iPhone Home.app d
 - Video (VP8 → H.264 baseline transcoding) — **opt-in** via the env var `INTRATONE_VIDEO_ENABLED=1`. Enable only if your Intratone subscription includes the visiophone (intercom with actual camera).
 - Lock tile to open the door
 
-### Important: door unlock requires an active call
+## How it works
 
-The unlock action sends a SIP MESSAGE inside the active call dialog. It only works in the **~25-second window** starting when the visitor presses the button and ending when the intercom hangs up. There's currently no way to open the door without a visitor ringing — see [Not yet implemented](#not-yet-implemented).
+```
+Visitor presses intercom
+     ↓ (FCM push, ~1 s)
+HA fires doorbell event → iPhone push notification
+     ↓ (user taps tile)
+HA opens SIP TCP connection → INVITE → 200 OK + SDP
+     ↓
+RTP audio (µ-law) + RTP video (VP8) from Intratone server
+     ↓ (audio_bridge.py: STUN-respond, depacket RTP, feed ffmpeg)
+ffmpeg transcode µ-law → Opus 16k mono / VP8 → H.264 baseline
+     ↓
+push RTSP → go2rtc → HomeKit Bridge → SRTP → iPhone Home.app
+```
+
+The FCM listener stays connected for the lifetime of the integration and reconnects with exponential backoff on failure. The SIP dialog opens only when the user actually taps the camera tile or the lock — mirrors the Cogelec app, which doesn't dial until you tap *Pick Up*. See [`INTRATONE_API.md`](INTRATONE_API.md) for the full REST + SIP reverse-engineering notes.
+
+## Caveats
+
+- **Door unlock requires an active call.** The unlock action sends a SIP MESSAGE inside the active call dialog. It only works in the **~25-second window** starting when the visitor presses the button and ending when the intercom hangs up. There's currently no way to open the door without a visitor ringing — see [Not yet implemented](#not-yet-implemented).
+- **Audio quality**: bounded by G.711 µ-law @ 8 kHz (Intratone's wire codec). Some accounts receive only comfort-noise µ-law from the server during a call rather than the real microphone stream — same behaviour observed on the official Intratone iOS app for those accounts, only the GSM fallback carries real audio. Not a bug in this integration; it's a server / account-side condition.
+- **Video quality**: bitrate is set by the intercom hardware (~5-10 kbps observed). Equivalent quality to the official app — there's no client-side knob to request higher quality.
+- **France only**: tested against `sip.intratone.info`. Other Cogelec deployments untested.
+- **Both devices ring in parallel.** The official Intratone app on your phone continues to receive rings alongside HA. Whichever device opens first triggers the relay; the other still rings.
 
 ## Not yet implemented
 
 - **Talkback** (iPhone microphone → visitor). The "Talk" button shows in HomeKit but does nothing. **Blocked on upstream**: Home Assistant's HomeKit Bridge and HAP-python don't expose camera microphone input at all today. We'll add it when one of them does.
 - **Remote door unlock without a visitor ringing** (Intratone's *Clé mobile* feature). The API supports it (`POST /api/access/open/clemobil`), the integration just doesn't wire it up yet.
 - **Call history**, **multiple intercoms in one config entry**, **HomeKit Secure Video**.
-
-## Known quality caveats
-
-- **Audio**: bounded by G.711 µ-law @ 8 kHz (Intratone's wire codec). Some accounts receive only comfort-noise µ-law from the server during a call rather than the real microphone stream — same behaviour observed on the official Intratone iOS app for those accounts, only the GSM fallback carries real audio. Not a bug in this integration; it's a server / account-side condition.
-- **Video**: bitrate is set by the intercom hardware (~5-10 kbps observed). Equivalent quality to the official app — there's no client-side knob to request higher quality.
-- **France only**: tested against `sip.intratone.info`. Other Cogelec deployments untested.
 
 ## Prerequisites
 
@@ -107,12 +124,21 @@ git clone https://github.com/GuiHash/ha-intratone.git intratone
 
 ## Pairing
 
-1. On your existing phone with the official Intratone app: **Mes infos → Ajouter un appareil** → the app generates an invite code in the format `448789 - 1206`.
-2. In Home Assistant: **Settings → Devices & Services → Add Integration → Intratone Doorbell**
-3. Paste the invite code. HA calls `/api/auth/registercodes` with it, registers an FCM push subscription, and obtains a long-lived device JWT (7-day rolling token).
-4. The three entities appear under a new device. Both the existing phone and HA will receive ring notifications in parallel; both can open the door.
+In Home Assistant: **Settings → Devices & Services → Add Integration → Intratone Doorbell**. Pick one of two paths.
 
-If you need to re-pair (e.g. after FCM token rotation), generate a new invite code from the official app and run the integration's re-authentication flow.
+### Path A — SMS (recommended, no installer needed)
+
+You'll be asked for your **phone number** (the one tied to your Intratone account) and the **country code** (default `33`). Intratone texts you a 4-digit code; type it on the next screen. Same flow as the official mobile app's first-time login. Mirrors `POST /api/auth/register` → `POST /api/auth/validate` → `POST /api/auth/device`.
+
+### Path B — Installer invite code
+
+If your account doesn't have a phone (some installer-managed setups), generate an invite code from the **official Intratone app → Mes infos → Ajouter un appareil** (format `448789-1206`) and paste it.
+
+### After pairing
+
+The integration registers an FCM push subscription and obtains a long-lived device JWT (rotated every 12 h). Both your existing phone and HA receive ring notifications in parallel; both can open the door.
+
+If HA detects expired credentials it triggers a re-authentication flow that **silently** refreshes the JWT from the stored phone + device_id — you should not need to re-pair in normal use. The form only appears if the backend has unbound your device (rare, e.g. account reset on the Intratone side).
 
 ## HomeKit Bridge configuration
 
@@ -140,6 +166,45 @@ Replace `<ID>` by the suffix HA uses in your entity IDs (your apartment's numeri
 
 To opt into VP8 video, set `INTRATONE_VIDEO_ENABLED=1` in HA's environment before starting it.
 
+## Recommended helpers
+
+The integration intentionally only ships the entities listed above. Common observability needs (last ring time, count today, "currently ringing" flag, per-door routing) compose cleanly out of HA's built-in template helpers — pick what you actually need.
+
+**Last ring timestamp.** No helper needed — `event.intratone_<ID>_sonnette` already exposes the timestamp of its last fire as its native state. Reference it directly in cards or templates:
+
+```
+{{ states('event.intratone_<ID>_sonnette') }}
+```
+
+**"Currently ringing" pulse.** Useful for HA conditions (`state: on`) or mobile notifications that want a stateful trigger. Add to `configuration.yaml`:
+
+```yaml
+template:
+  - trigger:
+      - platform: state
+        entity_id: event.intratone_<ID>_sonnette
+    binary_sensor:
+      - name: Intratone ringing
+        state: "on"
+        auto_off: "00:00:08"   # match your intercom's ~8 s ring window
+```
+
+**Rings today (counter, resets at midnight).** No YAML — create a **History Statistics** helper from the UI: Settings → Devices & services → Helpers → "+ Create Helper" → History statistics. Pick `event.intratone_<ID>_sonnette` as entity, type *Count from start of day*, state-changes.
+
+**Which door rang last (multi-door installs).** NBPORTE is in the event payload as `door_number`. A trigger-based template sensor captures it:
+
+```yaml
+template:
+  - trigger:
+      - platform: state
+        entity_id: event.intratone_<ID>_sonnette
+    sensor:
+      - name: Intratone last door
+        state: "{{ trigger.to_state.attributes.door_number }}"
+```
+
+You can also branch automations directly on `{{ trigger.event.data.door_number }}` inside a `platform: event` trigger on `event_type: state_changed` for the entity, if you don't need the value to persist as its own sensor.
+
 ## Troubleshooting
 
 **Ring doesn't reach iPhone** — verify `event.intratone_<ID>_sonnette` fires in HA (Developer Tools → Events) when someone rings. Check the FCM listener heartbeat in logs (`firebase_messaging` lines every ~20 s). Make sure your HomeKit Bridge accessory is paired and the `linked_doorbell_sensor` is set.
@@ -148,27 +213,22 @@ To opt into VP8 video, set `INTRATONE_VIDEO_ENABLED=1` in HA's environment befor
 
 **Tile opens but no audio** — look for `Packet size 180 too large` in HA's homekit ffmpeg logs. If present, the `audio_packet_size: 384` setting is missing from the HomeKit `entity_config` above. During a call, the `AUDIO_RX_SUMMARY` log line shows how many audio packets the integration received and whether their content was real audio or comfort-noise.
 
-**Door doesn't open** — the unlock action only works during the active call dialog (see [the constraint above](#important-door-unlock-requires-an-active-call)). Open the camera tile first to trigger the call, then tap the lock within ~25 s.
+**Door doesn't open** — the unlock action only works during the active call dialog (see [Caveats](#caveats)). Open the camera tile first to trigger the call, then tap the lock within ~25 s.
 
-**JWT expired** — auto-refreshed once per day. If you see `401` errors in logs, reload the integration manually; it will fetch a fresh JWT.
+**JWT expired** — auto-refreshed every 12 h. If HA detects an irrecoverable auth failure it triggers a re-authentication flow which silently mints a fresh JWT from the stored phone + device_id; the form only appears if the backend rejects that, in which case you'll need a new invite code from the official app.
 
-## How it works
+## Privacy
 
-```
-Visitor presses intercom
-     ↓ (FCM push, ~1 s)
-HA fires doorbell event → iPhone push notification
-     ↓ (user taps tile)
-HA opens SIP TCP connection → INVITE → 200 OK + SDP
-     ↓
-RTP audio (µ-law) + RTP video (VP8) from Intratone server
-     ↓ (audio_bridge.py: STUN-respond, depacket RTP, feed ffmpeg)
-ffmpeg transcode µ-law → Opus 16k mono / VP8 → H.264 baseline
-     ↓
-push RTSP → go2rtc → HomeKit Bridge → SRTP → iPhone Home.app
-```
+The integration stores in the HA config entry:
 
-See [`INTRATONE_API.md`](INTRATONE_API.md) for the full REST + SIP API reverse-engineering notes.
+- The **JWT** issued by Intratone (rotated every 12 h, or silently re-minted on auth failure).
+- The **FCM credentials** handed back by Google's MCS (used to keep the push channel open across restarts).
+- The **device id** generated locally during pairing (`ha-intratone-<random>`).
+- The **numeric account id** and **phone number** associated with the Intratone account that was paired.
+
+No call history, audio, or video is persisted to disk by the integration — RTP frames are transcoded and forwarded to go2rtc/HomeKit in real time, then dropped.
+
+**Settings → Devices & Services → Intratone Doorbell → ⋮ → Download diagnostics** produces a JSON dump for issue reports; phone number, JWT, FCM token + credentials, device id, numeric id and the caller SIP login are redacted automatically before download.
 
 ## Credits
 

@@ -27,4 +27,6 @@ CONF_JWT: Final = "jwt"
 CONF_FCM_TOKEN: Final = "fcm_token"
 CONF_FCM_CREDS: Final = "fcm_creds"
 
+DEFAULT_INDICATIF: Final = "33"
+
 JWT_REFRESH_INTERVAL_HOURS: Final = 12

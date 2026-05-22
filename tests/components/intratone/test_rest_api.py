@@ -8,8 +8,6 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from custom_components.intratone.const import (
     API_BASE,
-    CONF_JWT,
-    CONF_NUMERIC_ID,
 )
 from custom_components.intratone.rest_api import (
     IntratoneAPI,
@@ -18,6 +16,7 @@ from custom_components.intratone.rest_api import (
     authenticate_for_invite,
     register_with_invite,
 )
+from custom_components.intratone.store import IntratoneCredentialsStore
 
 
 @pytest.fixture
@@ -26,9 +25,18 @@ def aiomock():
         yield m
 
 
+async def _seeded_store(hass, jwt: str = "fake.jwt.token") -> IntratoneCredentialsStore:
+    """Standalone Store fixture for unit tests that don't go through setup."""
+    store = IntratoneCredentialsStore(hass, "3844428")
+    await store.async_load()
+    await store.async_update(jwt=jwt)
+    return store
+
+
 async def test_answer_call_success(hass, mock_entry, aiomock) -> None:
     mock_entry.add_to_hass(hass)
-    api = IntratoneAPI(hass, async_get_clientsession(hass), mock_entry)
+    store = await _seeded_store(hass)
+    api = IntratoneAPI(hass, async_get_clientsession(hass), mock_entry, store)
 
     aiomock.post(
         f"{API_BASE}api/calls/123/answer",
@@ -39,7 +47,8 @@ async def test_answer_call_success(hass, mock_entry, aiomock) -> None:
 
 async def test_answer_call_retries_after_jwt_refresh(hass, mock_entry, aiomock) -> None:
     mock_entry.add_to_hass(hass)
-    api = IntratoneAPI(hass, async_get_clientsession(hass), mock_entry)
+    store = await _seeded_store(hass)
+    api = IntratoneAPI(hass, async_get_clientsession(hass), mock_entry, store)
 
     aiomock.post(
         f"{API_BASE}api/calls/123/answer",
@@ -55,7 +64,8 @@ async def test_answer_call_retries_after_jwt_refresh(hass, mock_entry, aiomock) 
     )
 
     assert await api.answer_call("123") is True
-    assert hass.config_entries.async_get_entry(mock_entry.entry_id).data[CONF_JWT] == "newjwt"
+    # Refreshed JWT now lives in the Store, not in entry.data.
+    assert store.jwt == "newjwt"
 
 
 async def test_register_with_invite_returns_data(hass, aiomock) -> None:

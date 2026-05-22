@@ -23,12 +23,12 @@ from .const import (
     APP_TOKEN,
     APP_VERSION,
     CONF_DEVICE_ID,
-    CONF_JWT,
     CONF_NUMERIC_ID,
     CONF_TEL,
     DEVICE_BUNDLE_ID,
     JWT_REFRESH_INTERVAL_HOURS,
 )
+from .store import IntratoneCredentialsStore
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -51,15 +51,17 @@ class IntratoneAPI:
         hass: HomeAssistant,
         session: aiohttp.ClientSession,
         entry: ConfigEntry,
+        store: IntratoneCredentialsStore,
     ) -> None:
         self._hass = hass
         self._session = session
         self._entry = entry
+        self._store = store
         self._refresh_unsub = None
 
     @property
     def jwt(self) -> str | None:
-        return self._entry.data.get(CONF_JWT)
+        return self._store.jwt
 
     @property
     def numeric_id(self) -> str | None:
@@ -169,16 +171,20 @@ class IntratoneAPI:
         return body.get("error") == 0
 
     async def refresh_jwt(self) -> None:
-        """Refresh the JWT and persist it on the config entry."""
+        """Refresh the JWT and persist it via the credentials Store."""
         data = await self.authenticate_device()
         new_jwt = data.get("jwt")
         if not new_jwt:
             raise IntratoneAuthError("Refresh succeeded but no JWT in response")
 
-        new_data = {**self._entry.data, CONF_JWT: new_jwt}
+        await self._store.async_update(jwt=new_jwt)
         if data.get("id"):
-            new_data[CONF_NUMERIC_ID] = str(data["id"])
-        self._hass.config_entries.async_update_entry(self._entry, data=new_data)
+            new_id = str(data["id"])
+            if new_id != self._entry.data.get(CONF_NUMERIC_ID):
+                self._hass.config_entries.async_update_entry(
+                    self._entry,
+                    data={**self._entry.data, CONF_NUMERIC_ID: new_id},
+                )
         _LOGGER.debug("Intratone JWT refreshed")
 
     def async_start_jwt_refresh(self) -> None:
@@ -259,6 +265,103 @@ async def register_with_invite(
     if not data.get("id") or not data.get("tel"):
         raise IntratoneAuthError(f"registercodes incomplete response: {body}")
     return data
+
+
+async def register_phone_for_sms(
+    session: aiohttp.ClientSession,
+    *,
+    device_id: str,
+    fcm_token: str,
+    tel: str,
+    indicatif: str,
+) -> dict[str, Any]:
+    """POST /api/auth/register — phone-based onboarding (triggers SMS).
+
+    Mirrors `AuthApi.registerDevice` in `com.cogelec.notificationpush`. The
+    response carries the server-assigned numeric account id under `data.id`.
+    """
+    form = {
+        "tel": tel,
+        "tel_indicatif": indicatif,
+        "os": "android",
+        "osv": "29",
+        "model": "HA-Bridge",
+        "manufacturer": "HomeAssistant",
+        "device_id": device_id,
+        "description": "Home Assistant",
+        "appversion": APP_VERSION,
+        "id_fcm": fcm_token,
+        "id_wonderpush": "",
+        "bundleid": DEVICE_BUNDLE_ID,
+    }
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/json",
+    }
+    async with session.post(
+        API_BASE + "api/auth/register",
+        data=form,
+        headers=headers,
+        timeout=REQUEST_TIMEOUT,
+    ) as resp:
+        try:
+            body = await resp.json(content_type=None)
+        except aiohttp.ContentTypeError as err:
+            raise IntratoneApiError(f"Non-JSON response: {err}") from err
+
+    if not isinstance(body, dict) or body.get("state") == "error":
+        msg = (
+            body.get("message") or body.get("code")
+            if isinstance(body, dict)
+            else body
+        )
+        raise IntratoneAuthError(f"register rejected: {msg}")
+
+    return body.get("data") or {}
+
+
+async def validate_sms_code(
+    session: aiohttp.ClientSession,
+    *,
+    tel: str,
+    indicatif: str,
+    device_id: str,
+    code: str,
+) -> None:
+    """POST /api/auth/validate — confirm the 4-digit SMS code.
+
+    Raises `IntratoneAuthError` if the code is wrong / expired. On success
+    the caller proceeds to `authenticate_for_invite` (a.k.a. /api/auth/device)
+    to mint a JWT.
+    """
+    form = {
+        "tel": tel,
+        "tel_indicatif": indicatif,
+        "device_id": device_id,
+        "code": code,
+    }
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/json",
+    }
+    async with session.post(
+        API_BASE + "api/auth/validate",
+        data=form,
+        headers=headers,
+        timeout=REQUEST_TIMEOUT,
+    ) as resp:
+        try:
+            body = await resp.json(content_type=None)
+        except aiohttp.ContentTypeError as err:
+            raise IntratoneApiError(f"Non-JSON response: {err}") from err
+
+    if not isinstance(body, dict) or body.get("state") == "error":
+        msg = (
+            body.get("message") or body.get("code")
+            if isinstance(body, dict)
+            else body
+        )
+        raise IntratoneAuthError(f"validate rejected: {msg}")
 
 
 async def authenticate_for_invite(

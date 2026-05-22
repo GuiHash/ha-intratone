@@ -59,6 +59,35 @@ async def test_handle_push_without_call_id_is_ignored(coordinator) -> None:
     assert coordinator.data is None
 
 
+async def test_handle_push_with_call_id_but_no_message_is_ignored(
+    coordinator,
+) -> None:
+    """Mirrors Cogelec's `detectNotificationTypeFromData`: a v1-shaped push
+    is a call only when BOTH `call_id` and `message` are present."""
+    await coordinator.async_handle_push({"call_id": "1"})
+    assert coordinator.data is None
+
+
+async def test_handle_push_type_24_alternative_format(coordinator) -> None:
+    """The newer FCM shape keys the call_id on `NOTIFICATION_UUID` and
+    routes via `domain_sip` instead of `ip_adress`."""
+    await coordinator.async_handle_push(
+        {
+            "TYPE": "24",
+            "NOTIFICATION_UUID": "uuid-42",
+            "LOGIN_TO_CALL": "TARGET",
+            "LOGIN": "u",
+            "PASS": "p",
+            "domain_sip": "sip.intratone.info",
+        }
+    )
+    assert coordinator.data is not None
+    assert coordinator.data.call_id == "uuid-42"
+    # SIP creds were resolved against `domain_sip`, so the lazy INVITE is armed.
+    assert coordinator._pending is not None
+    assert coordinator._pending.target_uri == "sip:TARGET@sip.intratone.info"
+
+
 async def test_open_door_with_no_call_returns_false(coordinator) -> None:
     assert await coordinator.async_open_door() is False
     coordinator.api.answer_call.assert_not_awaited()

@@ -1,8 +1,9 @@
 """Background FCM listener for Intratone doorbell pushes.
 
-Wraps `firebase-messaging`'s `FcmPushClient`. Credentials are stored on the
-config entry under `CONF_FCM_CREDS` and refreshed in-place when the upstream
-client rotates them.
+Wraps `firebase-messaging`'s `FcmPushClient`. Credentials live in the
+per-account `IntratoneCredentialsStore` (not on `entry.data`); the upstream
+client rotates them via its `credentials_updated_callback`, which we route
+through the Store.
 
 Note: `firebase-messaging` is a community-maintained reverse-engineering of
 Google's MCS protocol. Pin the version and watch for upstream changes.
@@ -12,19 +13,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 
 from .const import (
-    CONF_FCM_CREDS,
     DEVICE_BUNDLE_ID,
     FCM_API_KEY,
     FCM_APP_ID,
     FCM_PROJECT_ID,
     FCM_SENDER_ID,
 )
+from .store import IntratoneCredentialsStore
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -81,13 +83,42 @@ class FcmListener:
         hass: HomeAssistant,
         entry: ConfigEntry,
         coordinator,
+        store: IntratoneCredentialsStore,
     ) -> None:
         self._hass = hass
         self._entry = entry
         self._coordinator = coordinator
+        self._store = store
         self._task: asyncio.Task | None = None
         self._client = None
         self._stopping = False
+        self._connected = False
+        self._state_listeners: list[Callable[[bool], None]] = []
+
+    @property
+    def connected(self) -> bool:
+        return self._connected
+
+    def add_state_listener(
+        self, listener: Callable[[bool], None]
+    ) -> Callable[[], None]:
+        """Subscribe to FCM connection state transitions.
+
+        The listener is called with `True` once the upstream client is up,
+        and `False` when it dies or is stopped. Returns an unsubscribe.
+        """
+        self._state_listeners.append(listener)
+        return lambda: self._state_listeners.remove(listener)
+
+    def _set_connected(self, connected: bool) -> None:
+        if self._connected == connected:
+            return
+        self._connected = connected
+        for listener in list(self._state_listeners):
+            try:
+                listener(connected)
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("FCM state listener raised")
 
     async def async_start(self) -> None:
         self._stopping = False
@@ -110,6 +141,7 @@ class FcmListener:
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
             self._task = None
+        self._set_connected(False)
 
     async def _supervisor(self) -> None:
         """Restart the FCM client with exponential backoff on failure."""
@@ -134,7 +166,7 @@ class FcmListener:
         from firebase_messaging import FcmPushClient
         from firebase_messaging.fcmpushclient import FcmPushClientRunState
 
-        creds = self._entry.data.get(CONF_FCM_CREDS)
+        creds = self._store.fcm_creds
 
         def _on_push(notification: dict, persistent_id: str, _ctx) -> None:
             data = (notification or {}).get("data") or {}
@@ -151,6 +183,7 @@ class FcmListener:
         )
         await self._client.checkin_or_register()
         await self._client.start()
+        self._set_connected(True)
 
         # Poll the client's run_state. The library's _listen task swallows
         # connection errors and after 3 sequential errors calls _terminate()
@@ -161,18 +194,20 @@ class FcmListener:
             FcmPushClientRunState.STOPPING,
             FcmPushClientRunState.STOPPED,
         )
-        while not self._stopping:
-            await asyncio.sleep(HEALTHCHECK_INTERVAL_S)
-            state = getattr(self._client, "run_state", None)
-            if state in dead_states:
-                raise RuntimeError(
-                    f"FcmPushClient stopped itself (state={state})"
-                )
+        try:
+            while not self._stopping:
+                await asyncio.sleep(HEALTHCHECK_INTERVAL_S)
+                state = getattr(self._client, "run_state", None)
+                if state in dead_states:
+                    raise RuntimeError(
+                        f"FcmPushClient stopped itself (state={state})"
+                    )
+        finally:
+            self._set_connected(False)
 
     @callback
     def _persist_creds(self, new_creds: dict) -> None:
-        new_data = {**self._entry.data, CONF_FCM_CREDS: new_creds}
-        self._hass.config_entries.async_update_entry(self._entry, data=new_data)
+        self._hass.async_create_task(self._store.async_update(fcm_creds=new_creds))
 
     @callback
     def _dispatch_push(self, data: dict) -> None:
