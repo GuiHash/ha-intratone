@@ -41,6 +41,7 @@ class IntratoneDoorbellEvent(IntratoneEntity, EventEntity):
                 "ring",
                 {
                     "door_name": state.door_name,
+                    "door_number": state.door_number,
                     "caller": state.caller_login,
                     "call_id": state.call_id,
                 },

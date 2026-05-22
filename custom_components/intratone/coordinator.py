@@ -55,6 +55,9 @@ class CallState:
     # in the in-dialog SIP MESSAGE that actually triggers the relay. Defaults
     # to `*` (the most common Intratone setup).
     door_code: str = "*"
+    # Physical door identifier (`NBPORTE` in the FCM payload). Useful for
+    # multi-door installs (street door vs apartment door vs garage gate).
+    door_number: str = ""
 
 
 @dataclass
@@ -141,6 +144,7 @@ class IntratoneCoordinator(DataUpdateCoordinator[CallState | None]):
             received_at=datetime.now(UTC),
             ring_seq=self._ring_seq,
             door_code=payload.get("codes") or "*",
+            door_number=payload.get("NBPORTE", ""),
         )
         _LOGGER.info(
             "Doorbell ring: door=%s call_id=%s seq=%d (SIP deferred)",

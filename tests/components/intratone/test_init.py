@@ -53,6 +53,7 @@ async def test_full_setup_push_open_door(
         {
             "call_id": "300705065",
             "message": "PORTE RUE",
+            "NBPORTE": "1",
             "LOGIN_TO_CALL": "2DO77UAO49XTGJ5Y93TFIZ8YLPIMXN36",
             "LOGIN": "cogelecTest",
             "PASS": "CogeleC",
@@ -64,6 +65,8 @@ async def test_full_setup_push_open_door(
     event_state = hass.states.get(event_eid)
     assert event_state.attributes.get("event_type") == "ring"
     assert event_state.attributes.get("door_name") == "PORTE RUE"
+    # NBPORTE rides along so user automations can branch on which door rang.
+    assert event_state.attributes.get("door_number") == "1"
 
     # Unlock the door via the lock entity.
     await hass.services.async_call(

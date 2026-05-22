@@ -4,13 +4,14 @@ Native Home Assistant integration for the **Intratone** intercom system (manufac
 
 ## Features
 
-After pairing, the integration creates three entities under one device:
+After pairing, the integration creates these entities under one device:
 
 | Entity | What you can do |
 |---|---|
-| `event.intratone_<ID>_sonnette` | Fires every time a visitor rings the intercom. Usable as automation trigger. |
+| `event.intratone_<ID>_sonnette` | Fires every time a visitor rings the intercom. Payload includes `door_name`, `door_number` (NBPORTE), `caller`, `call_id`. Usable as automation trigger. |
 | `camera.intratone_<ID>_interphone` | Placeholder image when idle. Live audio + video stream during a call. |
-| `lock.intratone_<ID>_porte` | Tap *Unlock* → opens the door (sends `opendoor:*` SIP MESSAGE, same backend as the official Intratone app). |
+| `lock.intratone_<ID>_porte` | Tap *Unlock* → opens the door (sends `opendoor:<code>` SIP MESSAGE, same backend as the official Intratone app). |
+| `binary_sensor.intratone_<ID>_push_channel_connected` | Diagnostic — `on` while the FCM push channel is up. If it goes `off`, you won't be notified of rings. |
 
 Exposed to HomeKit via HA's HomeKit Bridge, the camera tile on iPhone Home.app delivers:
 
@@ -139,6 +140,45 @@ homekit:
 Replace `<ID>` by the suffix HA uses in your entity IDs (your apartment's numeric ID, visible in any of the three entity names). Restart HA so the Bridge picks up the new config.
 
 To opt into VP8 video, set `INTRATONE_VIDEO_ENABLED=1` in HA's environment before starting it.
+
+## Recommended helpers
+
+The integration intentionally only ships the entities listed above. Common observability needs (last ring time, count today, "currently ringing" flag, per-door routing) compose cleanly out of HA's built-in template helpers — pick what you actually need.
+
+**Last ring timestamp.** No helper needed — `event.intratone_<ID>_sonnette` already exposes the timestamp of its last fire as its native state. Reference it directly in cards or templates:
+
+```
+{{ states('event.intratone_<ID>_sonnette') }}
+```
+
+**"Currently ringing" pulse.** Useful for HA conditions (`state: on`) or mobile notifications that want a stateful trigger. Add to `configuration.yaml`:
+
+```yaml
+template:
+  - trigger:
+      - platform: state
+        entity_id: event.intratone_<ID>_sonnette
+    binary_sensor:
+      - name: Intratone ringing
+        state: "on"
+        auto_off: "00:00:08"   # match your intercom's ~8 s ring window
+```
+
+**Rings today (counter, resets at midnight).** No YAML — create a **History Statistics** helper from the UI: Settings → Devices & services → Helpers → "+ Create Helper" → History statistics. Pick `event.intratone_<ID>_sonnette` as entity, type *Count from start of day*, state-changes.
+
+**Which door rang last (multi-door installs).** NBPORTE is in the event payload as `door_number`. A trigger-based template sensor captures it:
+
+```yaml
+template:
+  - trigger:
+      - platform: state
+        entity_id: event.intratone_<ID>_sonnette
+    sensor:
+      - name: Intratone last door
+        state: "{{ trigger.to_state.attributes.door_number }}"
+```
+
+You can also branch automations directly on `{{ trigger.event.data.door_number }}` inside a `platform: event` trigger on `event_type: state_changed` for the entity, if you don't need the value to persist as its own sensor.
 
 ## Troubleshooting
 
