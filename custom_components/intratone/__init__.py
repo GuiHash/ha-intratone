@@ -23,7 +23,12 @@ from .rest_api import IntratoneAPI
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.CAMERA, Platform.EVENT, Platform.LOCK]
+PLATFORMS: list[Platform] = [
+    Platform.BINARY_SENSOR,
+    Platform.CAMERA,
+    Platform.EVENT,
+    Platform.LOCK,
+]
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 

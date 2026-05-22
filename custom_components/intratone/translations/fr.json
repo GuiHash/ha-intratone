@@ -63,6 +63,11 @@
       "door": {
         "name": "Porte"
       }
+    },
+    "binary_sensor": {
+      "fcm_connected": {
+        "name": "Canal push connecté"
+      }
     }
   }
 }

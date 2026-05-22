@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -88,6 +89,33 @@ class FcmListener:
         self._task: asyncio.Task | None = None
         self._client = None
         self._stopping = False
+        self._connected = False
+        self._state_listeners: list[Callable[[bool], None]] = []
+
+    @property
+    def connected(self) -> bool:
+        return self._connected
+
+    def add_state_listener(
+        self, listener: Callable[[bool], None]
+    ) -> Callable[[], None]:
+        """Subscribe to FCM connection state transitions.
+
+        The listener is called with `True` once the upstream client is up,
+        and `False` when it dies or is stopped. Returns an unsubscribe.
+        """
+        self._state_listeners.append(listener)
+        return lambda: self._state_listeners.remove(listener)
+
+    def _set_connected(self, connected: bool) -> None:
+        if self._connected == connected:
+            return
+        self._connected = connected
+        for listener in list(self._state_listeners):
+            try:
+                listener(connected)
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("FCM state listener raised")
 
     async def async_start(self) -> None:
         self._stopping = False
@@ -110,6 +138,7 @@ class FcmListener:
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
             self._task = None
+        self._set_connected(False)
 
     async def _supervisor(self) -> None:
         """Restart the FCM client with exponential backoff on failure."""
@@ -151,6 +180,7 @@ class FcmListener:
         )
         await self._client.checkin_or_register()
         await self._client.start()
+        self._set_connected(True)
 
         # Poll the client's run_state. The library's _listen task swallows
         # connection errors and after 3 sequential errors calls _terminate()
@@ -161,13 +191,16 @@ class FcmListener:
             FcmPushClientRunState.STOPPING,
             FcmPushClientRunState.STOPPED,
         )
-        while not self._stopping:
-            await asyncio.sleep(HEALTHCHECK_INTERVAL_S)
-            state = getattr(self._client, "run_state", None)
-            if state in dead_states:
-                raise RuntimeError(
-                    f"FcmPushClient stopped itself (state={state})"
-                )
+        try:
+            while not self._stopping:
+                await asyncio.sleep(HEALTHCHECK_INTERVAL_S)
+                state = getattr(self._client, "run_state", None)
+                if state in dead_states:
+                    raise RuntimeError(
+                        f"FcmPushClient stopped itself (state={state})"
+                    )
+        finally:
+            self._set_connected(False)
 
     @callback
     def _persist_creds(self, new_creds: dict) -> None:
