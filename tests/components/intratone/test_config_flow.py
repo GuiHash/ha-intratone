@@ -17,6 +17,7 @@ from custom_components.intratone.const import (
     CONF_TEL,
     DOMAIN,
 )
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 
 @pytest.fixture
@@ -88,3 +89,48 @@ async def test_rejected_invite_shows_error(
     )
     assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {"base": "invalid_code"}
+
+
+async def test_reauth_silent_refresh_succeeds(
+    hass, mock_entry: MockConfigEntry, aiomock, mock_fcm_client, mock_call_manager
+) -> None:
+    """Stored phone+device_id can still mint a JWT → no prompt to the user."""
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={"state": "ok", "data": {"jwt": "renewed.jwt", "id": "3844428"}},
+        repeat=True,
+    )
+    mock_entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(mock_entry.entry_id)
+    await hass.async_block_till_done()
+
+    result = await mock_entry.start_reauth_flow(hass)
+    await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reauth_successful"
+    assert mock_entry.data[CONF_JWT] == "renewed.jwt"
+
+
+async def test_reauth_falls_back_to_form_when_silent_refresh_rejected(
+    hass, mock_entry: MockConfigEntry, aiomock, mock_fcm_client, mock_call_manager
+) -> None:
+    """When the backend refuses the stored credentials, the user is asked
+    for a fresh invitation code."""
+    mock_entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(mock_entry.entry_id)
+    await hass.async_block_till_done()
+
+    # Silent reauth tries /api/auth/device — return an error so we fall
+    # through to the invite-code form.
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={"state": "error", "message": "device unknown"},
+        repeat=True,
+    )
+
+    result = await mock_entry.start_reauth_flow(hass)
+    await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "reauth_confirm"
