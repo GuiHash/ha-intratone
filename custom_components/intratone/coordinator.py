@@ -114,10 +114,23 @@ class IntratoneCoordinator(DataUpdateCoordinator[CallState | None]):
         Stores SIP creds + fires the HomeKit doorbell event so the iPhone
         rings. Does NOT open the SIP dialog — that happens lazily when the
         user taps live view or Unlock.
+
+        Cogelec emits two payload shapes — the historical `call_id` +
+        `message` form, and a newer `TYPE=24` form keyed on
+        `NOTIFICATION_UUID`. We accept both and ignore anything else.
         """
-        call_id = payload.get("call_id")
+        is_call = (
+            (payload.get("call_id") and payload.get("message"))
+            or payload.get("TYPE") == "24"
+        )
+        if not is_call:
+            _LOGGER.debug("Push not a call, ignoring: %s", _redact(payload))
+            return
+        call_id = payload.get("call_id") or payload.get("NOTIFICATION_UUID")
         if not call_id:
-            _LOGGER.debug("Push without call_id, ignoring: %s", _redact(payload))
+            _LOGGER.debug(
+                "Call push without identifier, ignoring: %s", _redact(payload)
+            )
             return
 
         self._ring_seq += 1
@@ -140,7 +153,7 @@ class IntratoneCoordinator(DataUpdateCoordinator[CallState | None]):
         sip_target_user = payload.get("LOGIN_TO_CALL")
         sip_user = payload.get("LOGIN")
         sip_pass = payload.get("PASS")
-        sip_server_ip = payload.get("ip_adress")
+        sip_server_ip = payload.get("ip_adress") or payload.get("domain_sip")
         if all((sip_target_user, sip_user, sip_pass, sip_server_ip)):
             self._pending = _PendingInvite(
                 fcm_call_id=str(call_id),
