@@ -1,8 +1,9 @@
 """Background FCM listener for Intratone doorbell pushes.
 
-Wraps `firebase-messaging`'s `FcmPushClient`. Credentials are stored on the
-config entry under `CONF_FCM_CREDS` and refreshed in-place when the upstream
-client rotates them.
+Wraps `firebase-messaging`'s `FcmPushClient`. Credentials live in the
+per-account `IntratoneCredentialsStore` (not on `entry.data`); the upstream
+client rotates them via its `credentials_updated_callback`, which we route
+through the Store.
 
 Note: `firebase-messaging` is a community-maintained reverse-engineering of
 Google's MCS protocol. Pin the version and watch for upstream changes.
@@ -19,13 +20,13 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 
 from .const import (
-    CONF_FCM_CREDS,
     DEVICE_BUNDLE_ID,
     FCM_API_KEY,
     FCM_APP_ID,
     FCM_PROJECT_ID,
     FCM_SENDER_ID,
 )
+from .store import IntratoneCredentialsStore
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -82,10 +83,12 @@ class FcmListener:
         hass: HomeAssistant,
         entry: ConfigEntry,
         coordinator,
+        store: IntratoneCredentialsStore,
     ) -> None:
         self._hass = hass
         self._entry = entry
         self._coordinator = coordinator
+        self._store = store
         self._task: asyncio.Task | None = None
         self._client = None
         self._stopping = False
@@ -163,7 +166,7 @@ class FcmListener:
         from firebase_messaging import FcmPushClient
         from firebase_messaging.fcmpushclient import FcmPushClientRunState
 
-        creds = self._entry.data.get(CONF_FCM_CREDS)
+        creds = self._store.fcm_creds
 
         def _on_push(notification: dict, persistent_id: str, _ctx) -> None:
             data = (notification or {}).get("data") or {}
@@ -204,8 +207,7 @@ class FcmListener:
 
     @callback
     def _persist_creds(self, new_creds: dict) -> None:
-        new_data = {**self._entry.data, CONF_FCM_CREDS: new_creds}
-        self._hass.config_entries.async_update_entry(self._entry, data=new_data)
+        self._hass.async_create_task(self._store.async_update(fcm_creds=new_creds))
 
     @callback
     def _dispatch_push(self, data: dict) -> None:

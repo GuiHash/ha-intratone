@@ -23,12 +23,12 @@ from .const import (
     APP_TOKEN,
     APP_VERSION,
     CONF_DEVICE_ID,
-    CONF_JWT,
     CONF_NUMERIC_ID,
     CONF_TEL,
     DEVICE_BUNDLE_ID,
     JWT_REFRESH_INTERVAL_HOURS,
 )
+from .store import IntratoneCredentialsStore
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -51,15 +51,17 @@ class IntratoneAPI:
         hass: HomeAssistant,
         session: aiohttp.ClientSession,
         entry: ConfigEntry,
+        store: IntratoneCredentialsStore,
     ) -> None:
         self._hass = hass
         self._session = session
         self._entry = entry
+        self._store = store
         self._refresh_unsub = None
 
     @property
     def jwt(self) -> str | None:
-        return self._entry.data.get(CONF_JWT)
+        return self._store.jwt
 
     @property
     def numeric_id(self) -> str | None:
@@ -169,16 +171,20 @@ class IntratoneAPI:
         return body.get("error") == 0
 
     async def refresh_jwt(self) -> None:
-        """Refresh the JWT and persist it on the config entry."""
+        """Refresh the JWT and persist it via the credentials Store."""
         data = await self.authenticate_device()
         new_jwt = data.get("jwt")
         if not new_jwt:
             raise IntratoneAuthError("Refresh succeeded but no JWT in response")
 
-        new_data = {**self._entry.data, CONF_JWT: new_jwt}
+        await self._store.async_update(jwt=new_jwt)
         if data.get("id"):
-            new_data[CONF_NUMERIC_ID] = str(data["id"])
-        self._hass.config_entries.async_update_entry(self._entry, data=new_data)
+            new_id = str(data["id"])
+            if new_id != self._entry.data.get(CONF_NUMERIC_ID):
+                self._hass.config_entries.async_update_entry(
+                    self._entry,
+                    data={**self._entry.data, CONF_NUMERIC_ID: new_id},
+                )
         _LOGGER.debug("Intratone JWT refreshed")
 
     def async_start_jwt_refresh(self) -> None:

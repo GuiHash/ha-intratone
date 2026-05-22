@@ -16,10 +16,16 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .call_manager import CallManager
-from .const import DOMAIN
+from .const import (
+    CONF_FCM_CREDS,
+    CONF_FCM_TOKEN,
+    CONF_JWT,
+    DOMAIN,
+)
 from .coordinator import IntratoneCoordinator
 from .fcm_listener import FcmListener
 from .rest_api import IntratoneAPI
+from .store import IntratoneCredentialsStore
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -57,6 +63,7 @@ class IntratoneRuntime:
     coordinator: IntratoneCoordinator
     fcm: FcmListener
     call_manager: CallManager
+    store: IntratoneCredentialsStore
 
 
 type IntratoneConfigEntry = ConfigEntry[IntratoneRuntime]
@@ -106,7 +113,12 @@ async def async_setup(hass: HomeAssistant, _config: dict) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: IntratoneConfigEntry) -> bool:
     """Set up Intratone from a config entry."""
     session = async_get_clientsession(hass)
-    api = IntratoneAPI(hass, session, entry)
+
+    store = IntratoneCredentialsStore(hass, entry.unique_id or entry.entry_id)
+    await store.async_load()
+    await _async_migrate_legacy_creds(hass, entry, store)
+
+    api = IntratoneAPI(hass, session, entry, store)
 
     coordinator = IntratoneCoordinator(hass, entry, api)
     await coordinator.async_config_entry_first_refresh()
@@ -129,17 +141,56 @@ async def async_setup_entry(hass: HomeAssistant, entry: IntratoneConfigEntry) ->
     await call_manager.async_start()
     coordinator.attach_call_manager(call_manager)
 
-    fcm = FcmListener(hass, entry, coordinator)
+    fcm = FcmListener(hass, entry, coordinator, store)
     await fcm.async_start()
 
     entry.runtime_data = IntratoneRuntime(
-        api=api, coordinator=coordinator, fcm=fcm, call_manager=call_manager
+        api=api,
+        coordinator=coordinator,
+        fcm=fcm,
+        call_manager=call_manager,
+        store=store,
     )
 
     api.async_start_jwt_refresh()
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
+
+
+async def _async_migrate_legacy_creds(
+    hass: HomeAssistant,
+    entry: IntratoneConfigEntry,
+    store: IntratoneCredentialsStore,
+) -> None:
+    """Move rotated credentials out of `entry.data` into the dedicated Store.
+
+    Older versions of the integration kept JWT, FCM token and FCM credentials
+    on `entry.data`, which churned `core.config_entries.json` on every JWT
+    refresh (12 h) and on every Google MCS credential rotation. This shifts
+    them once into the per-entry Store; subsequent setups are a no-op.
+    """
+    legacy = {}
+    if CONF_JWT in entry.data:
+        legacy["jwt"] = entry.data[CONF_JWT]
+    if CONF_FCM_TOKEN in entry.data:
+        legacy["fcm_token"] = entry.data[CONF_FCM_TOKEN]
+    if CONF_FCM_CREDS in entry.data:
+        legacy["fcm_creds"] = entry.data[CONF_FCM_CREDS]
+    if not legacy:
+        return
+
+    await store.async_update(**legacy)
+    clean = {
+        k: v
+        for k, v in entry.data.items()
+        if k not in (CONF_JWT, CONF_FCM_TOKEN, CONF_FCM_CREDS)
+    }
+    hass.config_entries.async_update_entry(entry, data=clean)
+    _LOGGER.info(
+        "Intratone: migrated %d credential field(s) from entry.data to Store",
+        len(legacy),
+    )
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: IntratoneConfigEntry) -> bool:

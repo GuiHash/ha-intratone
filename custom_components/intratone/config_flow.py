@@ -13,10 +13,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
     CONF_DEVICE_ID,
-    CONF_FCM_CREDS,
-    CONF_FCM_TOKEN,
     CONF_INVITE_CODE,
-    CONF_JWT,
     CONF_NUMERIC_ID,
     CONF_TEL,
     DOMAIN,
@@ -28,6 +25,7 @@ from .rest_api import (
     authenticate_for_invite,
     register_with_invite,
 )
+from .store import IntratoneCredentialsStore
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -72,8 +70,9 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
     async def _async_try_silent_reauth(self) -> dict[str, Any] | None:
         """Best-effort JWT refresh using already-persisted credentials.
 
-        Returns the updated entry data on success, None on any failure
-        (caller falls back to the invite-code form).
+        Writes the fresh JWT to the credentials Store and returns the
+        updated entry data on success, or None on any failure (caller
+        falls back to the invite-code form).
         """
         entry = self._reauth_entry
         if entry is None:
@@ -98,7 +97,13 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
             )
             return None
 
-        new_data = {**entry.data, CONF_JWT: data["jwt"]}
+        store = IntratoneCredentialsStore(
+            self.hass, entry.unique_id or entry.entry_id
+        )
+        await store.async_load()
+        await store.async_update(jwt=data["jwt"])
+
+        new_data = dict(entry.data)
         if data.get("id"):
             new_data[CONF_NUMERIC_ID] = str(data["id"])
         return new_data
@@ -123,7 +128,7 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
             else:
                 code, codepass = match.group(1), match.group(2)
                 try:
-                    entry_data = await self._pair(code, codepass)
+                    entry_data, creds = await self._pair(code, codepass)
                 except IntratoneAuthError as err:
                     _LOGGER.warning("Pairing failed: %s", err)
                     errors["base"] = "invalid_code"
@@ -138,6 +143,15 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
                         errors["base"] = "unknown"
                 else:
                     await self.async_set_unique_id(entry_data[CONF_NUMERIC_ID])
+
+                    # Pre-write rotated credentials to the per-account Store
+                    # so they never touch entry.data. The Store key uses the
+                    # numeric_id (= unique_id) which we just set.
+                    store = IntratoneCredentialsStore(
+                        self.hass, entry_data[CONF_NUMERIC_ID]
+                    )
+                    await store.async_load()
+                    await store.async_update(**creds)
 
                     if self._reauth_entry is not None:
                         self._abort_if_unique_id_mismatch()
@@ -157,8 +171,15 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    async def _pair(self, code: str, codepass: str) -> dict[str, Any]:
-        """Run FCM register + Intratone registercodes + auth/device."""
+    async def _pair(
+        self, code: str, codepass: str
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Run FCM register + Intratone registercodes + auth/device.
+
+        Returns `(entry_data, creds)` — entry_data goes on the config entry
+        (device id, phone, numeric id), creds goes into the per-account
+        Store (JWT, FCM token, FCM credentials).
+        """
         session = async_get_clientsession(self.hass)
 
         device_id = (
@@ -167,11 +188,13 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
             else None
         ) or f"ha-intratone-{uuid.uuid4().hex[:12]}"
 
-        existing_creds = (
-            self._reauth_entry.data.get(CONF_FCM_CREDS)
-            if self._reauth_entry is not None
-            else None
-        )
+        existing_creds: dict[str, Any] | None = None
+        if self._reauth_entry is not None and self._reauth_entry.unique_id:
+            cached = IntratoneCredentialsStore(
+                self.hass, self._reauth_entry.unique_id
+            )
+            await cached.async_load()
+            existing_creds = cached.fcm_creds
 
         fcm_token, fcm_creds = await fcm_register_standalone(existing_creds)
 
@@ -189,11 +212,14 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
             session, tel=tel, device_id=device_id
         )
 
-        return {
+        entry_data = {
             CONF_DEVICE_ID: device_id,
             CONF_NUMERIC_ID: numeric_id,
             CONF_TEL: tel,
-            CONF_JWT: auth_data["jwt"],
-            CONF_FCM_TOKEN: fcm_token,
-            CONF_FCM_CREDS: fcm_creds,
         }
+        creds = {
+            "jwt": auth_data["jwt"],
+            "fcm_token": fcm_token,
+            "fcm_creds": fcm_creds,
+        }
+        return entry_data, creds

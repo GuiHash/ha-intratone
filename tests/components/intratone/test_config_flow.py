@@ -70,8 +70,16 @@ async def test_happy_path_creates_entry(
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"][CONF_TEL] == "0671124546"
     assert result["data"][CONF_NUMERIC_ID] == "3844428"
-    assert result["data"][CONF_JWT] == "fresh.jwt"
+    # JWT lives in the per-account credentials Store, not in entry.data.
+    assert CONF_JWT not in result["data"]
     patched_fcm_register.assert_awaited_once()
+    # The Store was pre-written under the unique_id.
+    from custom_components.intratone.store import IntratoneCredentialsStore
+
+    store = IntratoneCredentialsStore(hass, "3844428")
+    await store.async_load()
+    assert store.jwt == "fresh.jwt"
+    assert store.fcm_token == "fake-fcm-token"
 
 
 async def test_rejected_invite_shows_error(
@@ -109,7 +117,9 @@ async def test_reauth_silent_refresh_succeeds(
 
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "reauth_successful"
-    assert mock_entry.data[CONF_JWT] == "renewed.jwt"
+    # JWT was refreshed into the Store, not into entry.data.
+    assert CONF_JWT not in mock_entry.data
+    assert mock_entry.runtime_data.store.jwt == "renewed.jwt"
 
 
 async def test_reauth_falls_back_to_form_when_silent_refresh_rejected(

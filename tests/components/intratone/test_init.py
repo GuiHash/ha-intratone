@@ -88,6 +88,43 @@ async def test_full_setup_push_open_door(
     mock_fcm_client.instance.stop.assert_awaited()
 
 
+async def test_legacy_creds_in_entry_data_migrate_to_store(
+    hass, mock_entry, mock_fcm_client, mock_call_manager, aiomock
+) -> None:
+    """Pre-Store installs kept JWT / FCM creds in `entry.data`. On the first
+    setup after upgrade, those fields move into the per-account Store and
+    are stripped from the config entry."""
+    from custom_components.intratone.const import (
+        CONF_FCM_CREDS,
+        CONF_FCM_TOKEN,
+        CONF_JWT,
+    )
+
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={"state": "ok", "data": {"jwt": "fake.jwt.token", "id": "3844428"}},
+        repeat=True,
+    )
+
+    # mock_entry_data (from conftest) carries the legacy fields.
+    assert CONF_JWT in mock_entry.data
+    assert CONF_FCM_CREDS in mock_entry.data
+
+    mock_entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(mock_entry.entry_id)
+    await hass.async_block_till_done()
+
+    # After setup: entry.data is clean, Store holds the rotated values.
+    cleaned = hass.config_entries.async_get_entry(mock_entry.entry_id).data
+    for key in (CONF_JWT, CONF_FCM_TOKEN, CONF_FCM_CREDS):
+        assert key not in cleaned, key
+
+    runtime = mock_entry.runtime_data
+    assert runtime.store.jwt == "fake.jwt.token"
+    assert runtime.store.fcm_token == "fake-fcm-token"
+    assert runtime.store.fcm_creds == {"gcm": {"android_id": 1, "security_token": 2}}
+
+
 async def test_simulate_ring_service(
     hass, mock_entry, mock_fcm_client, mock_call_manager, aiomock
 ) -> None:

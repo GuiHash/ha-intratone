@@ -28,6 +28,8 @@ REDACT_ENTRY = {
     CONF_TEL,
 }
 
+REDACT_STORE = {"jwt", "fcm_token", "fcm_creds"}
+
 REDACT_STATE = {"caller_login"}
 
 
@@ -36,6 +38,7 @@ async def async_get_config_entry_diagnostics(
 ) -> dict[str, Any]:
     runtime = getattr(entry, "runtime_data", None)
     coordinator = runtime.coordinator if runtime else None
+    store = runtime.store if runtime else None
 
     state: dict[str, Any] | None = None
     if coordinator is not None and coordinator.data is not None:
@@ -58,5 +61,8 @@ async def async_get_config_entry_diagnostics(
             "data": async_redact_data(dict(entry.data), REDACT_ENTRY),
             "options": dict(entry.options),
         },
+        "store": async_redact_data(store.snapshot(), REDACT_STORE)
+        if store is not None
+        else None,
         "coordinator": {"last_call": state} if coordinator is not None else None,
     }

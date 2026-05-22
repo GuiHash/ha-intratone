@@ -43,10 +43,19 @@ async def test_diagnostics_redacts_credentials_and_dumps_state(
 
     diag = await async_get_config_entry_diagnostics(hass, mock_entry)
 
-    # Sensitive credentials are scrubbed.
+    # Sensitive identifiers that stay on entry.data are scrubbed; rotated
+    # credentials (jwt, fcm_*) have moved to the Store on setup, so the
+    # `entry.data` dump no longer contains them.
     entry_data = diag["entry"]["data"]
-    for key in ("jwt", "fcm_token", "fcm_creds", "device_id", "numeric_id", "tel"):
+    for key in ("device_id", "numeric_id", "tel"):
         assert entry_data[key] == "**REDACTED**", key
+    for key in ("jwt", "fcm_token", "fcm_creds"):
+        assert key not in entry_data
+
+    # The credentials Store is dumped separately with the same redaction.
+    store = diag["store"]
+    for key in ("jwt", "fcm_token", "fcm_creds"):
+        assert store[key] == "**REDACTED**", key
 
     # Coordinator state is exposed, but caller_login (PII-ish) is scrubbed.
     last_call = diag["coordinator"]["last_call"]
