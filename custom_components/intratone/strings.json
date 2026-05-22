@@ -3,6 +3,29 @@
     "step": {
       "user": {
         "title": "Pair with your Intratone apartment",
+        "description": "Pick how to authenticate.",
+        "menu_options": {
+          "phone": "Send me an SMS code (uses my existing Intratone account)",
+          "invite": "I have an installer invitation code (`XXXXXX-XXXX`)"
+        }
+      },
+      "phone": {
+        "title": "Sign in by SMS",
+        "description": "Enter the phone number registered on your Intratone account. Intratone will text a 4-digit code to that number.",
+        "data": {
+          "phone": "Phone number",
+          "indicatif": "Country code (digits only, no `+`)"
+        }
+      },
+      "sms": {
+        "title": "Enter the SMS code",
+        "description": "Type the 4-digit code Intratone just texted you.",
+        "data": {
+          "code": "SMS code"
+        }
+      },
+      "invite": {
+        "title": "Pair with an invitation code",
         "description": "Open the official Intratone app → 'Mes infos' → 'Ajouter un appareil' to generate an invitation code (format: `448789-1206`).",
         "data": {
           "invite_code": "Invitation code"
@@ -19,6 +42,8 @@
     "error": {
       "invalid_format": "Invalid format. Expected `XXXXXX-XXXX`.",
       "invalid_code": "The invitation code was rejected by Intratone. Generate a fresh one and try again.",
+      "invalid_sms_code": "The SMS code was rejected. Check the number you entered and try again.",
+      "sms_failed": "Intratone refused to send an SMS to this phone. Check the number and country code.",
       "fcm_failed": "Could not register with Firebase Cloud Messaging. Check your internet connection.",
       "auth_failed": "Could not authenticate with Intratone after registration.",
       "unknown": "Unexpected error. Check the logs."

@@ -16,6 +16,7 @@ from .const import (
     CONF_INVITE_CODE,
     CONF_NUMERIC_ID,
     CONF_TEL,
+    DEFAULT_INDICATIF,
     DOMAIN,
 )
 from .fcm_listener import fcm_register_standalone
@@ -23,7 +24,9 @@ from .rest_api import (
     IntratoneApiError,
     IntratoneAuthError,
     authenticate_for_invite,
+    register_phone_for_sms,
     register_with_invite,
+    validate_sms_code,
 )
 from .store import IntratoneCredentialsStore
 
@@ -33,6 +36,26 @@ INVITE_RE = re.compile(r"^\s*(\d{4,8})\s*[-\s]\s*(\d{3,6})\s*$")
 
 USER_SCHEMA = vol.Schema({vol.Required(CONF_INVITE_CODE): str})
 
+PHONE_SCHEMA = vol.Schema(
+    {
+        vol.Required("phone"): str,
+        vol.Required("indicatif", default=DEFAULT_INDICATIF): str,
+    }
+)
+SMS_SCHEMA = vol.Schema({vol.Required("code"): str})
+
+
+def _normalize_phone(raw: str, indicatif: str) -> str:
+    """Strip whitespace, dashes, country prefix and national 0 from a number."""
+    s = raw.strip().replace(" ", "").replace("-", "").replace(".", "")
+    if s.startswith("+"):
+        s = s[1:]
+    if s.startswith(indicatif):
+        s = s[len(indicatif):]
+    if s.startswith("0"):
+        s = s[1:]
+    return s
+
 
 class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle the Intratone pairing flow."""
@@ -41,12 +64,128 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
 
     def __init__(self) -> None:
         self._reauth_entry = None
+        # Carries SMS-flow state between async_step_phone and async_step_sms.
+        self._pending_sms: dict[str, Any] = {}
 
     async def async_step_user(
+        self, _user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Initial pairing — let the user pick SMS or installer invite code."""
+        return self.async_show_menu(
+            step_id="user",
+            menu_options=["phone", "invite"],
+        )
+
+    async def async_step_invite(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Initial pairing — ask for an invitation code."""
-        return await self._async_invite_step(user_input, step_id="user")
+        """Pair with an installer-issued invitation code (`XXXXXX-XXXX`)."""
+        return await self._async_invite_step(user_input, step_id="invite")
+
+    async def async_step_phone(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """SMS flow — step 1: phone + indicatif, triggers an SMS."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            phone = _normalize_phone(user_input["phone"], user_input["indicatif"])
+            indicatif = user_input["indicatif"].strip().lstrip("+")
+            if not phone or not indicatif:
+                errors["phone"] = "invalid_format"
+            else:
+                device_id = f"ha-intratone-{uuid.uuid4().hex[:12]}"
+                try:
+                    session = async_get_clientsession(self.hass)
+                    fcm_token, fcm_creds = await fcm_register_standalone(None)
+                    await register_phone_for_sms(
+                        session,
+                        device_id=device_id,
+                        fcm_token=fcm_token,
+                        tel=phone,
+                        indicatif=indicatif,
+                    )
+                except IntratoneAuthError as err:
+                    _LOGGER.warning("register rejected: %s", err)
+                    errors["base"] = "sms_failed"
+                except IntratoneApiError as err:
+                    _LOGGER.warning("register API error: %s", err)
+                    errors["base"] = "sms_failed"
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.exception("Unexpected register error")
+                    if "fcm" in str(err).lower() or "firebase" in str(err).lower():
+                        errors["base"] = "fcm_failed"
+                    else:
+                        errors["base"] = "unknown"
+                else:
+                    self._pending_sms = {
+                        "device_id": device_id,
+                        "fcm_token": fcm_token,
+                        "fcm_creds": fcm_creds,
+                        "phone": phone,
+                        "indicatif": indicatif,
+                    }
+                    return await self.async_step_sms()
+
+        return self.async_show_form(
+            step_id="phone", data_schema=PHONE_SCHEMA, errors=errors
+        )
+
+    async def async_step_sms(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """SMS flow — step 2: enter the 4-digit code → mint a JWT."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            pending = self._pending_sms
+            session = async_get_clientsession(self.hass)
+            try:
+                await validate_sms_code(
+                    session,
+                    tel=pending["phone"],
+                    indicatif=pending["indicatif"],
+                    device_id=pending["device_id"],
+                    code=user_input["code"].strip(),
+                )
+                auth_data = await authenticate_for_invite(
+                    session,
+                    tel=pending["phone"],
+                    device_id=pending["device_id"],
+                )
+            except IntratoneAuthError as err:
+                _LOGGER.warning("validate/auth rejected: %s", err)
+                errors["base"] = "invalid_sms_code"
+            except IntratoneApiError as err:
+                _LOGGER.warning("validate API error: %s", err)
+                errors["base"] = "auth_failed"
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Unexpected validate/auth error")
+                errors["base"] = "unknown"
+            else:
+                numeric_id = str(auth_data["id"])
+                await self.async_set_unique_id(numeric_id)
+                self._abort_if_unique_id_configured()
+
+                store = IntratoneCredentialsStore(self.hass, numeric_id)
+                await store.async_load()
+                await store.async_update(
+                    jwt=auth_data["jwt"],
+                    fcm_token=pending["fcm_token"],
+                    fcm_creds=pending["fcm_creds"],
+                )
+
+                tel_display = f"{pending['indicatif']}{pending['phone']}"
+                return self.async_create_entry(
+                    title=f"Intratone (+{tel_display})",
+                    data={
+                        CONF_DEVICE_ID: pending["device_id"],
+                        CONF_NUMERIC_ID: numeric_id,
+                        CONF_TEL: pending["phone"],
+                    },
+                )
+
+        return self.async_show_form(
+            step_id="sms", data_schema=SMS_SCHEMA, errors=errors
+        )
 
     async def async_step_reauth(
         self, _entry_data: dict[str, Any]

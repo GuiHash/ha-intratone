@@ -3,6 +3,29 @@
     "step": {
       "user": {
         "title": "Coupler votre appartement Intratone",
+        "description": "Choisissez comment vous authentifier.",
+        "menu_options": {
+          "phone": "Recevoir un code par SMS (utilise mon compte Intratone existant)",
+          "invite": "J'ai un code d'invitation installateur (`XXXXXX-XXXX`)"
+        }
+      },
+      "phone": {
+        "title": "Connexion par SMS",
+        "description": "Saisissez le numéro de téléphone rattaché à votre compte Intratone. Un code à 4 chiffres vous sera envoyé par SMS.",
+        "data": {
+          "phone": "Numéro de téléphone",
+          "indicatif": "Indicatif pays (chiffres uniquement, sans `+`)"
+        }
+      },
+      "sms": {
+        "title": "Saisir le code SMS",
+        "description": "Tapez le code à 4 chiffres qu'Intratone vient de vous envoyer.",
+        "data": {
+          "code": "Code SMS"
+        }
+      },
+      "invite": {
+        "title": "Coupler avec un code d'invitation",
         "description": "Ouvrez l'application Intratone officielle → « Mes infos » → « Ajouter un appareil » pour générer un code d'invitation (format : `448789-1206`).",
         "data": {
           "invite_code": "Code d'invitation"
@@ -19,6 +42,8 @@
     "error": {
       "invalid_format": "Format invalide. Attendu : `XXXXXX-XXXX`.",
       "invalid_code": "Le code d'invitation a été refusé par Intratone. Générez-en un nouveau et réessayez.",
+      "invalid_sms_code": "Le code SMS a été refusé. Vérifiez les chiffres saisis et réessayez.",
+      "sms_failed": "Intratone refuse d'envoyer un SMS à ce numéro. Vérifiez le numéro et l'indicatif pays.",
       "fcm_failed": "Impossible de s'enregistrer auprès de Firebase. Vérifiez votre connexion.",
       "auth_failed": "Impossible de s'authentifier auprès d'Intratone après l'enregistrement.",
       "unknown": "Erreur inattendue. Consultez les logs."

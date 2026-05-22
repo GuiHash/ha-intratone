@@ -124,12 +124,21 @@ git clone https://github.com/GuiHash/ha-intratone.git intratone
 
 ## Pairing
 
-1. On your existing phone with the official Intratone app: **Mes infos → Ajouter un appareil** → the app generates an invite code in the format `448789 - 1206`.
-2. In Home Assistant: **Settings → Devices & Services → Add Integration → Intratone Doorbell**
-3. Paste the invite code. HA calls `/api/auth/registercodes` with it, registers an FCM push subscription, and obtains a long-lived device JWT (7-day rolling token).
-4. The three entities appear under a new device. Both the existing phone and HA will receive ring notifications in parallel; both can open the door.
+In Home Assistant: **Settings → Devices & Services → Add Integration → Intratone Doorbell**. Pick one of two paths.
 
-If HA detects expired credentials it triggers a re-authentication flow that **silently** refreshes the JWT from the stored phone + device_id — you should not need to re-enter an invite code in normal use. The form only appears if the backend has unbound your device (rare, e.g. account reset on the Intratone side), in which case generate a fresh invite code from the official app and paste it.
+### Path A — SMS (recommended, no installer needed)
+
+You'll be asked for your **phone number** (the one tied to your Intratone account) and the **country code** (default `33`). Intratone texts you a 4-digit code; type it on the next screen. Same flow as the official mobile app's first-time login. Mirrors `POST /api/auth/register` → `POST /api/auth/validate` → `POST /api/auth/device`.
+
+### Path B — Installer invite code
+
+If your account doesn't have a phone (some installer-managed setups), generate an invite code from the **official Intratone app → Mes infos → Ajouter un appareil** (format `448789-1206`) and paste it.
+
+### After pairing
+
+The integration registers an FCM push subscription and obtains a long-lived device JWT (rotated every 12 h). Both your existing phone and HA receive ring notifications in parallel; both can open the door.
+
+If HA detects expired credentials it triggers a re-authentication flow that **silently** refreshes the JWT from the stored phone + device_id — you should not need to re-pair in normal use. The form only appears if the backend has unbound your device (rare, e.g. account reset on the Intratone side).
 
 ## HomeKit Bridge configuration
 

@@ -35,10 +35,30 @@ def patched_fcm_register():
         yield p
 
 
-async def test_invalid_format_shows_error(hass) -> None:
+async def _pick_invite_step(hass) -> dict:
+    """Init the flow and navigate the menu to the invite-code form."""
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
+    assert result["type"] is FlowResultType.MENU
+    return await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "invite"}
+    )
+
+
+async def _pick_phone_step(hass) -> dict:
+    """Init the flow and navigate the menu to the SMS phone form."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    assert result["type"] is FlowResultType.MENU
+    return await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "phone"}
+    )
+
+
+async def test_invalid_format_shows_error(hass) -> None:
+    result = await _pick_invite_step(hass)
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], {CONF_INVITE_CODE: "not-a-code"}
     )
@@ -61,9 +81,7 @@ async def test_happy_path_creates_entry(
         },
     )
 
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN, context={"source": config_entries.SOURCE_USER}
-    )
+    result = await _pick_invite_step(hass)
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], {CONF_INVITE_CODE: "448789-1206"}
     )
@@ -89,14 +107,75 @@ async def test_rejected_invite_shows_error(
         f"{API_BASE}api/auth/registercodes",
         payload={"state": "error", "message": "code expired"},
     )
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN, context={"source": config_entries.SOURCE_USER}
-    )
+    result = await _pick_invite_step(hass)
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], {CONF_INVITE_CODE: "448789-1206"}
     )
     assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {"base": "invalid_code"}
+
+
+async def test_sms_happy_path_creates_entry(
+    hass, aiomock, patched_fcm_register
+) -> None:
+    aiomock.post(
+        f"{API_BASE}api/auth/register",
+        payload={"state": "ok", "data": {"id": "3844428"}},
+    )
+    aiomock.post(f"{API_BASE}api/auth/validate", payload={"state": "ok"})
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={"state": "ok", "data": {"jwt": "sms.jwt", "id": "3844428"}},
+    )
+
+    result = await _pick_phone_step(hass)
+    assert result["step_id"] == "phone"
+    # Phone normalization peels the French national 0 off.
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"phone": "0671124546", "indicatif": "33"}
+    )
+    assert result["step_id"] == "sms"
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"code": "1234"}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_NUMERIC_ID] == "3844428"
+    # The phone stored is the normalized national number (no leading 0).
+    assert result["data"][CONF_TEL] == "671124546"
+    assert CONF_JWT not in result["data"]
+
+    from custom_components.intratone.store import IntratoneCredentialsStore
+
+    store = IntratoneCredentialsStore(hass, "3844428")
+    await store.async_load()
+    assert store.jwt == "sms.jwt"
+    assert store.fcm_token == "fake-fcm-token"
+
+
+async def test_sms_invalid_code_shows_error(
+    hass, aiomock, patched_fcm_register
+) -> None:
+    aiomock.post(
+        f"{API_BASE}api/auth/register",
+        payload={"state": "ok", "data": {"id": "3844428"}},
+    )
+    aiomock.post(
+        f"{API_BASE}api/auth/validate",
+        payload={"state": "error", "message": "wrong code"},
+    )
+
+    result = await _pick_phone_step(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"phone": "0671124546", "indicatif": "33"}
+    )
+    assert result["step_id"] == "sms"
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"code": "0000"}
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "invalid_sms_code"}
 
 
 async def test_reauth_silent_refresh_succeeds(
