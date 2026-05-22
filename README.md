@@ -2,6 +2,8 @@
 
 Native Home Assistant integration for the **Intratone** intercom system (manufactured by Cogelec, widely deployed in French apartment buildings). Exposes your apartment intercom as native HA entities and as a HomeKit accessory so calls ring directly on your iPhone, with one-way audio + video and a door-unlock button.
 
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=GuiHash&repository=ha-intratone&category=integration)
+
 ## Features
 
 After pairing, the integration creates these entities under one device:
@@ -108,6 +110,12 @@ HA Core ships a bundled go2rtc binary that auto-starts in Docker / HA OS environ
 ## Installation
 
 ### Via HACS (custom repository)
+
+Click the button below to open HACS directly on this integration:
+
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=GuiHash&repository=ha-intratone&category=integration)
+
+Or manually:
 
 1. HACS → ⋮ menu → **Custom repositories**
 2. Add `https://github.com/GuiHash/ha-intratone` with category **Integration**
