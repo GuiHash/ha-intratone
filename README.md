@@ -19,7 +19,7 @@ Exposed to HomeKit via HA's HomeKit Bridge, the camera tile on iPhone Home.app d
 
 - Doorbell push notification < 2 s after a visitor rings (FCM)
 - One-way audio (visitor → iPhone): G.711 µ-law transcoded to Opus on the fly
-- Video (VP8 → H.264 baseline transcoding) — **opt-in** via the env var `INTRATONE_VIDEO_ENABLED=1`. Enable only if your Intratone subscription includes the visiophone (intercom with actual camera).
+- Video (VP8 → H.264 baseline transcoding) — **opt-in** via the integration options (⚙️). Enable only if your Intratone subscription includes the visiophone (intercom with actual camera).
 - Lock tile to open the door
 
 ## How it works
@@ -101,7 +101,7 @@ streams:
   intratone: ""
 ```
 
-If your go2rtc isn't on `127.0.0.1:8554`, set `INTRATONE_GO2RTC_URL` in HA's environment (e.g. `INTRATONE_GO2RTC_URL=rtsp://10.0.0.5:8554`).
+If your go2rtc isn't on `127.0.0.1:8554`, change the **go2rtc RTSP relay URL** in the integration options (⚙️ on the Intratone integration card).
 
 ### Note on HA's embedded go2rtc (since 2024.x)
 
@@ -172,7 +172,7 @@ homekit:
 
 Replace `<ID>` by the suffix HA uses in your entity IDs (your apartment's numeric ID, visible in any of the three entity names). Restart HA so the Bridge picks up the new config.
 
-To opt into VP8 video, set `INTRATONE_VIDEO_ENABLED=1` in HA's environment before starting it.
+To opt into VP8 video, open the integration options (⚙️ on the Intratone card) and enable **Enable video (VP8)**.
 
 ## Recommended helpers
 
