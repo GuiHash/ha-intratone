@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import socket
 from typing import Callable
 
@@ -35,20 +34,6 @@ _LOGGER = logging.getLogger(__name__)
 
 _RTP_PORT_RANGE = range(16384, 16484, 2)  # even ports (RTP convention)
 
-# go2rtc RTSP relay URL. The integration pushes its transcoded audio+video
-# stream here and HA's HomeKit Bridge ffmpeg pulls from the same URL.
-# Default targets the standalone go2rtc on its conventional port; HA OS users
-# who rely on HA's embedded go2rtc (since 2024.x) should override to
-# `rtsp://127.0.0.1:18554` — see README "go2rtc setup".
-_GO2RTC_URL = (
-    os.environ.get("INTRATONE_GO2RTC_URL", "rtsp://127.0.0.1:8554").rstrip("/")
-)
-
-# Roll-out gate: when unset the integration behaves like Phase 2 strict (audio
-# only, no m=video in SDP, no video socket allocated). Flip to 1 to opt in to
-# the VP8 video path. Lets us validate audio+HomeKit playback first before
-# stacking the video pipeline on top.
-_VIDEO_ENABLED = bool(int(os.environ.get("INTRATONE_VIDEO_ENABLED", "0") or "0"))
 # Intratone doorbell calls don't last more than ~30 s in real life; if we never
 # see a BYE the call is wedged. Hard-stop after this so the next ring isn't
 # blocked by the "Call already active" guard.
@@ -95,12 +80,15 @@ class CallManager:
         local_host: str,
         on_call_active: Callable[[str, str], None],
         on_call_ended: Callable[[str], None],
+        video_enabled: bool = False,
+        go2rtc_url: str = "rtsp://127.0.0.1:8554",
         audio_bridge: AudioBridge | None = None,
     ) -> None:
         self._local_host = local_host
         self._on_call_active = on_call_active
         self._on_call_ended = on_call_ended
-        self._bridge = audio_bridge or AudioBridge(rtsp_relay_url=_GO2RTC_URL)
+        self._video_enabled = video_enabled
+        self._bridge = audio_bridge or AudioBridge(rtsp_relay_url=go2rtc_url.rstrip("/"))
         self._sip_client: IntratoneSipClient | None = None
         self._sip_transport: asyncio.Transport | None = None
         self._active_call_id: str | None = None
@@ -182,7 +170,7 @@ class CallManager:
         # Video: only allocated when the feature is enabled. The downstream
         # code (sip_client SDP builder, AudioBridge) treats None as "no video".
         video_rtp_port: int | None = None
-        if _VIDEO_ENABLED:
+        if self._video_enabled:
             video_rtp_socket = _bind_rtp_socket()
             video_rtp_port = video_rtp_socket.getsockname()[1]
             self._pending_video_rtp_socket = video_rtp_socket
