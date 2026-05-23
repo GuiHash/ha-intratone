@@ -2,6 +2,5 @@
   "name": "Intratone Doorbell",
   "render_readme": true,
   "homeassistant": "2024.1.0",
-  "country": "FR",
-  "icon": "https://raw.githubusercontent.com/GuiHash/ha-intratone/main/custom_components/intratone/brand/icon.png"
+  "country": "FR"
 }
