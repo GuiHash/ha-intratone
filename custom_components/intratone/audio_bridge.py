@@ -499,14 +499,14 @@ class _VideoRtpProtocol(asyncio.DatagramProtocol):
                 if self._start_time is not None
                 else 0
             )
-            _LOGGER.warning(
+            _LOGGER.info(
                 "VIDEO_KEYFRAME: first VP8 I-frame received %.0fms after first RTP",
                 elapsed_ms,
             )
 
         try:
             if self.rtp_packets_forwarded == 0:
-                _LOGGER.warning(
+                _LOGGER.info(
                     "VIDEO_FORWARD_FIRST: first VP8 RTP forwarded to ffmpeg :%d",
                     self._ffmpeg_target[1],
                 )
@@ -716,7 +716,7 @@ class AudioBridge:
                 return
             try:
                 if self._bytes_written_to_ffmpeg == 0:
-                    _LOGGER.warning(
+                    _LOGGER.info(
                         "AUDIO_STDIN_FIRST: first µ-law byte written %.0fms after ffmpeg spawn",
                         (time.monotonic() - spawn_t0) * 1000,
                     )
@@ -803,7 +803,7 @@ class AudioBridge:
                     pass
 
         local_port = rtp_socket.getsockname()[1]
-        _LOGGER.warning(
+        _LOGGER.info(
             "RTP audio :%d ↔ %s:%d ; video %s",
             local_port,
             remote_rtp_ip,
@@ -824,7 +824,7 @@ class AudioBridge:
                 timeout=_FFMPEG_PUSH_READY_TIMEOUT_S,
             )
             elapsed_ms = (time.monotonic() - t0) * 1000
-            _LOGGER.warning(
+            _LOGGER.info(
                 "FFMPEG_PUSH_READY: %s consumable (waited %.0fms after spawn)",
                 self.rtsp_url,
                 elapsed_ms,
@@ -880,14 +880,14 @@ class AudioBridge:
                     return
                 if self._video_rtp.keyframe_received:
                     elapsed_ms = (time.monotonic() - t0) * 1000
-                    _LOGGER.warning(
+                    _LOGGER.info(
                         "PLI_LOOP: keyframe arrived after %d PLI(s) in %.0fms — done",
                         i, elapsed_ms,
                     )
                     return
                 self._video_rtcp.send_pli(media_ssrc)
                 if i == 0:
-                    _LOGGER.warning(
+                    _LOGGER.info(
                         "PLI_LOOP: first PLI sent to %s for media_ssrc=0x%08x",
                         self._video_rtcp._remote_addr, media_ssrc,
                     )
@@ -1214,9 +1214,11 @@ class AudioBridge:
         # "Failed", "Broken pipe". Forward those at WARNING so prod users see
         # them without enabling debug; everything else stays at DEBUG.
         warn_keywords = ("Error", "Invalid", "Failed", "Broken pipe", "fatal")
-        # Temporary diagnostic: log the most significant ffmpeg startup
-        # milestones at WARNING to find what's slow during the ~14 s gap
-        # between spawn and "Output #0, rtsp" in prod.
+        # Surface a small set of ffmpeg startup milestones at INFO so a quick
+        # log scan can confirm spawn / input parsing / output mux init timing
+        # without enabling DEBUG. Validated 2026-05-24: with the low-latency
+        # flags on both inputs, "Press [q]" emits ~280 ms after spawn (vs
+        # ~14 s with the previous defaults).
         startup_markers = ("Stream mapping", "Input #0", "Input #1", "Press [q]")
         startup_t0 = time.monotonic()
         try:
@@ -1235,7 +1237,7 @@ class AudioBridge:
                 if any(kw in text for kw in warn_keywords):
                     _LOGGER.warning("ffmpeg: %s", text)
                 elif any(m in text for m in startup_markers):
-                    _LOGGER.warning(
+                    _LOGGER.info(
                         "FFMPEG_STARTUP[+%.0fms]: %s",
                         (time.monotonic() - startup_t0) * 1000, text,
                     )
