@@ -30,9 +30,9 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 # How long to wait for the audio bridge to come up after triggering the lazy
-# INVITE. Includes TCP connect, INVITE → 200 OK round-trip, and ffmpeg spawn
-# / first RTP frame. Real-world setups land in 1-2s; allow 5s slack.
-_STREAM_READY_TIMEOUT_S = 5.0
+# INVITE. Covers TCP connect + INVITE→200 OK round-trip (~2 s) plus ffmpeg's
+# VP8 keyframe wait (up to 15 s — see audio_bridge._FFMPEG_PUSH_READY_TIMEOUT_S).
+_STREAM_READY_TIMEOUT_S = 20.0
 
 
 @dataclass
@@ -229,7 +229,9 @@ class IntratoneCoordinator(DataUpdateCoordinator[CallState | None]):
         try:
             await asyncio.wait_for(self._pending.stream_ready.wait(), timeout=timeout)
         except asyncio.TimeoutError:
-            _LOGGER.warning("Stream not ready within %ss", timeout)
+            _LOGGER.warning("Stream not ready within %ss — aborting call", timeout)
+            if self._call_manager is not None:
+                asyncio.create_task(self._call_manager.abort_call())
             return None
         return self.data.stream_url if self.data else None
 

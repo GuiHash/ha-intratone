@@ -273,6 +273,34 @@ async def test_hang_up_stops_bridge(manager, fake_bridge):
     fake_bridge.stop.assert_awaited()
 
 
+async def test_abort_call_stops_bridge_clears_state_and_fires_ended(
+    manager, fake_bridge, ended_calls
+):
+    """abort_call() tears down bridge + SIP immediately (no grace period) and
+    fires on_call_ended so the coordinator clears its state. Subsequent rings
+    are not blocked by the 'Call already active' guard."""
+    from custom_components.intratone.sip_client import CallState
+
+    call_id = await manager.start_call(TARGET_URI, SERVER_IP, SIP_USER, SIP_PASS)
+    assert call_id is not None
+    sip_client = manager._sip_client
+    sip_client._call.state = CallState.CONFIRMED  # type: ignore[union-attr]
+    sip_client._call.remote_to_header = f"<{TARGET_URI}>;tag=srv"  # type: ignore[union-attr]
+
+    await manager.abort_call()
+
+    fake_bridge.stop.assert_awaited_once()
+    assert ended_calls == [call_id]
+    assert manager.active_call_id is None
+    assert manager._sip_client is None
+
+
+async def test_abort_call_is_noop_when_no_active_call(manager, fake_bridge, ended_calls):
+    await manager.abort_call()
+    fake_bridge.stop.assert_not_awaited()
+    assert ended_calls == []
+
+
 async def test_async_stop_closes_transport_and_stops_bridge(manager, fake_bridge):
     call_id = await manager.start_call(TARGET_URI, SERVER_IP, SIP_USER, SIP_PASS)
     assert call_id is not None
