@@ -223,15 +223,18 @@ class IntratoneCoordinator(DataUpdateCoordinator[CallState | None]):
     async def async_wait_for_stream(self, timeout: float = _STREAM_READY_TIMEOUT_S) -> str | None:
         """Wait up to `timeout` seconds for the audio bridge to be up, then
         return the RTSP stream URL. Used by the camera entity in HomeKit's
-        stream_source path."""
+        stream_source path.
+
+        On timeout we return None but keep the SIP dialog alive — the user
+        can still tap Unlock during the call window even if the camera pull
+        failed, and a subsequent camera tap will retry on the same bridge.
+        """
         if self._pending is None:
             return self.data.stream_url if self.data else None
         try:
             await asyncio.wait_for(self._pending.stream_ready.wait(), timeout=timeout)
         except asyncio.TimeoutError:
-            _LOGGER.warning("Stream not ready within %ss — aborting call", timeout)
-            if self._call_manager is not None:
-                asyncio.create_task(self._call_manager.abort_call())
+            _LOGGER.warning("Stream not ready within %ss", timeout)
             return None
         return self.data.stream_url if self.data else None
 

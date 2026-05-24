@@ -499,7 +499,7 @@ class _VideoRtpProtocol(asyncio.DatagramProtocol):
                 if self._start_time is not None
                 else 0
             )
-            _LOGGER.info(
+            _LOGGER.warning(
                 "VIDEO_KEYFRAME: first VP8 I-frame received %.0fms after first RTP",
                 elapsed_ms,
             )
@@ -791,7 +791,7 @@ class AudioBridge:
                     pass
 
         local_port = rtp_socket.getsockname()[1]
-        _LOGGER.info(
+        _LOGGER.warning(
             "RTP audio :%d ↔ %s:%d ; video %s",
             local_port,
             remote_rtp_ip,
@@ -812,7 +812,7 @@ class AudioBridge:
                 timeout=_FFMPEG_PUSH_READY_TIMEOUT_S,
             )
             elapsed_ms = (time.monotonic() - t0) * 1000
-            _LOGGER.info(
+            _LOGGER.warning(
                 "FFMPEG_PUSH_READY: %s consumable (waited %.0fms after spawn)",
                 self.rtsp_url,
                 elapsed_ms,
@@ -868,14 +868,14 @@ class AudioBridge:
                     return
                 if self._video_rtp.keyframe_received:
                     elapsed_ms = (time.monotonic() - t0) * 1000
-                    _LOGGER.info(
+                    _LOGGER.warning(
                         "PLI_LOOP: keyframe arrived after %d PLI(s) in %.0fms — done",
                         i, elapsed_ms,
                     )
                     return
                 self._video_rtcp.send_pli(media_ssrc)
                 if i == 0:
-                    _LOGGER.info(
+                    _LOGGER.warning(
                         "PLI_LOOP: first PLI sent to %s for media_ssrc=0x%08x",
                         self._video_rtcp._remote_addr, media_ssrc,
                     )
