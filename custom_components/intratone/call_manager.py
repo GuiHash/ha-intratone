@@ -72,6 +72,37 @@ def _bind_rtp_socket() -> socket.socket:
     )
 
 
+def _bind_rtp_pair() -> tuple[socket.socket, socket.socket]:
+    """Bind an RTP+RTCP socket pair on consecutive (even, odd) ports.
+
+    Used for the video media line where we want to send RFC 4585 PLI feedback
+    on the RTCP port. Returns (rtp_sock, rtcp_sock); caller owns both.
+    """
+    last_error: OSError | None = None
+    for port in _RTP_PORT_RANGE:
+        rtp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        rtp_sock.setblocking(False)
+        try:
+            rtp_sock.bind(("0.0.0.0", port))
+        except OSError as err:
+            last_error = err
+            rtp_sock.close()
+            continue
+        rtcp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        rtcp_sock.setblocking(False)
+        try:
+            rtcp_sock.bind(("0.0.0.0", port + 1))
+            return rtp_sock, rtcp_sock
+        except OSError as err:
+            last_error = err
+            rtp_sock.close()
+            rtcp_sock.close()
+            continue
+    raise RuntimeError(
+        f"No free RTP+RTCP pair in {_RTP_PORT_RANGE!r}: {last_error}"
+    )
+
+
 class CallManager:
     """One AudioBridge + one TCP SIP client per active Intratone call."""
 
@@ -94,6 +125,7 @@ class CallManager:
         self._active_call_id: str | None = None
         self._pending_rtp_socket: socket.socket | None = None
         self._pending_video_rtp_socket: socket.socket | None = None
+        self._pending_video_rtcp_socket: socket.socket | None = None
         self._max_duration_task: asyncio.Task | None = None
         self._grace_task: asyncio.Task | None = None
         self._started = False
@@ -133,7 +165,11 @@ class CallManager:
 
     def _close_pending_sockets(self) -> None:
         """Close any RTP sockets we bound but haven't yet handed to AudioBridge."""
-        for attr in ("_pending_rtp_socket", "_pending_video_rtp_socket"):
+        for attr in (
+            "_pending_rtp_socket",
+            "_pending_video_rtp_socket",
+            "_pending_video_rtcp_socket",
+        ):
             sock = getattr(self, attr)
             if sock is not None:
                 try:
@@ -169,11 +205,14 @@ class CallManager:
 
         # Video: only allocated when the feature is enabled. The downstream
         # code (sip_client SDP builder, AudioBridge) treats None as "no video".
+        # Bind RTP + RTCP as a pair so PLI feedback (RFC 4585) can be sent on
+        # the gateway's RTCP port (rtp_port + 1 by convention).
         video_rtp_port: int | None = None
         if self._video_enabled:
-            video_rtp_socket = _bind_rtp_socket()
+            video_rtp_socket, video_rtcp_socket = _bind_rtp_pair()
             video_rtp_port = video_rtp_socket.getsockname()[1]
             self._pending_video_rtp_socket = video_rtp_socket
+            self._pending_video_rtcp_socket = video_rtcp_socket
 
         loop = asyncio.get_running_loop()
         sip_client = IntratoneSipClient(
@@ -329,26 +368,32 @@ class CallManager:
         self._pending_rtp_socket = None
         video_rtp_socket = self._pending_video_rtp_socket
         self._pending_video_rtp_socket = None
+        video_rtcp_socket = self._pending_video_rtcp_socket
+        self._pending_video_rtcp_socket = None
         if rtp_socket is None:
             _LOGGER.warning(
                 "No pending RTP socket for call %s — bridge cannot start",
                 info.call_id,
             )
-            if video_rtp_socket is not None:
-                try:
-                    video_rtp_socket.close()
-                except OSError:
-                    pass
+            for sock in (video_rtp_socket, video_rtcp_socket):
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
             if self._sip_client is not None:
                 self._sip_client.hang_up(info.call_id)
             return
-        # If the server rejected our m=video offer, drop the unused socket.
+        # If the server rejected our m=video offer, drop the unused sockets.
         if info.remote_video_rtp_port is None and video_rtp_socket is not None:
-            try:
-                video_rtp_socket.close()
-            except OSError:
-                pass
+            for sock in (video_rtp_socket, video_rtcp_socket):
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
             video_rtp_socket = None
+            video_rtcp_socket = None
         try:
             rtsp_url = await self._bridge.start(
                 rtp_socket=rtp_socket,
@@ -357,6 +402,7 @@ class CallManager:
                 video_socket=video_rtp_socket,
                 remote_video_rtp_ip=info.remote_video_rtp_ip,
                 remote_video_rtp_port=info.remote_video_rtp_port,
+                video_rtcp_socket=video_rtcp_socket,
             )
         except Exception as err:  # noqa: BLE001
             _LOGGER.exception("Audio bridge failed to start: %s", err)

@@ -15,13 +15,18 @@ import pytest
 
 from custom_components.intratone.audio_bridge import (
     _PCMU_PAYLOAD_TYPE,
+    _RTCP_PLI_PT,
     _RTP_HEADER_FMT,
     _RTP_HEADER_SIZE,
     _SAMPLES_PER_PACKET,
     _ULAW_SILENCE_BYTE,
     AudioBridge,
     _RtpProtocol,
+    _VideoRtcpProtocol,
+    _VideoRtpProtocol,
+    _build_pli_packet,
     _build_rtp_packet,
+    _is_vp8_keyframe,
 )
 
 
@@ -410,3 +415,122 @@ async def test_stderr_is_drained_to_logger(
     assert any("Stream mapping" in m for m in drained)
     assert any("Output #0" in m for m in drained)
     await bridge.stop()
+
+
+# --- PLI helpers ---------------------------------------------------------
+
+
+def test_build_pli_packet_matches_rfc_4585_format():
+    """RFC 4585 §6.3.1 PLI = V=2, P=0, FMT=1, PT=206, length=2 (12 bytes total),
+    followed by sender SSRC and media source SSRC."""
+    pkt = _build_pli_packet(sender_ssrc=0x11223344, media_ssrc=0xAABBCCDD)
+    assert len(pkt) == 12
+    b0, b1, length, sender, media = struct.unpack(">BBHII", pkt)
+    assert (b0 >> 6) & 0x03 == 2  # V=2
+    assert (b0 >> 5) & 0x01 == 0  # P=0
+    assert b0 & 0x1F == 1  # FMT=1 (PLI)
+    assert b1 == _RTCP_PLI_PT  # 206 = PSFB
+    assert length == 2
+    assert sender == 0x11223344
+    assert media == 0xAABBCCDD
+
+
+def test_is_vp8_keyframe_detects_keyframe():
+    """S=1, PID=0, no extensions, frame tag byte 0 LSB=0 → keyframe."""
+    payload = bytes([0x10, 0x00, 0x00, 0x00])  # desc S=1 PID=0; frame tag KF
+    assert _is_vp8_keyframe(payload) is True
+
+
+def test_is_vp8_keyframe_rejects_interframe():
+    """Same shape but frame tag LSB=1 → interframe."""
+    payload = bytes([0x10, 0x01, 0x00, 0x00])
+    assert _is_vp8_keyframe(payload) is False
+
+
+def test_is_vp8_keyframe_rejects_non_start_of_frame():
+    """S=0 means continuation packet — never a keyframe start."""
+    payload = bytes([0x00, 0x00, 0x00, 0x00])  # S=0
+    assert _is_vp8_keyframe(payload) is False
+
+
+def test_is_vp8_keyframe_handles_payload_descriptor_extension():
+    """X=1 → 1 ext byte; I=1, M=0 → 1 PictureID byte. Skip 2 extra bytes then
+    look at the frame tag."""
+    # desc: X=1, S=1, PID=0 → 0x90; ext: I=1, others=0 → 0x80; PictureID=0x42;
+    # frame tag byte 0 with LSB=0 → 0x00
+    payload = bytes([0x90, 0x80, 0x42, 0x00, 0x00, 0x00])
+    assert _is_vp8_keyframe(payload) is True
+
+
+def test_is_vp8_keyframe_truncated_payload_returns_false():
+    assert _is_vp8_keyframe(b"") is False
+    assert _is_vp8_keyframe(b"\x10") is False  # only descriptor
+
+
+# --- _VideoRtcpProtocol --------------------------------------------------
+
+
+async def test_video_rtcp_send_pli_writes_to_transport():
+    proto = _VideoRtcpProtocol(remote_addr=("178.32.84.135", 52983))
+    transport = _FakeTransport()
+    proto.connection_made(transport)
+
+    proto.send_pli(media_ssrc=0x12345678)
+
+    assert proto.pli_sent == 1
+    assert len(transport.sent) == 1
+    data, addr = transport.sent[0]
+    assert addr == ("178.32.84.135", 52983)
+    assert len(data) == 12
+    # PT byte = 206 (PSFB)
+    assert data[1] == _RTCP_PLI_PT
+    # Last 4 bytes = media SSRC
+    media_ssrc = int.from_bytes(data[8:12], "big")
+    assert media_ssrc == 0x12345678
+
+
+async def test_video_rtcp_send_pli_noop_when_no_transport():
+    proto = _VideoRtcpProtocol(remote_addr=("x", 1))
+    proto.send_pli(media_ssrc=0)  # transport is None → no crash
+    assert proto.pli_sent == 0
+
+
+# --- _VideoRtpProtocol keyframe detection --------------------------------
+
+
+async def test_video_rtp_protocol_marks_keyframe_received():
+    """Feed a synthetic VP8 keyframe RTP packet and verify the flag flips."""
+    proto = _VideoRtpProtocol(ffmpeg_target=("127.0.0.1", 12345))
+    proto.connection_made(_FakeTransport())
+
+    # 12-byte RTP header + VP8 payload that decodes as a keyframe
+    rtp_header = struct.pack(
+        ">BBHII",
+        0b10000000,  # V=2
+        96,  # PT=96 (VP8 dynamic)
+        1,  # seq
+        0,  # ts
+        0xDEADBEEF,  # ssrc
+    )
+    vp8_payload = bytes([0x10, 0x00, 0x00, 0x00])  # S=1, PID=0, KF
+    proto.datagram_received(rtp_header + vp8_payload, ("178.32.84.135", 52982))
+
+    assert proto.keyframe_received is True
+    assert proto.first_keyframe_at is not None
+    assert proto.first_rtp_at is not None
+
+
+async def test_video_rtp_protocol_keyframe_flag_sticks_after_interframe():
+    """Once keyframe_received is True, subsequent interframes don't clear it."""
+    proto = _VideoRtpProtocol(ffmpeg_target=("127.0.0.1", 12345))
+    proto.connection_made(_FakeTransport())
+
+    rtp_header = struct.pack(">BBHII", 0b10000000, 96, 1, 0, 0xDEADBEEF)
+    # First a keyframe, then an interframe
+    proto.datagram_received(
+        rtp_header + bytes([0x10, 0x00, 0x00, 0x00]), ("x", 1)
+    )
+    proto.datagram_received(
+        rtp_header + bytes([0x10, 0x01, 0x00, 0x00]), ("x", 1)
+    )
+    assert proto.keyframe_received is True

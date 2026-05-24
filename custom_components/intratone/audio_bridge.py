@@ -59,6 +59,66 @@ _STATS_INTERVAL_S = 5.0  # how often to log RTP rx/tx counts during a call
 # slack. 15 s covers observed worst-case keyframe latency with margin.
 _FFMPEG_PUSH_READY_TIMEOUT_S = 15.0
 
+# RTCP PLI (RFC 4585 §6.3.1) — Picture Loss Indication feedback message. The
+# Intratone gateway negotiates plain `RTP/AVP` (no AVPF feedback advertised),
+# but Asterisk with `nortpproxy=yes` typically still forwards inbound RTCP to
+# the media source, so the doorbell hardware re-encodes with a fresh I-frame.
+# Saves 7-10 s of black screen at call start.
+_RTCP_PLI_HEADER_BYTE_0 = (2 << 6) | 1  # V=2, P=0, FMT=1
+_RTCP_PLI_PT = 206  # PSFB — Payload-Specific Feedback
+_RTCP_PLI_LENGTH_WORDS = 2  # (12 bytes / 4) - 1
+# Bound the PLI burst: we expect a keyframe within 1-2 packets if the gateway
+# honours it; otherwise stop wasting RTCP traffic.
+_PLI_MAX_SENDS = 10
+_PLI_INTERVAL_S = 1.0
+# How long to wait for the first VP8 RTP packet before launching the PLI loop
+# (we need the media SSRC, which we observe on incoming RTP).
+_PLI_WAIT_FIRST_RTP_S = 3.0
+
+
+def _build_pli_packet(sender_ssrc: int, media_ssrc: int) -> bytes:
+    """RFC 4585 PLI feedback message (12 bytes). `media_ssrc` is the SSRC of the
+    VP8 stream we want a keyframe from; `sender_ssrc` identifies us (any unique
+    32-bit value, doesn't have to match an RTP SSRC since we're recv-only)."""
+    return struct.pack(
+        ">BBHII",
+        _RTCP_PLI_HEADER_BYTE_0,
+        _RTCP_PLI_PT,
+        _RTCP_PLI_LENGTH_WORDS,
+        sender_ssrc & 0xFFFFFFFF,
+        media_ssrc & 0xFFFFFFFF,
+    )
+
+
+def _is_vp8_keyframe(payload: bytes) -> bool:
+    """RFC 7741 VP8 RTP payload: a keyframe arrives in a packet where the
+    payload descriptor has S=1 and PID=0, and the VP8 frame tag's first byte
+    has its LSB clear (RFC 6386 §9.1: 0=key, 1=interframe)."""
+    if len(payload) < 4:
+        return False
+    desc = payload[0]
+    s_bit = (desc >> 4) & 1
+    pid = desc & 0x07
+    if not s_bit or pid != 0:
+        return False
+    offset = 1
+    if (desc >> 7) & 1:  # X: extension byte present
+        if offset >= len(payload):
+            return False
+        ext = payload[offset]
+        offset += 1
+        if (ext >> 7) & 1:  # I: PictureID present
+            if offset >= len(payload):
+                return False
+            offset += 2 if (payload[offset] >> 7) & 1 else 1  # M bit = 16-bit PID
+        if (ext >> 6) & 1:  # L: TL0PICIDX
+            offset += 1
+        if ((ext >> 5) & 1) or ((ext >> 4) & 1):  # T or K
+            offset += 1
+    if offset >= len(payload):
+        return False
+    return (payload[offset] & 0x01) == 0
+
 
 def _build_rtp_packet(seq: int, timestamp: int, ssrc: int, payload: bytes) -> bytes:
     return (
@@ -342,6 +402,12 @@ class _VideoRtpProtocol(asyncio.DatagramProtocol):
         self.ssrc_stats: dict[int, dict] = {}  # ssrc → {count, pts:set}
         self._first_rtp_logged = False
         self._start_time: float | None = None
+        # Set when the first VP8 keyframe (frame_tag LSB == 0) is observed in
+        # the incoming stream — the PLI loop watches this to stop spamming
+        # feedback once the gateway has actually delivered a fresh I-frame.
+        self.keyframe_received = False
+        self.first_rtp_at: float | None = None
+        self.first_keyframe_at: float | None = None
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         self._transport = transport  # type: ignore[assignment]
@@ -414,11 +480,28 @@ class _VideoRtpProtocol(asyncio.DatagramProtocol):
 
         if not self._first_rtp_logged:
             self._first_rtp_logged = True
+            self.first_rtp_at = time.monotonic()
             _LOGGER.debug(
                 "VIDEO_RX_FIRST: total=%d V=2 PT=%d M=%d ssrc=0x%08x src=%s:%d "
                 "first48=%s",
                 len(data), pt, marker, ssrc, addr[0], addr[1],
                 data[:48].hex(),
+            )
+
+        # Keyframe detection — payload starts after the RTP header. We ignore
+        # CC and X for simplicity (Intratone uses no extensions / contributing
+        # sources). Stop the PLI loop once we observe the first I-frame.
+        if not self.keyframe_received and _is_vp8_keyframe(data[12:]):
+            self.keyframe_received = True
+            self.first_keyframe_at = time.monotonic()
+            elapsed_ms = (
+                (self.first_keyframe_at - self._start_time) * 1000
+                if self._start_time is not None
+                else 0
+            )
+            _LOGGER.info(
+                "VIDEO_KEYFRAME: first VP8 I-frame received %.0fms after first RTP",
+                elapsed_ms,
             )
 
         try:
@@ -462,6 +545,54 @@ class _VideoRtpProtocol(asyncio.DatagramProtocol):
             self._transport = None
 
 
+class _VideoRtcpProtocol(asyncio.DatagramProtocol):
+    """UDP endpoint for the video RTCP channel.
+
+    Used to send RFC 4585 PLI feedback to Intratone's gateway, asking it to
+    re-emit a VP8 I-frame immediately instead of waiting for the natural
+    keyframe cycle (8-12 s). Also receives any incoming RTCP (SR/SDES/RR) —
+    we log it at DEBUG for diagnostics but don't act on it.
+    """
+
+    def __init__(
+        self, remote_addr: tuple[str, int], local_ssrc: int = 0xDEAD1234
+    ) -> None:
+        self._remote_addr = remote_addr
+        self._local_ssrc = local_ssrc
+        self._transport: asyncio.DatagramTransport | None = None
+        self.pli_sent = 0
+        self.rtcp_received = 0
+
+    def connection_made(self, transport: asyncio.BaseTransport) -> None:
+        self._transport = transport  # type: ignore[assignment]
+
+    def datagram_received(self, data: bytes, addr: tuple[str, int]) -> None:
+        self.rtcp_received += 1
+        if self.rtcp_received <= 3 and len(data) >= 4:
+            _LOGGER.debug(
+                "VIDEO_RTCP_RX[#%d]: PT=%d len=%d from %s:%d",
+                self.rtcp_received, data[1], len(data), addr[0], addr[1],
+            )
+
+    def send_pli(self, media_ssrc: int) -> None:
+        if self._transport is None:
+            return
+        pkt = _build_pli_packet(self._local_ssrc, media_ssrc)
+        try:
+            self._transport.sendto(pkt, self._remote_addr)
+            self.pli_sent += 1
+        except OSError:
+            _LOGGER.debug("VIDEO_RTCP_TX: PLI sendto failed", exc_info=True)
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        self._transport = None
+
+    def close(self) -> None:
+        if self._transport is not None:
+            self._transport.close()
+            self._transport = None
+
+
 def _pick_free_udp_port() -> int:
     """Bind UDP(127.0.0.1, 0), return the assigned port, release.
 
@@ -495,10 +626,13 @@ class AudioBridge:
         self._process: asyncio.subprocess.Process | None = None
         self._stderr_task: asyncio.Task | None = None
         self._stats_task: asyncio.Task | None = None
+        self._pli_task: asyncio.Task | None = None
         self._rtp: _RtpProtocol | None = None
         self._rtp_transport: asyncio.DatagramTransport | None = None
         self._video_rtp: _VideoRtpProtocol | None = None
         self._video_rtp_transport: asyncio.DatagramTransport | None = None
+        self._video_rtcp: _VideoRtcpProtocol | None = None
+        self._video_rtcp_transport: asyncio.DatagramTransport | None = None
         self._video_sdp_path: str | None = None
         # Total µ-law bytes written to ffmpeg stdin during the call. Compared
         # against the expected 8000 B/s consumption rate, it tells us whether
@@ -536,6 +670,7 @@ class AudioBridge:
         video_socket=None,
         remote_video_rtp_ip: str | None = None,
         remote_video_rtp_port: int | None = None,
+        video_rtcp_socket=None,
     ) -> str:
         """Spawn ffmpeg + wrap a pre-bound RTP socket in an asyncio endpoint.
 
@@ -596,11 +731,12 @@ class AudioBridge:
                 rtp_socket.close()
             except OSError:
                 pass
-            if video_socket is not None:
-                try:
-                    video_socket.close()
-                except OSError:
-                    pass
+            for sock in (video_socket, video_rtcp_socket):
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
             self._cleanup_video_sdp()
             raise
 
@@ -623,6 +759,36 @@ class AudioBridge:
                 except OSError:
                     pass
                 self._cleanup_video_sdp()
+
+            # RTCP for video — RFC 3550 convention puts it on `rtp_port + 1`
+            # for the remote side. Used to send PLI to the gateway.
+            if self._video_rtp is not None and video_rtcp_socket is not None:
+                remote_rtcp_addr = (remote_video_rtp_ip, remote_video_rtp_port + 1)
+                self._video_rtcp = _VideoRtcpProtocol(remote_addr=remote_rtcp_addr)
+                try:
+                    (
+                        self._video_rtcp_transport,
+                        _,
+                    ) = await loop.create_datagram_endpoint(
+                        lambda: self._video_rtcp,  # type: ignore[return-value]
+                        sock=video_rtcp_socket,
+                    )
+                    self._pli_task = asyncio.create_task(self._pli_loop())
+                except OSError:
+                    _LOGGER.exception(
+                        "Video RTCP wrap failed — continuing without PLI"
+                    )
+                    self._video_rtcp = None
+                    try:
+                        video_rtcp_socket.close()
+                    except OSError:
+                        pass
+            elif video_rtcp_socket is not None:
+                # Video RTP wrap failed above — close the now-unusable RTCP sock.
+                try:
+                    video_rtcp_socket.close()
+                except OSError:
+                    pass
 
         local_port = rtp_socket.getsockname()[1]
         _LOGGER.info(
@@ -669,6 +835,60 @@ class AudioBridge:
         self._stats_task = asyncio.create_task(self._log_stats_loop())
         return self.rtsp_url
 
+    async def _pli_loop(self) -> None:
+        """Send RFC 4585 PLI to the gateway until the first VP8 I-frame
+        arrives or we hit the burst limit. Asterisk advertises plain RTP/AVP
+        (no `a=rtcp-fb`) so this is a deviation from RFC 4585; in practice
+        Cogelec's gateway forwards inbound RTCP to the doorbell hardware,
+        which re-encodes with a keyframe ~50-200 ms after the first PLI."""
+        try:
+            # Wait for the first RTP packet so we know the media SSRC. Without
+            # it our PLI has nothing to reference and the gateway would ignore
+            # it. Cap the wait — if no RTP comes in, the call is dead anyway.
+            deadline = time.monotonic() + _PLI_WAIT_FIRST_RTP_S
+            while (
+                self._video_rtp is not None
+                and not self._video_rtp.ssrc_stats
+                and time.monotonic() < deadline
+            ):
+                await asyncio.sleep(0.05)
+            if self._video_rtp is None or not self._video_rtp.ssrc_stats:
+                _LOGGER.debug("PLI_LOOP: no VP8 RTP within %ss — giving up",
+                              _PLI_WAIT_FIRST_RTP_S)
+                return
+            # Pick the most-active SSRC (gateway might be a single source but
+            # some Asterisk setups multiplex SSRCs over the lifetime of a call).
+            media_ssrc = max(
+                self._video_rtp.ssrc_stats.items(),
+                key=lambda kv: kv[1]["count"],
+            )[0]
+            t0 = time.monotonic()
+            for i in range(_PLI_MAX_SENDS):
+                if self._video_rtp is None or self._video_rtcp is None:
+                    return
+                if self._video_rtp.keyframe_received:
+                    elapsed_ms = (time.monotonic() - t0) * 1000
+                    _LOGGER.info(
+                        "PLI_LOOP: keyframe arrived after %d PLI(s) in %.0fms — done",
+                        i, elapsed_ms,
+                    )
+                    return
+                self._video_rtcp.send_pli(media_ssrc)
+                if i == 0:
+                    _LOGGER.info(
+                        "PLI_LOOP: first PLI sent to %s for media_ssrc=0x%08x",
+                        self._video_rtcp._remote_addr, media_ssrc,
+                    )
+                await asyncio.sleep(_PLI_INTERVAL_S)
+            _LOGGER.warning(
+                "PLI_LOOP: gave up after %d PLI(s) without a keyframe (gateway "
+                "may not honour RTCP feedback on RTP/AVP)", _PLI_MAX_SENDS,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("PLI_LOOP crashed")
+
     def _write_video_sdp(self, ffmpeg_listen_port: int) -> str:
         """Write a minimal SDP describing the VP8 RTP stream we feed ffmpeg.
 
@@ -713,21 +933,34 @@ class AudioBridge:
         transport = self._rtp_transport
         video_rtp = self._video_rtp
         video_transport = self._video_rtp_transport
+        video_rtcp = self._video_rtcp
+        video_rtcp_transport = self._video_rtcp_transport
         process = self._process
         stderr_task = self._stderr_task
         stats_task = self._stats_task
+        pli_task = self._pli_task
+        if video_rtcp is not None:
+            _LOGGER.info(
+                "VIDEO_RTCP_SUMMARY: %d PLI sent, %d incoming RTCP received",
+                video_rtcp.pli_sent, video_rtcp.rtcp_received,
+            )
         self._rtp = None
         self._rtp_transport = None
         self._video_rtp = None
         self._video_rtp_transport = None
+        self._video_rtcp = None
+        self._video_rtcp_transport = None
         self._process = None
         self._stderr_task = None
         self._stats_task = None
+        self._pli_task = None
         self._ffmpeg_push_ready = None
         self._bytes_written_to_ffmpeg = 0
 
         if stats_task is not None and not stats_task.done():
             stats_task.cancel()
+        if pli_task is not None and not pli_task.done():
+            pli_task.cancel()
 
         if rtp is not None:
             rtp.close()
@@ -737,6 +970,10 @@ class AudioBridge:
             video_rtp.close()
         if video_transport is not None and not video_transport.is_closing():
             video_transport.close()
+        if video_rtcp is not None:
+            video_rtcp.close()
+        if video_rtcp_transport is not None and not video_rtcp_transport.is_closing():
+            video_rtcp_transport.close()
         self._cleanup_video_sdp()
 
         if process is not None and process.returncode is None:
