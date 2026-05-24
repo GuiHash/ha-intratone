@@ -53,9 +53,11 @@ _RTP_HEADER_SIZE = 12
 _FFMPEG_TERMINATE_TIMEOUT = 3.0
 _STATS_INTERVAL_S = 5.0  # how often to log RTP rx/tx counts during a call
 # Upper bound on how long to wait for ffmpeg to ANNOUNCE+RECORD into go2rtc.
-# In practice this completes in 100-400 ms on localhost; 5 s leaves margin for
-# busy CI / cold-start ffmpeg without risking HomeKit's own pull-side timeout.
-_FFMPEG_PUSH_READY_TIMEOUT_S = 5.0
+# Audio-only: 100-400 ms on localhost. With VP8 video, ffmpeg must receive a
+# VP8 I-frame before it can start encoding H.264 output; Intratone typically
+# sends P-frames for 8-12 s before the first keyframe, so we need meaningful
+# slack. 15 s covers observed worst-case keyframe latency with margin.
+_FFMPEG_PUSH_READY_TIMEOUT_S = 15.0
 
 
 def _build_rtp_packet(seq: int, timestamp: int, ssrc: int, payload: bytes) -> bytes:

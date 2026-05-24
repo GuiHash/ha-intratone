@@ -260,6 +260,30 @@ class CallManager:
         self._sip_client.hang_up(self._active_call_id)
         await self._bridge.stop()
 
+    async def abort_call(self) -> None:
+        """Abort the active call immediately — used when the stream consumer
+        (HomeKit) timed out and gave up. Unlike hang_up(), clears all state
+        right away (no grace period) so the next ring can start a fresh call
+        without waiting for the 60 s BYE grace window."""
+        call_id = self._active_call_id
+        if call_id is None:
+            return
+        for attr in ("_max_duration_task", "_grace_task"):
+            task = getattr(self, attr)
+            if task is not None and not task.done():
+                task.cancel()
+            setattr(self, attr, None)
+        if self._sip_client is not None:
+            self._sip_client.hang_up(call_id)
+        if self._sip_transport is not None and not self._sip_transport.is_closing():
+            self._sip_transport.close()
+        self._sip_transport = None
+        self._sip_client = None
+        self._active_call_id = None
+        self._close_pending_sockets()
+        await self._bridge.stop()
+        self._on_call_ended(call_id)
+
     # --- IntratoneSipClient callbacks (sync — must not await) -----------
 
     def _handle_call_established(self, info: CallEstablished) -> None:

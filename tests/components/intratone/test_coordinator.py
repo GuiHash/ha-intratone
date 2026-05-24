@@ -7,6 +7,7 @@ flow). FCM push only fires the HomeKit doorbell event.
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -26,6 +27,7 @@ def coordinator_with_cm(coordinator):
     cm = MagicMock()
     cm.start_call = AsyncMock(return_value="fake-call-id")
     cm.hang_up = AsyncMock()
+    cm.abort_call = AsyncMock()
     coordinator.attach_call_manager(cm)
     return coordinator, cm
 
@@ -261,3 +263,19 @@ async def test_open_door_returns_false_when_sip_message_fails(
     cm.send_open_door = MagicMock(return_value=False)
     await coordinator.async_handle_push({"call_id": "42", "message": "X"})
     assert await coordinator.async_open_door() is False
+
+
+async def test_wait_for_stream_timeout_aborts_call(coordinator_with_cm) -> None:
+    """When stream_ready times out, abort_call() is scheduled on the call
+    manager so ffmpeg and the SIP leg are torn down immediately."""
+    coordinator, cm = coordinator_with_cm
+    cm.start_call.return_value = "sip-call-timeout"
+    await coordinator.async_handle_push(_FULL_PUSH)
+    await coordinator.async_ensure_call_started()
+
+    # stream_ready is never set → timeout fires
+    url = await coordinator.async_wait_for_stream(timeout=0.01)
+
+    assert url is None
+    await asyncio.sleep(0.01)  # let the scheduled task run
+    cm.abort_call.assert_awaited_once()
