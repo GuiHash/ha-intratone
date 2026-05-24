@@ -364,3 +364,20 @@ def test_bind_rtp_socket_returns_bound_socket(socket_enabled):
         assert port % 2 == 0  # RTP convention: even ports
     finally:
         sock.close()
+
+
+def test_bind_rtp_pair_returns_adjacent_ports(socket_enabled):
+    """`_bind_rtp_pair` returns (RTP, RTCP) on consecutive (even, odd) ports
+    — required so the gateway can send RTCP back to our advertised port + 1."""
+    from custom_components.intratone.call_manager import _bind_rtp_pair
+
+    rtp_sock, rtcp_sock = _bind_rtp_pair()
+    try:
+        rtp_port = rtp_sock.getsockname()[1]
+        rtcp_port = rtcp_sock.getsockname()[1]
+        assert rtp_port % 2 == 0
+        assert rtcp_port == rtp_port + 1
+        assert 16384 <= rtp_port < 16484
+    finally:
+        rtp_sock.close()
+        rtcp_sock.close()
