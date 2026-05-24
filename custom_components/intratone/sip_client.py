@@ -474,6 +474,17 @@ class IntratoneSipClient(asyncio.Protocol):
         call.route_set = list(reversed(rr)) if rr else None
 
         _LOGGER.info("Call %s: 200 OK — sending ACK", call.call_id)
+        # TEMP: capture 200 OK SDP body to evaluate RTCP PLI feasibility
+        # (looking for `RTP/AVPF` profile and `a=rtcp-fb` attributes). Remove
+        # after the capture exercise.
+        _sdp_for_log = (
+            msg.body.decode("utf-8", errors="replace")
+            if isinstance(msg.body, bytes)
+            else (msg.body or "")
+        )
+        _LOGGER.info(
+            "SDP_CAPTURE 200 OK body for call %s:\n%s", call.call_id, _sdp_for_log
+        )
         self._send(
             self._build_ack(call, msg, request_uri=call.remote_target_uri)
         )
