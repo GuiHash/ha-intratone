@@ -30,3 +30,7 @@ CONF_FCM_CREDS: Final = "fcm_creds"
 DEFAULT_INDICATIF: Final = "33"
 
 JWT_REFRESH_INTERVAL_HOURS: Final = 12
+
+CONF_VIDEO_ENABLED: Final = "video_enabled"
+CONF_GO2RTC_URL: Final = "go2rtc_url"
+DEFAULT_GO2RTC_URL: Final = "rtsp://127.0.0.1:8554"

@@ -8,14 +8,18 @@ import uuid
 from typing import Any
 
 import voluptuous as vol
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import ConfigFlow, ConfigFlowResult, OptionsFlow
+from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
     CONF_DEVICE_ID,
+    CONF_GO2RTC_URL,
     CONF_INVITE_CODE,
     CONF_NUMERIC_ID,
     CONF_TEL,
+    CONF_VIDEO_ENABLED,
+    DEFAULT_GO2RTC_URL,
     DEFAULT_INDICATIF,
     DOMAIN,
 )
@@ -57,10 +61,40 @@ def _normalize_phone(raw: str, indicatif: str) -> str:
     return s
 
 
+class IntratoneOptionsFlowHandler(OptionsFlow):
+    """Handle Intratone options (video, go2rtc URL)."""
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if user_input is not None:
+            return self.async_create_entry(data=user_input)
+
+        current = self.config_entry.options
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_VIDEO_ENABLED,
+                    default=current.get(CONF_VIDEO_ENABLED, False),
+                ): bool,
+                vol.Optional(
+                    CONF_GO2RTC_URL,
+                    default=current.get(CONF_GO2RTC_URL, DEFAULT_GO2RTC_URL),
+                ): str,
+            }
+        )
+        return self.async_show_form(step_id="init", data_schema=schema)
+
+
 class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle the Intratone pairing flow."""
 
     VERSION = 1
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry) -> IntratoneOptionsFlowHandler:
+        return IntratoneOptionsFlowHandler()
 
     def __init__(self) -> None:
         self._reauth_entry = None

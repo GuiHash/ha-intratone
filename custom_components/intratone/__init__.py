@@ -19,7 +19,10 @@ from .call_manager import CallManager
 from .const import (
     CONF_FCM_CREDS,
     CONF_FCM_TOKEN,
+    CONF_GO2RTC_URL,
     CONF_JWT,
+    CONF_VIDEO_ENABLED,
+    DEFAULT_GO2RTC_URL,
     DOMAIN,
 )
 from .coordinator import IntratoneCoordinator
@@ -137,12 +140,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: IntratoneConfigEntry) ->
         local_host=local_ip,
         on_call_active=lambda call_id, url: coordinator.set_stream_url(call_id, url),
         on_call_ended=lambda call_id: coordinator.set_stream_url(call_id, None),
+        video_enabled=entry.options.get(CONF_VIDEO_ENABLED, False),
+        go2rtc_url=entry.options.get(CONF_GO2RTC_URL, DEFAULT_GO2RTC_URL),
     )
     await call_manager.async_start()
     coordinator.attach_call_manager(call_manager)
 
     fcm = FcmListener(hass, entry, coordinator, store)
     await fcm.async_start()
+
+    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 
     entry.runtime_data = IntratoneRuntime(
         api=api,
@@ -191,6 +198,12 @@ async def _async_migrate_legacy_creds(
         "Intratone: migrated %d credential field(s) from entry.data to Store",
         len(legacy),
     )
+
+
+async def _async_options_updated(
+    hass: HomeAssistant, entry: IntratoneConfigEntry
+) -> None:
+    await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: IntratoneConfigEntry) -> bool:

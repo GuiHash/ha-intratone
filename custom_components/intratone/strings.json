@@ -53,6 +53,21 @@
       "reauth_successful": "Re-pairing successful."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Intratone options",
+        "data": {
+          "video_enabled": "Enable video (VP8)",
+          "go2rtc_url": "go2rtc RTSP relay URL"
+        },
+        "data_description": {
+          "video_enabled": "Negotiates VP8 video with the Intratone gateway and forwards it to go2rtc. Leave off for audio-only mode.",
+          "go2rtc_url": "RTSP URL where go2rtc listens. Default: rtsp://127.0.0.1:8554. HA OS users with the embedded go2rtc should use rtsp://127.0.0.1:18554."
+        }
+      }
+    }
+  },
   "services": {
     "simulate_ring": {
       "name": "Simulate doorbell ring",
