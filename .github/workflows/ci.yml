@@ -30,12 +30,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libturbojpeg0-dev libopus0
 
       - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements_test.txt
+        run: pip install --no-cache-dir --disable-pip-version-check -r requirements_test.txt
 
       - name: Run pytest
-        run: pytest tests/components/intratone/ -v
+        run: pytest tests/components/intratone/ -v -n auto
 
   hassfest:
     name: hassfest
