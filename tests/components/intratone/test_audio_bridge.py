@@ -411,7 +411,10 @@ async def test_stderr_is_drained_to_logger(
         await asyncio.sleep(0)
         await asyncio.sleep(0)
 
-    drained = [r.message for r in caplog.records if "ffmpeg:" in r.message]
+    drained = [
+        r.message for r in caplog.records
+        if "ffmpeg:" in r.message or "FFMPEG_STARTUP" in r.message
+    ]
     assert any("Stream mapping" in m for m in drained)
     assert any("Output #0" in m for m in drained)
     await bridge.stop()
