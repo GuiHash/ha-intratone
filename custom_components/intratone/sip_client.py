@@ -482,7 +482,7 @@ class IntratoneSipClient(asyncio.Protocol):
             if isinstance(msg.body, bytes)
             else (msg.body or "")
         )
-        _LOGGER.info(
+        _LOGGER.warning(
             "SDP_CAPTURE 200 OK body for call %s:\n%s", call.call_id, _sdp_for_log
         )
         self._send(
