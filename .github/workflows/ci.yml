@@ -35,7 +35,7 @@ jobs:
           pip install -r requirements_test.txt
 
       - name: Run pytest
-        run: pytest tests/components/intratone/ -v
+        run: pytest tests/components/intratone/ -v -n auto
 
   hassfest:
     name: hassfest

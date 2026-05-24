@@ -1,4 +1,5 @@
 pytest-homeassistant-custom-component
+pytest-xdist
 aioresponses
 firebase-messaging>=0.4.0
 # Imported in custom_components/intratone/sip_client.py for the SipMessage
