@@ -505,6 +505,11 @@ class _VideoRtpProtocol(asyncio.DatagramProtocol):
             )
 
         try:
+            if self.rtp_packets_forwarded == 0:
+                _LOGGER.warning(
+                    "VIDEO_FORWARD_FIRST: first VP8 RTP forwarded to ffmpeg :%d",
+                    self._ffmpeg_target[1],
+                )
             self._transport.sendto(data, self._ffmpeg_target)
             self.rtp_packets_forwarded += 1
             if self.rtp_packets_forwarded % 50 == 0:
@@ -704,10 +709,17 @@ class AudioBridge:
         assert self._process.stdin is not None
         ffmpeg_stdin = self._process.stdin
 
+        spawn_t0 = time.monotonic()
+
         def _forward_ulaw(payload: bytes) -> None:
             if ffmpeg_stdin.is_closing():
                 return
             try:
+                if self._bytes_written_to_ffmpeg == 0:
+                    _LOGGER.warning(
+                        "AUDIO_STDIN_FIRST: first µ-law byte written %.0fms after ffmpeg spawn",
+                        (time.monotonic() - spawn_t0) * 1000,
+                    )
                 ffmpeg_stdin.write(payload)
                 self._bytes_written_to_ffmpeg += len(payload)
             except (BrokenPipeError, ConnectionResetError):
@@ -1029,19 +1041,23 @@ class AudioBridge:
                 # demuxers that aren't in ffmpeg's default safe list.
                 "-protocol_whitelist",
                 "file,udp,rtp",
-                # Low-latency input: ffmpeg's default `analyzeduration=5s` +
-                # `probesize=5MB` defer "Output #0, rtsp" emission by ~3-4 s
-                # since we have to wait for the demuxer to be confident. With
-                # VP8 in an SDP file we know the codec; 50 ms / 32 KB is
-                # enough to grab the first packet and start pushing.
+                # Force ffmpeg to start the demuxer on the first packet. The
+                # SDP already declares `a=rtpmap:96 VP8/90000`, so analysis is
+                # redundant. Intratone runs at ~2-5 fps and ~50 kbps; the
+                # previous 50 ms / 32 KB thresholds translated into ~5 s of
+                # wall-clock waiting because the low rate never filled them.
                 "-analyzeduration",
-                "50000",
+                "0",
                 "-probesize",
-                "32768",
+                "32",
                 "-fflags",
                 "nobuffer",
                 "-flags",
                 "low_delay",
+                # Disable the RTP reordering buffer — Intratone delivers in
+                # order on a single-hop loopback path, no jitter to hide.
+                "-max_delay",
+                "0",
                 "-f",
                 "sdp",
                 "-i",
@@ -1062,6 +1078,20 @@ class AudioBridge:
             "-loglevel",
             "info",
             # Input 0: raw µ-law (G.711) at 8 kHz mono from stdin.
+            # Without these flags ffmpeg falls back to the defaults
+            # (analyzeduration=5s, probesize=5MB) for the stdin input. At
+            # µ-law's 8 KB/s rate that's an enforced 5 s wall-clock wait
+            # before stream params are confirmed — the dominant contributor
+            # to the observed ~14 s startup latency before "Output #0, rtsp"
+            # emits. Raw format means no analysis is required.
+            "-analyzeduration",
+            "0",
+            "-probesize",
+            "32",
+            "-fflags",
+            "nobuffer",
+            "-flags",
+            "low_delay",
             "-f",
             "mulaw",
             "-ar",
@@ -1184,6 +1214,11 @@ class AudioBridge:
         # "Failed", "Broken pipe". Forward those at WARNING so prod users see
         # them without enabling debug; everything else stays at DEBUG.
         warn_keywords = ("Error", "Invalid", "Failed", "Broken pipe", "fatal")
+        # Temporary diagnostic: log the most significant ffmpeg startup
+        # milestones at WARNING to find what's slow during the ~14 s gap
+        # between spawn and "Output #0, rtsp" in prod.
+        startup_markers = ("Stream mapping", "Input #0", "Input #1", "Press [q]")
+        startup_t0 = time.monotonic()
         try:
             while True:
                 line = await process.stderr.readline()
@@ -1199,6 +1234,11 @@ class AudioBridge:
                     ready_event.set()
                 if any(kw in text for kw in warn_keywords):
                     _LOGGER.warning("ffmpeg: %s", text)
+                elif any(m in text for m in startup_markers):
+                    _LOGGER.warning(
+                        "FFMPEG_STARTUP[+%.0fms]: %s",
+                        (time.monotonic() - startup_t0) * 1000, text,
+                    )
                 else:
                     _LOGGER.debug("ffmpeg: %s", text)
         except asyncio.CancelledError:
