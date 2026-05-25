@@ -23,3 +23,6 @@ intratone_credentials.json
 # entity IDs may leak personal data e.g. phone numbers). Copy
 # dev_config.example.yaml → dev_config/configuration.yaml to bootstrap.
 dev_config/
+
+# Generated from dev/ha_overrides/bluetooth/manifest.json.template by spike-up.sh
+dev/ha_overrides/bluetooth/manifest.json

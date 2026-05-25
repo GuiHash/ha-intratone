@@ -29,6 +29,9 @@ fi
 
 # 2. Set up dev_config (preserves .storage/ pairing data across reruns)
 mkdir -p dev_config/custom_components
+# Generate manifest.json from template (gitignored — hacs/default's hassfest script
+# requires exactly one manifest.json per repo; this file must not be committed)
+cp dev/ha_overrides/bluetooth/manifest.json.template dev/ha_overrides/bluetooth/manifest.json
 ln -sfn ../../dev/ha_overrides/bluetooth dev_config/custom_components/bluetooth
 ln -sfn ../../custom_components/intratone dev_config/custom_components/intratone
 
