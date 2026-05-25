@@ -193,6 +193,10 @@ class _PendingCall:
     # requests to the right downstream UAS — the MESSAGE silently goes to the
     # wrong endpoint and the door never opens.
     route_set: list[str] | None = None
+    # True while an in-dialog re-INVITE is outstanding. Prevents stacking
+    # multiple re-INVITEs (the bridge's PLI loop only fires once per call,
+    # but defensive: a 491 Request Pending would loop forever otherwise).
+    reinvite_in_progress: bool = False
 
 
 CallEstablishedCb = Callable[[CallEstablished], None]
@@ -363,6 +367,54 @@ class IntratoneSipClient(asyncio.Protocol):
             call_id, body="MUTE_OFF", label="MUTE_OFF"
         )
 
+    def send_reinvite_audio_only(self, call_id: str) -> bool:
+        """Send an in-dialog re-INVITE that drops the `m=video` media line.
+
+        Mirrors the iOS app's behaviour when VP8 keyframes never arrive
+        (string `[LinphoneManager][ERROR] Failed to update call to
+        audio-only:` in the decrypted binary). Keeps audio alive while
+        telling the gateway to stop sending dead video bytes.
+
+        Idempotent: returns False without sending anything if the call is
+        already audio-only or not in the right state. A non-2xx response
+        does NOT tear the call down — see `_handle_response`.
+        """
+        call = self._call
+        if call is None or call.call_id != call_id:
+            _LOGGER.warning("re-INVITE: unknown call %s", call_id)
+            return False
+        if call.state != CallState.CONFIRMED:
+            _LOGGER.warning(
+                "re-INVITE: call %s not CONFIRMED (state=%s)",
+                call_id, call.state,
+            )
+            return False
+        if call.local_video_rtp_port is None:
+            _LOGGER.debug(
+                "re-INVITE: call %s already audio-only — skipping",
+                call_id,
+            )
+            return False
+        if call.reinvite_in_progress:
+            _LOGGER.debug(
+                "re-INVITE: call %s already has a re-INVITE pending",
+                call_id,
+            )
+            return False
+        # Drop the video offer from subsequent SDP builds. Even if the
+        # re-INVITE response is delayed or lost, the call falls back to a
+        # consistent audio-only view of itself.
+        call.local_video_rtp_port = None
+        call.reinvite_in_progress = True
+        call.cseq += 1
+        call.via_branch = f"z9hG4bK-{secrets.token_hex(8)}"
+        self._send(self._build_reinvite(call))
+        _LOGGER.info(
+            "Call %s: sent audio-only re-INVITE (CSeq=%d)",
+            call_id, call.cseq,
+        )
+        return True
+
     def send_backlight(self, call_id: str) -> bool:
         """Send the in-dialog SIP MESSAGE body `contrast`.
 
@@ -440,15 +492,47 @@ class IntratoneSipClient(asyncio.Protocol):
             if call.state in (CallState.INVITING, CallState.AUTHENTICATING):
                 self._handle_ok(call, msg, raw)
             elif call.state == CallState.CONFIRMED:
-                # Retransmission of an earlier 2xx (server didn't see our
-                # ACK). Re-ACK silently — RFC 3261 §13.2.2.4.
+                # Two indistinguishable cases land here:
+                #  - Retransmission of an earlier 2xx (our ACK got lost) —
+                #    RFC 3261 §13.2.2.4 says re-ACK silently.
+                #  - 2xx for an in-dialog re-INVITE we sent — same handling,
+                #    just clear the pending flag.
                 cseq_method = msg.headers.get("cseq", "").split()
                 if len(cseq_method) == 2 and cseq_method[1].upper() == "INVITE":
-                    _LOGGER.debug("Call %s: 2xx retransmission — re-ACK", call.call_id)
+                    if call.reinvite_in_progress:
+                        _LOGGER.info(
+                            "Call %s: re-INVITE accepted (200 OK)",
+                            call.call_id,
+                        )
+                        call.reinvite_in_progress = False
+                    else:
+                        _LOGGER.debug(
+                            "Call %s: 2xx retransmission — re-ACK",
+                            call.call_id,
+                        )
                     request_uri = call.remote_target_uri or call.target_uri
                     self._send(
                         self._build_ack(call, msg, request_uri=request_uri)
                     )
+            return
+
+        # Non-2xx final on an in-dialog re-INVITE we sent ourselves: gateway
+        # rejected our SDP renegotiation (e.g. 488 Not Acceptable Here, 491
+        # Request Pending). We MUST ACK per RFC 3261 §17.1.1.3, but the
+        # established dialog is unaffected — keep audio alive instead of
+        # tearing down the call entirely. Mirrors the iOS error log
+        # `Failed to update call to audio-only:` which doesn't kill the call.
+        if call.state == CallState.CONFIRMED and call.reinvite_in_progress:
+            _LOGGER.warning(
+                "Call %s: re-INVITE rejected %s %s — keeping call alive",
+                call.call_id, code, msg.reason,
+            )
+            self._send(
+                self._build_ack(
+                    call, msg, request_uri=call.remote_target_uri or call.target_uri
+                )
+            )
+            call.reinvite_in_progress = False
             return
 
         # Non-2xx final → ACK on the original transaction (request-URI =
@@ -622,6 +706,45 @@ class IntratoneSipClient(asyncio.Protocol):
         head_lines.append(f"Content-Length: {len(sdp)}")
         head_lines.append("")
         return (_CRLF.join(head_lines) + _CRLF).encode("utf-8") + sdp
+
+    def _build_reinvite(self, call: _PendingCall) -> bytes:
+        """In-dialog INVITE (RFC 3261 §14) — target = dialog remote URI, To
+        carries the server's tag, route set is honoured.
+
+        Currently the only caller is `send_reinvite_audio_only`, which has
+        already dropped `local_video_rtp_port` from the call state so the
+        SDP rebuild emits audio-only. Generalising to other re-INVITE
+        purposes (hold, codec switch) only needs additional helpers; the
+        wire framing here is identical.
+        """
+        sdp = self._build_sdp(call).encode("utf-8")
+        request_uri = call.remote_target_uri or call.target_uri
+        lines = [
+            f"INVITE {request_uri} SIP/2.0",
+            f"Via: SIP/2.0/TCP {call.local_host}:{call.local_port};branch={call.via_branch};rport",
+            "Max-Forwards: 70",
+        ]
+        if call.route_set:
+            for r in call.route_set:
+                lines.append(f"Route: {r}")
+        lines.extend(
+            [
+                f"From: <sip:{call.sip_username}@{call.local_host}>;tag={call.from_tag}",
+                f"To: {call.remote_to_header or f'<{call.target_uri}>'}",
+                f"Call-ID: {call.call_id}",
+                f"CSeq: {call.cseq} INVITE",
+                f"Contact: <sip:{call.sip_username}@{call.local_host}:{call.local_port};transport=tcp>;+sip.instance={_SIP_INSTANCE}",
+                f"User-Agent: {_USER_AGENT}",
+                "Allow: INVITE, ACK, CANCEL, BYE, MESSAGE",
+                "Supported: timer",
+                f"Session-Expires: {_SESSION_EXPIRES_S};refresher=uas",
+                "Min-SE: 90",
+                "Content-Type: application/sdp",
+                f"Content-Length: {len(sdp)}",
+                "",
+            ]
+        )
+        return (_CRLF.join(lines) + _CRLF).encode("utf-8") + sdp
 
     def _build_sdp(self, call: _PendingCall) -> str:
         session_id = call.call_id.split("@", 1)[0]

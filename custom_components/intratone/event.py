@@ -37,13 +37,20 @@ class IntratoneDoorbellEvent(IntratoneEntity, EventEntity):
             return
         if state.ring_seq != self._last_seq:
             self._last_seq = state.ring_seq
-            self._trigger_event(
-                "ring",
-                {
-                    "door_name": state.door_name,
-                    "door_number": state.door_number,
-                    "caller": state.caller_login,
-                    "call_id": state.call_id,
-                },
-            )
+            attrs = {
+                "door_name": state.door_name,
+                "door_number": state.door_number,
+                "caller": state.caller_login,
+                "call_id": state.call_id,
+            }
+            # iOS-only payload fields — only surface them when actually
+            # populated so automations that branch on `hardware_type`
+            # don't see empty strings as a valid value.
+            if state.hardware_name:
+                attrs["hardware_name"] = state.hardware_name
+            if state.hardware_type:
+                attrs["hardware_type"] = state.hardware_type
+            if state.hardware_id:
+                attrs["hardware_id"] = state.hardware_id
+            self._trigger_event("ring", attrs)
             self.async_write_ha_state()

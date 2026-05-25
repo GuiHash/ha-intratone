@@ -249,6 +249,55 @@ async def test_spawn_bridge_sends_mute_off_after_bridge_up(
     assert any(b"MUTE_OFF" in payload for payload in transports[0].written)
 
 
+async def test_bridge_video_failure_callback_triggers_reinvite_audio_only(
+    manager, fake_bridge,
+):
+    """AudioBridge invokes `on_video_failure` when the PLI burst exhausts
+    without a keyframe — CallManager wires that to `send_reinvite_audio_only`
+    on the SIP client. End-to-end: a no-video gateway never blocks audio.
+    """
+    from custom_components.intratone.sip_client import CallState
+
+    call_id = await manager.start_call(TARGET_URI, SERVER_IP, SIP_USER, SIP_PASS)
+    sip_client = manager._sip_client
+    # Need a video-enabled, CONFIRMED dialog for the re-INVITE to actually fire.
+    sip_client._call.state = CallState.CONFIRMED  # type: ignore[union-attr]
+    sip_client._call.remote_to_header = f"<{TARGET_URI}>;tag=srv"  # type: ignore[union-attr]
+    sip_client._call.local_video_rtp_port = 20000  # type: ignore[union-attr]
+
+    sip_client._on_call_established(  # type: ignore[union-attr]
+        CallEstablished(
+            call_id=call_id,
+            remote_rtp_ip="178.32.84.99",
+            remote_rtp_port=20002,
+            local_rtp_port=sip_client._call.local_rtp_port,  # type: ignore[union-attr]
+        )
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    # Pull the callback that CallManager handed to AudioBridge.start().
+    on_video_failure = fake_bridge.start.await_args.kwargs.get("on_video_failure")
+    assert on_video_failure is not None
+    on_video_failure()
+
+    # An in-dialog re-INVITE landed on the same TCP transport with the
+    # bumped CSeq, no `m=video` media line, and the MUTE_OFF/initial INVITE
+    # CSeqs still on the wire — i.e. the renegotiation happened in-dialog.
+    transports = manager._test_transports  # type: ignore[attr-defined]
+    written = transports[0].written
+    reinvite = next(
+        (
+            b for b in written
+            if b.startswith(b"INVITE ") and b"CSeq: 52 INVITE" in b
+        ),
+        None,
+    )
+    assert reinvite is not None, "no re-INVITE with CSeq 52 found"
+    assert b"m=audio" in reinvite
+    assert b"m=video" not in reinvite
+
+
 async def test_bridge_start_failure_hangs_up(manager, fake_bridge, active_calls):
     fake_bridge.start.side_effect = RuntimeError("ffmpeg blew up")
     call_id = await manager.start_call(TARGET_URI, SERVER_IP, SIP_USER, SIP_PASS)

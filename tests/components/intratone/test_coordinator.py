@@ -139,6 +139,7 @@ async def test_ensure_call_started_triggers_invite_with_pending_creds(
         target_host="178.32.84.135",
         sip_username="cogelecTest",
         sip_password="CogeleC",
+        max_duration_s=None,
     )
     coordinator.api.answer_call.assert_awaited_once_with("300705065")
 
@@ -385,3 +386,92 @@ async def test_wait_for_stream_timeout_returns_none_without_killing_call(
     assert url is None
     # No teardown on call_manager — door MESSAGE still possible until natural BYE.
     cm.hang_up.assert_not_awaited()
+
+
+async def test_handle_push_parses_hardware_identity_fields(coordinator) -> None:
+    """When the FCM push carries iOS-style hardware identity, CallState
+    surfaces it for the event entity. Accepts both camelCase and snake_case
+    variants since the wire format is undocumented and Cogelec has changed
+    names server-side before."""
+    await coordinator.async_handle_push(
+        {
+            "call_id": "1",
+            "message": "PORTE RUE",
+            "LOGIN_TO_CALL": "ABC",
+            "hardwareName": "Entrée principale",
+            "hardwareType": "kit_villa",
+            "hardwareId": "hw-42",
+        }
+    )
+    assert coordinator.data.hardware_name == "Entrée principale"
+    assert coordinator.data.hardware_type == "kit_villa"
+    assert coordinator.data.hardware_id == "hw-42"
+
+
+async def test_handle_push_falls_back_to_hardware_name_when_message_absent(
+    coordinator,
+) -> None:
+    """`message` is the historical Android door label; `hardwareName` is the
+    richer iOS field. When only the latter is present (some payload
+    flavours), use it for `door_name` so the event isn't a generic
+    "Doorbell"."""
+    await coordinator.async_handle_push(
+        {
+            "call_id": "1",
+            "LOGIN_TO_CALL": "ABC",
+            "hardware_name": "Garage gate",
+        }
+    )
+    # `message` is the v1-shape gate for "is this a call push" — without it
+    # the historical detector treats this as non-call. So this needs the
+    # TYPE=24 path or the bell `notif_type`. Skip the message and use the
+    # new-shape signal.
+    await coordinator.async_handle_push(
+        {
+            "TYPE": "24",
+            "NOTIFICATION_UUID": "uuid-43",
+            "LOGIN_TO_CALL": "ABC",
+            "hardware_name": "Garage gate",
+        }
+    )
+    assert coordinator.data.door_name == "Garage gate"
+
+
+async def test_handle_push_parses_call_end_delay(coordinator_with_cm) -> None:
+    """When `callEndDelay` is present in the push, the override is forwarded
+    to CallManager.start_call so the timeout matches the gateway-configured
+    call window instead of the hardcoded 120 s wedge protection."""
+    coordinator, cm = coordinator_with_cm
+    payload = {**_FULL_PUSH, "callEndDelay": "45"}
+    await coordinator.async_handle_push(payload)
+    await coordinator.async_ensure_call_started()
+    cm.start_call.assert_awaited_once_with(
+        target_uri="sip:2DO77UAO49XTGJ5Y93TFIZ8YLPIMXN36@178.32.84.135",
+        target_host="178.32.84.135",
+        sip_username="cogelecTest",
+        sip_password="CogeleC",
+        max_duration_s=45.0,
+    )
+
+
+async def test_handle_push_ignores_zero_call_end_delay(coordinator_with_cm) -> None:
+    """A 0 or empty `callEndDelay` falls back to the hardcoded default —
+    surfacing 0 would cause the auto-terminate task to fire immediately."""
+    coordinator, cm = coordinator_with_cm
+    payload = {**_FULL_PUSH, "callEndDelay": "0"}
+    await coordinator.async_handle_push(payload)
+    await coordinator.async_ensure_call_started()
+    # max_duration_s=None means "use the CallManager hardcoded default"
+    _, kwargs = cm.start_call.await_args
+    assert kwargs["max_duration_s"] is None
+
+
+async def test_handle_push_ignores_garbage_call_end_delay(
+    coordinator_with_cm,
+) -> None:
+    coordinator, cm = coordinator_with_cm
+    payload = {**_FULL_PUSH, "callEndDelay": "not-a-number"}
+    await coordinator.async_handle_push(payload)
+    await coordinator.async_ensure_call_started()
+    _, kwargs = cm.start_call.await_args
+    assert kwargs["max_duration_s"] is None

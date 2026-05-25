@@ -58,6 +58,12 @@ class CallState:
     # Physical door identifier (`NBPORTE` in the FCM payload). Useful for
     # multi-door installs (street door vs apartment door vs garage gate).
     door_number: str = ""
+    # Extra hardware-identity fields from the iOS `AccessCallModel` schema —
+    # present on some pushes, absent on others. Surfaced as event attributes
+    # so automations can branch on door / intercom identity beyond `message`.
+    hardware_name: str = ""
+    hardware_type: str = ""
+    hardware_id: str = ""
 
 
 @dataclass
@@ -76,6 +82,11 @@ class _PendingInvite:
     # Set when the audio bridge is up and `stream_url` is on `CallState`.
     # Camera/Lock entities await this before talking to HomeKit.
     stream_ready: asyncio.Event = field(default_factory=asyncio.Event)
+    # Per-call timing overrides from the FCM push (iOS `AccessCallModel`
+    # `callEndDelay` field, seconds). When None, CallManager falls back to
+    # its hardcoded `_MAX_CALL_DURATION_S`. Lets us honour intercom-specific
+    # call windows that the building operator may have shortened/lengthened.
+    max_duration_s: float | None = None
 
 
 class IntratoneCoordinator(DataUpdateCoordinator[CallState | None]):
@@ -182,14 +193,31 @@ class IntratoneCoordinator(DataUpdateCoordinator[CallState | None]):
             await self._call_manager.abort_active_call()
 
         self._ring_seq += 1
+        # iOS `AccessCallModel` carries richer identity (`hardwareName` is more
+        # descriptive than `message`, which is often a short usage label like
+        # "PORTE RUE"). Accept both camelCase and snake_case keys — the FCM
+        # payload format isn't formally documented and Cogelec has been known
+        # to rename fields across server-side updates.
+        hardware_name = (
+            payload.get("hardwareName") or payload.get("hardware_name") or ""
+        )
+        hardware_type = (
+            payload.get("hardwareType") or payload.get("hardware_type") or ""
+        )
+        hardware_id = (
+            payload.get("hardwareId") or payload.get("hardware_id") or ""
+        )
         state = CallState(
             call_id=str(call_id),
-            door_name=payload.get("message") or "Doorbell",
+            door_name=payload.get("message") or hardware_name or "Doorbell",
             caller_login=payload.get("LOGIN_TO_CALL", ""),
             received_at=datetime.now(UTC),
             ring_seq=self._ring_seq,
             door_code=payload.get("codes") or "*",
             door_number=payload.get("NBPORTE", ""),
+            hardware_name=hardware_name,
+            hardware_type=hardware_type,
+            hardware_id=hardware_id,
         )
         _LOGGER.info(
             "Doorbell ring: door=%s call_id=%s seq=%d (SIP deferred)",
@@ -210,6 +238,7 @@ class IntratoneCoordinator(DataUpdateCoordinator[CallState | None]):
                 target_host=sip_server_ip,
                 sip_username=sip_user,
                 sip_password=sip_pass,
+                max_duration_s=_parse_seconds(payload.get("callEndDelay")),
             )
         else:
             _LOGGER.debug(
@@ -245,6 +274,7 @@ class IntratoneCoordinator(DataUpdateCoordinator[CallState | None]):
                 target_host=pending.target_host,
                 sip_username=pending.sip_username,
                 sip_password=pending.sip_password,
+                max_duration_s=pending.max_duration_s,
             )
         except Exception:  # noqa: BLE001
             _LOGGER.exception("Failed to initiate SIP call")
@@ -379,3 +409,20 @@ _REDACT_KEYS = {"LOGIN", "PASS", "ip_adress"}
 def _redact(payload: dict) -> dict:
     """Mask sensitive fields when logging FCM payloads."""
     return {k: ("***" if k in _REDACT_KEYS else v) for k, v in payload.items()}
+
+
+def _parse_seconds(value) -> float | None:
+    """Coerce an FCM payload field to a positive number of seconds, or None.
+
+    Cogelec sends timing values as integer-ish strings ("30", "45"). Treat 0
+    and any non-numeric / malformed input as "absent" so the CallManager
+    falls back to its hardcoded default rather than auto-terminating
+    instantly on a 0-second window.
+    """
+    if value is None or value == "":
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if result > 0 else None

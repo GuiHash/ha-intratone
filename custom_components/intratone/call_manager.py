@@ -185,8 +185,15 @@ class CallManager:
         sip_username: str,
         sip_password: str,
         target_port: int = 5060,
+        max_duration_s: float | None = None,
     ) -> str | None:
-        """Open a TCP SIP connection and send INVITE. Returns Call-ID or None."""
+        """Open a TCP SIP connection and send INVITE. Returns Call-ID or None.
+
+        `max_duration_s` overrides the hardcoded wedge-protection timeout —
+        the coordinator forwards the server-side `callEndDelay` push field
+        when present so we honour intercom-specific call windows. Falls back
+        to `_MAX_CALL_DURATION_S` when None.
+        """
         if not self._started:
             _LOGGER.warning("CallManager not started; cannot place call")
             return None
@@ -255,8 +262,11 @@ class CallManager:
             raise
 
         self._active_call_id = call_id
+        effective_max_s = (
+            max_duration_s if max_duration_s and max_duration_s > 0 else _MAX_CALL_DURATION_S
+        )
         self._max_duration_task = asyncio.create_task(
-            self._auto_terminate_after(call_id, _MAX_CALL_DURATION_S)
+            self._auto_terminate_after(call_id, effective_max_s)
         )
         _LOGGER.info(
             "Outgoing SIP INVITE: call_id=%s target=%s local_rtp_port=%d",
@@ -441,6 +451,7 @@ class CallManager:
                 remote_video_rtp_ip=info.remote_video_rtp_ip,
                 remote_video_rtp_port=info.remote_video_rtp_port,
                 video_rtcp_socket=video_rtcp_socket,
+                on_video_failure=self._handle_video_failure,
             )
         except Exception as err:  # noqa: BLE001
             _LOGGER.exception("Audio bridge failed to start: %s", err)
@@ -468,3 +479,19 @@ class CallManager:
     async def _teardown_bridge(self, call_id: str) -> None:
         await self._bridge.stop()
         self._on_call_ended(call_id)
+
+    def _handle_video_failure(self) -> None:
+        """AudioBridge PLI loop gave up — no VP8 keyframe arrived.
+
+        Mirrors the iOS app's `Failed to update call to audio-only:` flow:
+        send an in-dialog re-INVITE without `m=video` so the gateway stops
+        wasting bandwidth on a stream nothing can decode. Audio path is
+        unaffected; the visitor remains audible / openable. Sync callback
+        from `_pli_loop` — runs on the event loop thread, must not await.
+        """
+        if self._sip_client is None or self._active_call_id is None:
+            return
+        try:
+            self._sip_client.send_reinvite_audio_only(self._active_call_id)
+        except Exception:  # noqa: BLE001 — never let bridge crashes propagate
+            _LOGGER.exception("re-INVITE audio-only failed")
