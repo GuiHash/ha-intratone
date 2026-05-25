@@ -36,7 +36,9 @@ jobs:
         # libturbojpeg: HA's camera component imports turbojpeg unconditionally.
         # libopus0:     voip-utils imports opuslib which dlopen()s the native
         #               libopus C library at module import time.
-        run: sudo apt-get update && sudo apt-get install -y libturbojpeg0-dev libopus0
+        run: |
+          sudo apt-get update && sudo apt-get install -y libturbojpeg0-dev libopus0
+          sudo chmod -R a+r /var/cache/apt/archives
 
       - name: Install Python dependencies
         run: uv pip install --system -r requirements_test.txt
