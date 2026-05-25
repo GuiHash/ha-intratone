@@ -108,6 +108,11 @@
       "fcm_connected": {
         "name": "Push channel connected"
       }
+    },
+    "switch": {
+      "backlight": {
+        "name": "Backlight"
+      }
     }
   }
 }

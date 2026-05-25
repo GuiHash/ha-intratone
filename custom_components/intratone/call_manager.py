@@ -307,6 +307,17 @@ class CallManager:
             return False
         return self._sip_client.send_mute_off(self._active_call_id)
 
+    def send_backlight(self) -> bool:
+        """Send the SIP MESSAGE `contrast` (backlight mode) for the active
+        call. Per the Cogelec app UI string, this asks the doorbell
+        hardware to enable a front illuminator / high-gain camera mode for
+        the rest of the call; reset by the server when BYE arrives.
+        """
+        if self._sip_client is None or self._active_call_id is None:
+            _LOGGER.warning("send_backlight: no active call")
+            return False
+        return self._sip_client.send_backlight(self._active_call_id)
+
     async def hang_up(self) -> None:
         """End the active call (user-initiated or explicit hangup)."""
         if self._sip_client is None or self._active_call_id is None:

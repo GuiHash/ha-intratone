@@ -37,6 +37,7 @@ PLATFORMS: list[Platform] = [
     Platform.CAMERA,
     Platform.EVENT,
     Platform.LOCK,
+    Platform.SWITCH,
 ]
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)

@@ -93,6 +93,11 @@
       "fcm_connected": {
         "name": "Canal push connecté"
       }
+    },
+    "switch": {
+      "backlight": {
+        "name": "Rétroéclairage"
+      }
     }
   }
 }

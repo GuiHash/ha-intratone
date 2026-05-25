@@ -368,6 +368,22 @@ class IntratoneSipClient(asyncio.Protocol):
             call_id, body="MUTE_OFF", label="MUTE_OFF"
         )
 
+    def send_backlight(self, call_id: str) -> bool:
+        """Send the in-dialog SIP MESSAGE body `contrast`.
+
+        Cogelec's app calls this from the (hidden by default) `btnContrast`
+        UI element — strings.xml `call_overlay_contrast` describes the
+        feature as: "In poor lighting situations, you can enable the
+        backlight mode to better see your visitor. This is reset after
+        each call." The signal asks the doorbell hardware to turn on its
+        front illuminator / switch to a high-gain camera mode for the rest
+        of the call. The body is the literal text `contrast` (no value).
+        Harmless if the hardware doesn't support it (server simply
+        ignores the MESSAGE)."""
+        return self._send_in_dialog_message(
+            call_id, body="contrast", label="backlight"
+        )
+
     def _send_in_dialog_message(
         self, call_id: str, *, body: str, label: str
     ) -> bool:

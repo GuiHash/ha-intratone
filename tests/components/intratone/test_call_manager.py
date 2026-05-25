@@ -359,6 +359,25 @@ async def test_abort_active_call_is_noop_when_no_active_call(
     assert ended_calls == []
 
 
+async def test_send_backlight_delegates_to_sip_client(manager):
+    """During an active call, send_backlight forwards to the SIP client
+    which serializes the in-dialog MESSAGE body=`contrast`."""
+    from custom_components.intratone.sip_client import CallState
+
+    call_id = await manager.start_call(TARGET_URI, SERVER_IP, SIP_USER, SIP_PASS)
+    sip_client = manager._sip_client
+    sip_client._call.state = CallState.CONFIRMED  # type: ignore[union-attr]
+    sip_client._call.remote_to_header = f"<{TARGET_URI}>;tag=srv"  # type: ignore[union-attr]
+
+    assert manager.send_backlight() is True
+    transports = manager._test_transports  # type: ignore[attr-defined]
+    assert any(b"contrast" in payload for payload in transports[0].written)
+
+
+async def test_send_backlight_returns_false_without_active_call(manager):
+    assert manager.send_backlight() is False
+
+
 async def test_async_stop_closes_transport_and_stops_bridge(manager, fake_bridge):
     call_id = await manager.start_call(TARGET_URI, SERVER_IP, SIP_USER, SIP_PASS)
     assert call_id is not None
