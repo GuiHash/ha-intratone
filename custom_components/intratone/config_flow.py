@@ -5,13 +5,10 @@ from __future__ import annotations
 import logging
 import re
 import uuid
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from homeassistant.config_entries import ConfigFlowResult
+from typing import Any
 
 import voluptuous as vol
-from homeassistant.config_entries import ConfigFlow, OptionsFlow
+from homeassistant.config_entries import ConfigFlow, ConfigFlowResult, OptionsFlow
 from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
@@ -103,15 +100,6 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
         self._reauth_entry = None
         # Carries SMS-flow state between async_step_phone and async_step_sms.
         self._pending_sms: dict[str, Any] = {}
-
-    def _get_reauth_entry(self):
-        # _get_reauth_entry was added to ConfigFlow base class in HA 2024.4.
-        # Fall back to reading entry_id from flow context on older versions.
-        try:
-            return super()._get_reauth_entry()
-        except AttributeError:
-            entry_id = self.context.get("entry_id")
-            return self.hass.config_entries.async_get_entry(entry_id)
 
     async def async_step_user(
         self, _user_input: dict[str, Any] | None = None
