@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/GuiHash/ha-intratone/compare/v0.2.0...v0.2.1) (2026-05-25)
+
+
+### Bug Fixes
+
+* **video:** drop pre-keyframe VP8 packets and add periodic PLI refresh ([#34](https://github.com/GuiHash/ha-intratone/issues/34)) ([1be8770](https://github.com/GuiHash/ha-intratone/commit/1be87701eabb795aa1bfa44ef69537831e7953e0))
+
 ## [0.2.0](https://github.com/GuiHash/ha-intratone/compare/v0.1.0...v0.2.0) (2026-05-25)
 
 
