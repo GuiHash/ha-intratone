@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import re
 import secrets
 import time
@@ -56,9 +55,6 @@ _SIP_INSTANCE = f'"<urn:uuid:{uuid.uuid4()}>"'
 # re-INVITE refresh; we just answer 200 OK to its in-dialog INVITE.
 _SESSION_EXPIRES_S = 1800
 
-# Set INTRATONE_SIP_DEBUG=1 to dump the full SIP exchange. Authorization headers
-# are masked to keep credentials out of logs.
-_SIP_DEBUG = bool(int(os.environ.get("INTRATONE_SIP_DEBUG", "0") or "0"))
 _AUTH_MASK_RE = re.compile(
     r"(?im)^((?:proxy-)?authorization):.*$", re.MULTILINE
 )
@@ -247,8 +243,7 @@ class IntratoneSipClient(asyncio.Protocol):
             if msg is None:
                 return
             raw, parsed = msg
-            if _SIP_DEBUG:
-                _LOGGER.info("SIP RX:\n%s", _redact_sip(raw))
+            _LOGGER.debug("SIP RX:\n%s", _redact_sip(raw))
             self._dispatch(parsed, raw)
 
     def _extract_one_message(self) -> tuple[bytes, SipMessage] | None:
@@ -787,8 +782,7 @@ class IntratoneSipClient(asyncio.Protocol):
 
     def _send(self, data: bytes) -> None:
         assert self._transport is not None
-        if _SIP_DEBUG:
-            _LOGGER.info("SIP TX:\n%s", _redact_sip(data))
+        _LOGGER.debug("SIP TX:\n%s", _redact_sip(data))
         self._transport.write(data)
 
 

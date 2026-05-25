@@ -224,6 +224,18 @@ You can also branch automations directly on `{{ trigger.event.data.door_number }
 
 ## Troubleshooting
 
+### Enabling debug logs
+
+Add to `configuration.yaml` and restart HA:
+
+```yaml
+logger:
+  logs:
+    custom_components.intratone: debug
+```
+
+At `debug` level the integration logs every SIP message sent and received (TX/RX, credentials redacted), every FCM push received, and the exact ffmpeg command lines. Use these to diagnose ring delivery, audio, or video problems before opening an issue.
+
 **Ring doesn't reach iPhone** — verify `event.intratone_<ID>_sonnette` fires in HA (Developer Tools → Events) when someone rings. Check the FCM listener heartbeat in logs (`firebase_messaging` lines every ~20 s). Make sure your HomeKit Bridge accessory is paired and the `linked_doorbell_sensor` is set.
 
 **Tile opens but loading spinner forever** — go2rtc must be running with the `intratone` slot declared. Look for `FFMPEG_PUSH_READY: ... consumable` in HA logs (the marker confirming our ffmpeg pushed successfully); if absent, enable `custom_components.intratone: debug` and look for ffmpeg errors.
