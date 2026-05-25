@@ -19,7 +19,8 @@ def coordinator(hass, mock_entry):
     cm = MagicMock()
     cm.start_call = AsyncMock(return_value="sip-call-test")
     cm.hang_up = AsyncMock()
-    cm.abort_call = AsyncMock()
+    cm.abort_active_call = AsyncMock()
+    cm.active_call_id = None
     coord.attach_call_manager(cm)
     return coord
 

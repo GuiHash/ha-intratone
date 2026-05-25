@@ -136,6 +136,22 @@ class IntratoneCoordinator(DataUpdateCoordinator[CallState | None]):
             )
             return
 
+        # If a previous call is still tracked (mid-call, or in the 60 s
+        # post-BYE grace window kept alive for late HomeKit hub pulls), the
+        # fresh push always wins: the Intratone server has rotated the SIP
+        # dialog and the old credentials are stale. Tear it down now so the
+        # subsequent ensure_call_started() isn't blocked by the
+        # "Call already active" guard in CallManager.start_call.
+        if (
+            self._call_manager is not None
+            and self._call_manager.active_call_id is not None
+        ):
+            _LOGGER.info(
+                "New ring while previous call %s still tracked — aborting it",
+                self._call_manager.active_call_id,
+            )
+            await self._call_manager.abort_active_call()
+
         self._ring_seq += 1
         state = CallState(
             call_id=str(call_id),

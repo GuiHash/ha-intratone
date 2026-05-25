@@ -27,6 +27,8 @@ def coordinator_with_cm(coordinator):
     cm = MagicMock()
     cm.start_call = AsyncMock(return_value="fake-call-id")
     cm.hang_up = AsyncMock()
+    cm.abort_active_call = AsyncMock()
+    cm.active_call_id = None
     coordinator.attach_call_manager(cm)
     return coordinator, cm
 
@@ -262,6 +264,37 @@ async def test_open_door_returns_false_when_sip_message_fails(
     cm.send_open_door = MagicMock(return_value=False)
     await coordinator.async_handle_push({"call_id": "42", "message": "X"})
     assert await coordinator.async_open_door() is False
+
+
+async def test_new_push_aborts_previous_active_call(
+    coordinator_with_cm,
+) -> None:
+    """When a second FCM push arrives while a previous call is still tracked
+    (mid-call or in the 60 s grace), the coordinator aborts the old call so
+    the next ensure_call_started isn't blocked by 'Call already active'."""
+    coordinator, cm = coordinator_with_cm
+    cm.active_call_id = "previous-sip-call-id"
+
+    await coordinator.async_handle_push(_FULL_PUSH)
+
+    cm.abort_active_call.assert_awaited_once()
+    # The new ring's state is still applied.
+    assert coordinator.data is not None
+    assert coordinator.data.ring_seq == 1
+    assert coordinator._pending is not None
+
+
+async def test_new_push_does_not_abort_when_no_previous_call(
+    coordinator_with_cm,
+) -> None:
+    """First ring after startup: nothing to abort, abort_active_call is not
+    awaited (would log a noisy 'aborting' INFO for no reason)."""
+    coordinator, cm = coordinator_with_cm
+    cm.active_call_id = None
+
+    await coordinator.async_handle_push(_FULL_PUSH)
+
+    cm.abort_active_call.assert_not_awaited()
 
 
 async def test_wait_for_stream_timeout_returns_none_without_killing_call(

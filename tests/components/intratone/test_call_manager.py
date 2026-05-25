@@ -273,6 +273,60 @@ async def test_hang_up_stops_bridge(manager, fake_bridge):
     fake_bridge.stop.assert_awaited()
 
 
+async def test_abort_active_call_during_active_dialog(
+    manager, fake_bridge, ended_calls
+):
+    """While the SIP dialog is still up, abort_active_call sends BYE, stops
+    the bridge, fires on_call_ended and clears all state — so the next ring
+    isn't blocked by the 'Call already active' guard."""
+    from custom_components.intratone.sip_client import CallState
+
+    call_id = await manager.start_call(TARGET_URI, SERVER_IP, SIP_USER, SIP_PASS)
+    assert call_id is not None
+    sip_client = manager._sip_client
+    sip_client._call.state = CallState.CONFIRMED  # type: ignore[union-attr]
+    sip_client._call.remote_to_header = f"<{TARGET_URI}>;tag=srv"  # type: ignore[union-attr]
+
+    await manager.abort_active_call()
+
+    fake_bridge.stop.assert_awaited_once()
+    assert ended_calls == [call_id]
+    assert manager.active_call_id is None
+    assert manager._sip_client is None
+
+
+async def test_abort_active_call_during_post_bye_grace(
+    manager, fake_bridge, ended_calls
+):
+    """After BYE, _sip_client is None but _active_call_id stays set during
+    the 60 s grace. abort_active_call must cancel the grace task, stop the
+    bridge, and clear state immediately so a follow-up ring can proceed."""
+    call_id = await manager.start_call(TARGET_URI, SERVER_IP, SIP_USER, SIP_PASS)
+    assert call_id is not None
+    sip_client = manager._sip_client
+    # Simulate the BYE path: _handle_call_terminated clears sip_client and
+    # schedules the grace task while keeping _active_call_id set.
+    sip_client._on_call_terminated(call_id)  # type: ignore[union-attr]
+    assert manager.active_call_id == call_id
+    assert manager._sip_client is None
+    assert manager._grace_task is not None and not manager._grace_task.done()
+
+    await manager.abort_active_call()
+
+    fake_bridge.stop.assert_awaited()
+    assert ended_calls == [call_id]
+    assert manager.active_call_id is None
+    assert manager._grace_task is None
+
+
+async def test_abort_active_call_is_noop_when_no_active_call(
+    manager, fake_bridge, ended_calls
+):
+    await manager.abort_active_call()
+    fake_bridge.stop.assert_not_awaited()
+    assert ended_calls == []
+
+
 async def test_async_stop_closes_transport_and_stops_bridge(manager, fake_bridge):
     call_id = await manager.start_call(TARGET_URI, SERVER_IP, SIP_USER, SIP_PASS)
     assert call_id is not None
