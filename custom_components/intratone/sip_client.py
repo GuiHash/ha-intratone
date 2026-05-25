@@ -348,29 +348,51 @@ class IntratoneSipClient(asyncio.Protocol):
         """Send in-dialog SIP MESSAGE `opendoor:<code>` to trigger the door
         relay. This rides the same TCP connection that carried the INVITE,
         matching the Cogelec app's behavior (in-dialog ChatRoom.send())."""
+        return self._send_in_dialog_message(
+            call_id, body=f"opendoor:{code}", label=f"open-door (code={code})"
+        )
+
+    def send_mute_off(self, call_id: str) -> bool:
+        """Send the in-dialog SIP MESSAGE body `MUTE_OFF`.
+
+        Cogelec's app emits this exact body when the user picks up manually
+        (`DECROCHER_AUTO=false`, the default state — see
+        `CallManager.java:752-755` in the decompiled APK). The send happens
+        before the mic is enabled and is independent of the audio
+        permission, so it is an application-level signal to the server
+        ("user engaged, keep the full-duplex channel alive"), not a mic
+        state toggle. We forward it to extend the server-side call window:
+        worst case the server ignores it (no-op), best case we get more
+        seconds before BYE so the user has more time to tap Unlock."""
+        return self._send_in_dialog_message(
+            call_id, body="MUTE_OFF", label="MUTE_OFF"
+        )
+
+    def _send_in_dialog_message(
+        self, call_id: str, *, body: str, label: str
+    ) -> bool:
+        """Common path for in-dialog SIP MESSAGE primitives — validates the
+        dialog state and bumps the CSeq before serializing."""
         call = self._call
         if call is None or call.call_id != call_id:
-            _LOGGER.warning("send_open_door: unknown call %s", call_id)
+            _LOGGER.warning("%s: unknown call %s", label, call_id)
             return False
         if call.state != CallState.CONFIRMED:
             _LOGGER.warning(
-                "send_open_door: call %s not in CONFIRMED state (state=%s)",
-                call_id,
-                call.state,
+                "%s: call %s not in CONFIRMED state (state=%s)",
+                label, call_id, call.state,
             )
             return False
         if not call.remote_to_header:
             _LOGGER.warning(
-                "send_open_door: call %s has no dialog state captured", call_id
+                "%s: call %s has no dialog state captured", label, call_id
             )
             return False
         call.cseq += 1
-        self._send(self._build_message(call, body=f"opendoor:{code}"))
+        self._send(self._build_message(call, body=body))
         _LOGGER.info(
-            "Call %s: sent open-door SIP MESSAGE (code=%s, CSeq=%d)",
-            call_id,
-            code,
-            call.cseq,
+            "Call %s: sent %s SIP MESSAGE (CSeq=%d)",
+            call_id, label, call.cseq,
         )
         return True
 
