@@ -20,6 +20,17 @@ from custom_components.intratone.const import (
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 
+async def _start_reauth_flow(hass, entry: MockConfigEntry):
+    """Start a reauth flow, compatible with HA < 2024.4."""
+    if hasattr(entry, "start_reauth_flow"):
+        return await entry.start_reauth_flow(hass)
+    return await hass.config_entries.flow.async_init(
+        entry.domain,
+        context={"source": config_entries.SOURCE_REAUTH, "entry_id": entry.entry_id},
+        data=entry.data,
+    )
+
+
 @pytest.fixture
 def aiomock():
     with aioresponses() as m:
@@ -191,7 +202,7 @@ async def test_reauth_silent_refresh_succeeds(
     assert await hass.config_entries.async_setup(mock_entry.entry_id)
     await hass.async_block_till_done()
 
-    result = await mock_entry.start_reauth_flow(hass)
+    result = await _start_reauth_flow(hass, mock_entry)
     await hass.async_block_till_done()
 
     assert result["type"] is FlowResultType.ABORT
@@ -218,7 +229,7 @@ async def test_reauth_falls_back_to_form_when_silent_refresh_rejected(
         repeat=True,
     )
 
-    result = await mock_entry.start_reauth_flow(hass)
+    result = await _start_reauth_flow(hass, mock_entry)
     await hass.async_block_till_done()
 
     assert result["type"] is FlowResultType.FORM

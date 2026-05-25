@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import pytest
 from aioresponses import aioresponses
-from homeassistant.components.lock import LockState
+try:
+    from homeassistant.components.lock import LockState
+    _STATE_LOCKED = LockState.LOCKED
+except ImportError:  # HA < 2024.4
+    _STATE_LOCKED = "locked"
 from homeassistant.helpers import entity_registry as er
 
 from custom_components.intratone.const import API_BASE, DOMAIN
@@ -58,7 +62,7 @@ async def test_unlock_calls_open_door_and_reverts(
         "lock", DOMAIN, f"{mock_entry.entry_id}_door_lock"
     )
     assert lock_eid is not None
-    assert hass.states.get(lock_eid).state == LockState.LOCKED
+    assert hass.states.get(lock_eid).state == _STATE_LOCKED
 
     # Patch the bridge readiness timeout down to a tick so the test doesn't
     # spend 5s waiting for the mocked CallManager that never fires
