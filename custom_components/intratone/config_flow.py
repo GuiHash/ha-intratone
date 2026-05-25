@@ -104,6 +104,15 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
         # Carries SMS-flow state between async_step_phone and async_step_sms.
         self._pending_sms: dict[str, Any] = {}
 
+    def _get_reauth_entry(self):
+        # _get_reauth_entry was added to ConfigFlow base class in HA 2024.4.
+        # Fall back to reading entry_id from flow context on older versions.
+        try:
+            return super()._get_reauth_entry()
+        except AttributeError:
+            entry_id = self.context.get("entry_id")
+            return self.hass.config_entries.async_get_entry(entry_id)
+
     async def async_step_user(
         self, _user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
