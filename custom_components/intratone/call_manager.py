@@ -292,6 +292,21 @@ class CallManager:
             return False
         return self._sip_client.send_open_door(self._active_call_id, code)
 
+    def send_mute_off(self) -> bool:
+        """Send the SIP MESSAGE `MUTE_OFF` for the active call.
+
+        Mirrors the Cogelec app behaviour on manual pickup
+        (`DECROCHER_AUTO=false`, the default state — see APK
+        `CallManager.java:752-755`). The signal appears to keep the
+        doorbell hardware engaged in full-duplex and may extend the
+        server-side call window before BYE; harmless if the server ignores
+        it. Fire-and-forget: we don't gate the bridge on its success.
+        """
+        if self._sip_client is None or self._active_call_id is None:
+            _LOGGER.debug("send_mute_off: no active call")
+            return False
+        return self._sip_client.send_mute_off(self._active_call_id)
+
     async def hang_up(self) -> None:
         """End the active call (user-initiated or explicit hangup)."""
         if self._sip_client is None or self._active_call_id is None:
@@ -432,6 +447,11 @@ class CallManager:
                 else ", video disabled"
             ),
         )
+        # Signal manual pickup engagement to the server. Mirrors the Cogelec
+        # app on default-pref DECROCHER_AUTO=false: a one-shot SIP MESSAGE
+        # body `MUTE_OFF` sent right after the dialog is up. Empirically
+        # appears to keep the doorbell hardware engaged longer before BYE.
+        self.send_mute_off()
         self._on_call_active(info.call_id, rtsp_url)
 
     async def _teardown_bridge(self, call_id: str) -> None:

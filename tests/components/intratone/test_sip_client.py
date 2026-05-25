@@ -426,6 +426,38 @@ def test_send_open_door_unknown_call_id_returns_false(client_setup):
     assert client.send_open_door("nobody-knows-me") is False
 
 
+def test_send_mute_off_emits_in_dialog_message(client_setup):
+    """`send_mute_off` builds an in-dialog SIP MESSAGE with body `MUTE_OFF`
+    on the same TCP connection as the INVITE — mirrors Cogelec's behaviour
+    on manual pickup (`DECROCHER_AUTO=false`)."""
+    client, transport, _, _ = client_setup
+    call_id, _ = _confirm_call(client, transport)
+    sent_before = len(transport.sent)
+
+    assert client.send_mute_off(call_id) is True
+
+    assert len(transport.sent) == sent_before + 1
+    start, headers, body = _parse(transport.sent[-1])
+    assert start.startswith("MESSAGE ")
+    assert headers["cseq"] == "52 MESSAGE"
+    assert headers["content-type"].startswith("text/plain")
+    assert body == b"MUTE_OFF"
+
+
+def test_send_mute_off_fails_when_call_not_confirmed(client_setup):
+    client, transport, _, _ = client_setup
+    call_id = client.call(TARGET_URI, LOCAL_RTP, USERNAME, PASSWORD)
+    sent_before = len(transport.sent)
+
+    assert client.send_mute_off(call_id) is False
+    assert len(transport.sent) == sent_before  # nothing sent
+
+
+def test_send_mute_off_unknown_call_id_returns_false(client_setup):
+    client, _, _, _ = client_setup
+    assert client.send_mute_off("nobody-knows-me") is False
+
+
 def test_session_timer_reinvite_is_answered_with_200_ok(client_setup):
     """The server refreshes the session by sending an in-dialog INVITE. We
     must respond 200 OK with our SDP so the call doesn't get BYE'd at refresh."""

@@ -217,6 +217,38 @@ async def test_call_established_spawns_bridge_and_fires_active(
     assert active_calls == [(call_id, "rtsp://127.0.0.1:8556/intratone")]
 
 
+async def test_spawn_bridge_sends_mute_off_after_bridge_up(
+    manager, fake_bridge, active_calls
+):
+    """Right after the bridge is consumable, CallManager fires `MUTE_OFF` on
+    the same SIP dialog — mirrors Cogelec's behaviour on manual pickup and
+    appears to extend the server-side call window."""
+    from custom_components.intratone.sip_client import CallState
+
+    call_id = await manager.start_call(TARGET_URI, SERVER_IP, SIP_USER, SIP_PASS)
+    sip_client = manager._sip_client
+    local_rtp = sip_client._call.local_rtp_port  # type: ignore[union-attr]
+    # Confirm the dialog so send_mute_off can serialize the in-dialog MESSAGE.
+    sip_client._call.state = CallState.CONFIRMED  # type: ignore[union-attr]
+    sip_client._call.remote_to_header = f"<{TARGET_URI}>;tag=srv"  # type: ignore[union-attr]
+
+    sip_client._on_call_established(  # type: ignore[union-attr]
+        CallEstablished(
+            call_id=call_id,
+            remote_rtp_ip="178.32.84.99",
+            remote_rtp_port=20002,
+            local_rtp_port=local_rtp,
+        )
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert active_calls == [(call_id, "rtsp://127.0.0.1:8556/intratone")]
+    # The MESSAGE landed on the same TCP transport that carried the INVITE.
+    transports = manager._test_transports  # type: ignore[attr-defined]
+    assert any(b"MUTE_OFF" in payload for payload in transports[0].written)
+
+
 async def test_bridge_start_failure_hangs_up(manager, fake_bridge, active_calls):
     fake_bridge.start.side_effect = RuntimeError("ffmpeg blew up")
     call_id = await manager.start_call(TARGET_URI, SERVER_IP, SIP_USER, SIP_PASS)
