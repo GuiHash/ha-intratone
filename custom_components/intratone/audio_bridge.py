@@ -650,6 +650,10 @@ class AudioBridge:
         # camera entity) only hand HomeKit a URL that resolves to 200 on
         # DESCRIBE, not 404 (which HomeKit doesn't retry).
         self._ffmpeg_push_ready: asyncio.Event | None = None
+        # Optional sync callback fired by `_pli_loop` when it exhausts the PLI
+        # budget without seeing a keyframe — CallManager wires this to a SIP
+        # re-INVITE that drops the dead video media line.
+        self._on_video_failure = None
 
     @property
     def rtsp_url(self) -> str:
@@ -676,6 +680,7 @@ class AudioBridge:
         remote_video_rtp_ip: str | None = None,
         remote_video_rtp_port: int | None = None,
         video_rtcp_socket=None,
+        on_video_failure=None,
     ) -> str:
         """Spawn ffmpeg + wrap a pre-bound RTP socket in an asyncio endpoint.
 
@@ -691,6 +696,11 @@ class AudioBridge:
         """
         if self.is_running:
             return self.rtsp_url
+
+        # CallManager hands us this so the PLI loop can ask for an audio-only
+        # re-INVITE when VP8 keyframes never arrive — mirrors the iOS app's
+        # downgrade-on-failure pattern. Sync callable, fired once per call.
+        self._on_video_failure = on_video_failure
 
         video_enabled = (
             video_socket is not None
@@ -896,6 +906,13 @@ class AudioBridge:
                 "PLI_LOOP: gave up after %d PLI(s) without a keyframe (gateway "
                 "may not honour RTCP feedback on RTP/AVP)", _PLI_MAX_SENDS,
             )
+            # Ask CallManager to renegotiate the dialog as audio-only so the
+            # gateway stops sending VP8 we can't decode. Audio remains intact.
+            if self._on_video_failure is not None:
+                try:
+                    self._on_video_failure()
+                except Exception:  # noqa: BLE001
+                    _LOGGER.exception("on_video_failure callback raised")
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001

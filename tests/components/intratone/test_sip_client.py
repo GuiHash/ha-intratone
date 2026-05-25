@@ -485,6 +485,117 @@ def test_send_backlight_fails_when_call_not_confirmed(client_setup):
     assert len(transport.sent) == sent_before
 
 
+def test_send_reinvite_audio_only_drops_video_and_keeps_dialog(client_setup):
+    """When PLI exhausts without a keyframe, CallManager asks the SIP client
+    for an in-dialog re-INVITE that renegotiates audio-only. Mirrors iOS
+    `Failed to update call to audio-only:` log point — gateway stops
+    sending dead VP8, audio remains intact."""
+    client, transport, _, terminated = client_setup
+    # Boot a video-enabled call: explicit local_video_rtp_port + confirm.
+    call_id = client.call(
+        TARGET_URI, LOCAL_RTP, USERNAME, PASSWORD, local_video_rtp_port=20000
+    )
+    branch, from_tag = _branch_and_tag_from_invite(transport.sent[0])
+    client.data_received(_build_407(call_id, branch, from_tag))
+    client.data_received(_build_200_ok(call_id, from_tag, 51))
+    sent_before = len(transport.sent)
+
+    assert client.send_reinvite_audio_only(call_id) is True
+
+    assert len(transport.sent) == sent_before + 1
+    start, headers, body = _parse(transport.sent[-1])
+    assert start.startswith("INVITE ")
+    # CSeq bumped on the existing dialog (51 → 52). Method is INVITE.
+    assert headers["cseq"] == "52 INVITE"
+    assert headers["call-id"] == call_id
+    # The defining property: no m=video in the new offer.
+    assert b"m=audio" in body
+    assert b"m=video" not in body
+    # Dialog still alive — terminate would have called the callback.
+    assert terminated == []
+    assert client._call is not None
+    assert client._call.state == CallState.CONFIRMED
+    assert client._call.reinvite_in_progress is True
+
+
+def test_send_reinvite_audio_only_clears_flag_on_200_ok(client_setup):
+    """200 OK for the re-INVITE clears `reinvite_in_progress` and re-ACKs."""
+    client, transport, _, _ = client_setup
+    call_id = client.call(
+        TARGET_URI, LOCAL_RTP, USERNAME, PASSWORD, local_video_rtp_port=20000
+    )
+    branch, from_tag = _branch_and_tag_from_invite(transport.sent[0])
+    client.data_received(_build_407(call_id, branch, from_tag))
+    client.data_received(_build_200_ok(call_id, from_tag, 51))
+    assert client.send_reinvite_audio_only(call_id) is True
+    # Server accepts: 200 OK on the same CSeq we sent (52). ACK fires
+    # silently and the flag clears.
+    client.data_received(_build_200_ok(call_id, from_tag, 52))
+
+    assert client._call is not None
+    assert client._call.reinvite_in_progress is False
+    # Last sent message is the 2xx-ACK with the new CSeq.
+    start, headers, _ = _parse(transport.sent[-1])
+    assert start.startswith("ACK ")
+    assert headers["cseq"] == "52 ACK"
+
+
+def test_send_reinvite_audio_only_survives_4xx_rejection(client_setup):
+    """If the gateway rejects the re-INVITE (488 Not Acceptable, 491 Request
+    Pending…), the established audio dialog must NOT be torn down. Only the
+    pending flag is cleared so a later attempt can retry."""
+    client, transport, _, terminated = client_setup
+    call_id = client.call(
+        TARGET_URI, LOCAL_RTP, USERNAME, PASSWORD, local_video_rtp_port=20000
+    )
+    branch, from_tag = _branch_and_tag_from_invite(transport.sent[0])
+    client.data_received(_build_407(call_id, branch, from_tag))
+    client.data_received(_build_200_ok(call_id, from_tag, 51))
+    assert client.send_reinvite_audio_only(call_id) is True
+
+    reject = (
+        "SIP/2.0 488 Not Acceptable Here\r\n"
+        f"Via: SIP/2.0/TCP {LOCAL_HOST}:{LOCAL_PORT};branch=ignored;rport\r\n"
+        f"From: <sip:{USERNAME}@{LOCAL_HOST}>;tag={from_tag}\r\n"
+        f"To: <{TARGET_URI}>;tag=srv-confirmed\r\n"
+        f"Call-ID: {call_id}\r\n"
+        "CSeq: 52 INVITE\r\n"
+        "Content-Length: 0\r\n\r\n"
+    ).encode()
+    client.data_received(reject)
+
+    assert terminated == []
+    assert client._call is not None
+    assert client._call.state == CallState.CONFIRMED
+    assert client._call.reinvite_in_progress is False
+    # ACK was sent for the rejection — same Call-ID.
+    start, headers, _ = _parse(transport.sent[-1])
+    assert start.startswith("ACK ")
+    assert headers["call-id"] == call_id
+
+
+def test_send_reinvite_audio_only_is_noop_when_no_video(client_setup):
+    """If the call was already audio-only (no `local_video_rtp_port` in the
+    offer), there's nothing to renegotiate — short-circuit."""
+    client, transport, _, _ = client_setup
+    _confirm_call(client, transport)  # audio-only call
+    sent_before = len(transport.sent)
+
+    assert client.send_reinvite_audio_only(client._call.call_id) is False
+    assert len(transport.sent) == sent_before
+
+
+def test_send_reinvite_audio_only_fails_when_not_confirmed(client_setup):
+    client, transport, _, _ = client_setup
+    call_id = client.call(
+        TARGET_URI, LOCAL_RTP, USERNAME, PASSWORD, local_video_rtp_port=20000
+    )
+    sent_before = len(transport.sent)
+
+    assert client.send_reinvite_audio_only(call_id) is False
+    assert len(transport.sent) == sent_before
+
+
 def test_session_timer_reinvite_is_answered_with_200_ok(client_setup):
     """The server refreshes the session by sending an in-dialog INVITE. We
     must respond 200 OK with our SDP so the call doesn't get BYE'd at refresh."""
