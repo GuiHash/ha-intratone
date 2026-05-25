@@ -2,10 +2,23 @@
 
 from __future__ import annotations
 
+import sys
+import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+
+if sys.version_info[:2] == (3, 12):
+    # Python 3.12 ThreadPoolExecutor creates a _run_safe_shutdown_loop daemon
+    # thread that persists for the interpreter lifetime. pytest-homeassistant-
+    # custom-component <=0.13.205 (the last versions supporting Py3.12) don't
+    # whitelist it; the fix landed in 0.13.210 which requires Python >=3.13.
+    _orig_enumerate = threading.enumerate
+    threading.enumerate = lambda: [
+        t for t in _orig_enumerate() if t.name != "_run_safe_shutdown_loop"
+    ]
 
 from custom_components.intratone.const import (
     CONF_DEVICE_ID,
