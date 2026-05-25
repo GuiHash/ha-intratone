@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from typing import TypeAlias
+from typing import TYPE_CHECKING, TypeAlias
 
 import voluptuous as vol
 from homeassistant.components.network import async_get_source_ip
@@ -71,7 +71,10 @@ class IntratoneRuntime:
     store: IntratoneCredentialsStore
 
 
-IntratoneConfigEntry: TypeAlias = ConfigEntry[IntratoneRuntime]
+if TYPE_CHECKING:
+    IntratoneConfigEntry: TypeAlias = ConfigEntry[IntratoneRuntime]
+else:
+    IntratoneConfigEntry = ConfigEntry
 
 
 async def async_setup(hass: HomeAssistant, _config: dict) -> bool:
