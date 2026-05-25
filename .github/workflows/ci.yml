@@ -15,12 +15,18 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd #v4.3.1
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 #v6.2.0
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e #v6
         with:
           python-version: ${{ matrix.python-version }}
-          cache: pip
-          cache-dependency-path: requirements_test.txt
+          enable-cache: true
+          cache-dependency-glob: "requirements_test.txt"
+
+      - name: Cache apt packages
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 #v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-${{ runner.os }}-libturbojpeg0-dev-libopus0
 
       - name: Install system dependencies
         # libturbojpeg: HA's camera component imports turbojpeg unconditionally.
@@ -29,7 +35,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libturbojpeg0-dev libopus0
 
       - name: Install Python dependencies
-        run: pip install --disable-pip-version-check -r requirements_test.txt
+        run: uv pip install --system -r requirements_test.txt
 
       - name: Run pytest
         run: pytest tests/components/intratone/ -v -n auto --tb=short
