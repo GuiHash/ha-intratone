@@ -19,13 +19,13 @@ logger:
 homekit:
   - filter:
       include_entities:
-        - camera.intratone_<ID>_interphone
-        - event.intratone_<ID>_sonnette
-        - lock.intratone_<ID>_porte
+        - camera.intratone_<ID>_intercom
+        - event.intratone_<ID>_doorbell
+        - lock.intratone_<ID>_door
     entity_config:
-      camera.intratone_<ID>_interphone:
+      camera.intratone_<ID>_intercom:
         support_audio: true
-        linked_doorbell_sensor: event.intratone_<ID>_sonnette
+        linked_doorbell_sensor: event.intratone_<ID>_doorbell
         # HomeKit ffmpeg encodes Opus at 24 kbps with frame_duration 60 ms
         # → 180-byte frames. Default RTP packet size 188 (= 176 max payload)
         # rejects them, killing the audio output task. Bump to fit + margin.

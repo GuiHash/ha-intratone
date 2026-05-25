@@ -10,9 +10,9 @@ After pairing, the integration creates these entities under one device:
 
 | Entity | What you can do |
 |---|---|
-| `event.intratone_<ID>_sonnette` | Fires every time a visitor rings the intercom. Payload includes `door_name`, `door_number` (NBPORTE), `caller`, `call_id`. Usable as automation trigger. |
-| `camera.intratone_<ID>_interphone` | Placeholder image when idle. Live audio + video stream during a call. |
-| `lock.intratone_<ID>_porte` | Tap *Unlock* → opens the door (sends `opendoor:<code>` SIP MESSAGE, same backend as the official Intratone app). |
+| `event.intratone_<ID>_doorbell` | Fires every time a visitor rings the intercom. Payload includes `door_name`, `door_number` (NBPORTE), `caller`, `call_id`. Usable as automation trigger. |
+| `camera.intratone_<ID>_intercom` | Placeholder image when idle. Live audio + video stream during a call. |
+| `lock.intratone_<ID>_door` | Tap *Unlock* → opens the door (sends `opendoor:<code>` SIP MESSAGE, same backend as the official Intratone app). |
 | `switch.intratone_<ID>_backlight` | Toggle ON during an active call to ask the intercom hardware for its backlight / illuminator mode (low-light conditions). One-shot — the server resets it on call end. Some hardware models don't support it; in that case the signal is silently ignored. |
 | `binary_sensor.intratone_<ID>_push_channel_connected` | Diagnostic — `on` while the FCM push channel is up. If it goes `off`, you won't be notified of rings. |
 
@@ -25,18 +25,14 @@ Exposed to HomeKit via HA's HomeKit Bridge, the camera tile on iPhone Home.app d
 
 ## How it works
 
-```
-Visitor presses intercom
-     ↓ (FCM push, ~1 s)
-HA fires doorbell event → iPhone push notification
-     ↓ (user taps tile)
-HA opens SIP TCP connection → INVITE → 200 OK + SDP
-     ↓
-RTP audio (µ-law) + RTP video (VP8) from Intratone server
-     ↓ (audio_bridge.py: STUN-respond, depacket RTP, feed ffmpeg)
-ffmpeg transcode µ-law → Opus 16k mono / VP8 → H.264 baseline
-     ↓
-push RTSP → go2rtc → HomeKit Bridge → SRTP → iPhone Home.app
+```mermaid
+flowchart TD
+    A[Visitor presses intercom] -->|FCM push ~1 s| B[HA doorbell event\niPhone push notification]
+    B -->|user taps tile| C[HA: SIP INVITE → 200 OK + SDP]
+    C --> D[Intratone server\nRTP µ-law audio + VP8 video]
+    D -->|audio_bridge.py\nSTUN-respond · depacket RTP| E[ffmpeg\nµ-law → Opus 16k mono\nVP8 → H.264 baseline]
+    E -->|RTSP push| F[go2rtc]
+    F -->|HomeKit Bridge| G[SRTP → iPhone Home.app]
 ```
 
 The FCM listener stays connected for the lifetime of the integration and reconnects with exponential backoff on failure. The SIP dialog opens only when the user actually taps the camera tile or the lock — mirrors the Cogelec app, which doesn't dial until you tap *Pick Up*. See [`INTRATONE_API.md`](INTRATONE_API.md) for the full REST + SIP reverse-engineering notes.
@@ -52,7 +48,7 @@ The integration also reacts to two additional FCM push types Cogelec emits:
 - **Audio quality**: bounded by G.711 µ-law @ 8 kHz (Intratone's wire codec). Some accounts receive only comfort-noise µ-law from the server during a call rather than the real microphone stream — same behaviour observed on the official Intratone iOS app for those accounts, only the GSM fallback carries real audio. Not a bug in this integration; it's a server / account-side condition.
 - **Video quality**: bitrate is set by the intercom hardware (~5-10 kbps observed, ~2–5 fps). Equivalent quality to the official app — there's no client-side knob to request higher quality.
 - **Video startup delay**: The Intratone server schedules VP8 keyframes infrequently. After tapping the HomeKit tile, expect a **5–15 second black screen** before video appears. This is not a bug — ffmpeg can't start encoding until it receives an I-frame from the server. If no video appears after ~20 s, see [Troubleshooting](#troubleshooting).
-- **Camera entity is HomeKit-only**: `camera.intratone_<ID>_interphone` only delivers live video through the HomeKit + go2rtc path. Adding it to a Lovelace card or viewing it in Developer Tools → States will show "does not support play stream service" — this is expected.
+- **Camera entity is HomeKit-only**: `camera.intratone_<ID>_intercom` only delivers live video through the HomeKit + go2rtc path. Adding it to a Lovelace card or viewing it in Developer Tools → States will show "does not support play stream service" — this is expected.
 - **France only**: tested against `sip.intratone.info`. Other Cogelec deployments untested.
 - **Both devices ring in parallel.** The official Intratone app on your phone continues to receive rings alongside HA. Whichever device opens first triggers the relay; the other still rings.
 
@@ -165,14 +161,14 @@ homekit:
   - name: HA Bridge
     filter:
       include_entities:
-        - camera.intratone_<ID>_interphone
-        - event.intratone_<ID>_sonnette
-        - lock.intratone_<ID>_porte
+        - camera.intratone_<ID>_intercom
+        - event.intratone_<ID>_doorbell
+        - lock.intratone_<ID>_door
         - switch.intratone_<ID>_backlight  # optional, only on hardware that supports it
     entity_config:
-      camera.intratone_<ID>_interphone:
+      camera.intratone_<ID>_intercom:
         support_audio: true
-        linked_doorbell_sensor: event.intratone_<ID>_sonnette
+        linked_doorbell_sensor: event.intratone_<ID>_doorbell
         # HomeKit ffmpeg encodes Opus at 24 kbps with frame_duration 60 ms
         # → 180-byte frames. Default RTP packet size 188 (= 176 max payload)
         # rejects them, killing the audio output. Bump to fit + margin.
@@ -187,10 +183,10 @@ To opt into VP8 video, open the integration options (⚙️ on the Intratone car
 
 The integration intentionally only ships the entities listed above. Common observability needs (last ring time, count today, "currently ringing" flag, per-door routing) compose cleanly out of HA's built-in template helpers — pick what you actually need.
 
-**Last ring timestamp.** No helper needed — `event.intratone_<ID>_sonnette` already exposes the timestamp of its last fire as its native state. Reference it directly in cards or templates:
+**Last ring timestamp.** No helper needed — `event.intratone_<ID>_doorbell` already exposes the timestamp of its last fire as its native state. Reference it directly in cards or templates:
 
 ```
-{{ states('event.intratone_<ID>_sonnette') }}
+{{ states('event.intratone_<ID>_doorbell') }}
 ```
 
 **"Currently ringing" pulse.** Useful for HA conditions (`state: on`) or mobile notifications that want a stateful trigger. Add to `configuration.yaml`:
@@ -199,14 +195,14 @@ The integration intentionally only ships the entities listed above. Common obser
 template:
   - trigger:
       - platform: state
-        entity_id: event.intratone_<ID>_sonnette
+        entity_id: event.intratone_<ID>_doorbell
     binary_sensor:
       - name: Intratone ringing
         state: "on"
         auto_off: "00:00:08"   # match your intercom's ~8 s ring window
 ```
 
-**Rings today (counter, resets at midnight).** No YAML — create a **History Statistics** helper from the UI: Settings → Devices & services → Helpers → "+ Create Helper" → History statistics. Pick `event.intratone_<ID>_sonnette` as entity, type *Count from start of day*, state-changes.
+**Rings today (counter, resets at midnight).** No YAML — create a **History Statistics** helper from the UI: Settings → Devices & services → Helpers → "+ Create Helper" → History statistics. Pick `event.intratone_<ID>_doorbell` as entity, type *Count from start of day*, state-changes.
 
 **Which door rang last (multi-door installs).** NBPORTE is in the event payload as `door_number`. A trigger-based template sensor captures it:
 
@@ -214,7 +210,7 @@ template:
 template:
   - trigger:
       - platform: state
-        entity_id: event.intratone_<ID>_sonnette
+        entity_id: event.intratone_<ID>_doorbell
     sensor:
       - name: Intratone last door
         state: "{{ trigger.to_state.attributes.door_number }}"
@@ -236,7 +232,7 @@ logger:
 
 At `debug` level the integration logs every SIP message sent and received (TX/RX, credentials redacted), every FCM push received, and the exact ffmpeg command lines. Use these to diagnose ring delivery, audio, or video problems before opening an issue.
 
-**Ring doesn't reach iPhone** — verify `event.intratone_<ID>_sonnette` fires in HA (Developer Tools → Events) when someone rings. Check the FCM listener heartbeat in logs (`firebase_messaging` lines every ~20 s). Make sure your HomeKit Bridge accessory is paired and the `linked_doorbell_sensor` is set.
+**Ring doesn't reach iPhone** — verify `event.intratone_<ID>_doorbell` fires in HA (Developer Tools → Events) when someone rings. Check the FCM listener heartbeat in logs (`firebase_messaging` lines every ~20 s). Make sure your HomeKit Bridge accessory is paired and the `linked_doorbell_sensor` is set.
 
 **Tile opens but loading spinner forever** — go2rtc must be running with the `intratone` slot declared. Look for `FFMPEG_PUSH_READY: ... consumable` in HA logs (the marker confirming our ffmpeg pushed successfully); if absent, enable `custom_components.intratone: debug` and look for ffmpeg errors.
 
