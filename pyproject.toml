@@ -2,3 +2,5 @@
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+# opuslib uses `is not 0` instead of `!= 0` — upstream bug, not ours
+filterwarnings = ["ignore::SyntaxWarning:opuslib"]
