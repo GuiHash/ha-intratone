@@ -299,6 +299,42 @@ class CallManager:
         self._sip_client.hang_up(self._active_call_id)
         await self._bridge.stop()
 
+    async def abort_active_call(self) -> None:
+        """Tear down the current call immediately so a new ring can start
+        fresh. Handles two states:
+
+        - SIP dialog still up → send BYE + stop bridge + close transport.
+        - Post-BYE grace (sip_client cleared, bridge waiting on the 60 s
+          teardown task) → cancel the grace task + stop bridge now.
+
+        In both cases, fires `on_call_ended` synchronously so the coordinator
+        clears its pending/active state before a new ring overrides it.
+        Idempotent: no-op if no call is currently tracked.
+
+        Used by the coordinator when a fresh FCM push arrives — the old
+        call's credentials are stale (the Intratone server issues a new
+        SIP dialog per ring and the doorbell hardware only handles one
+        audio channel at a time) so there's no point keeping it alive.
+        """
+        call_id = self._active_call_id
+        if call_id is None:
+            return
+        for attr in ("_max_duration_task", "_grace_task"):
+            task = getattr(self, attr)
+            if task is not None and not task.done():
+                task.cancel()
+            setattr(self, attr, None)
+        if self._sip_client is not None:
+            self._sip_client.hang_up(call_id)
+        if self._sip_transport is not None and not self._sip_transport.is_closing():
+            self._sip_transport.close()
+        self._sip_transport = None
+        self._sip_client = None
+        self._close_pending_sockets()
+        await self._bridge.stop()
+        self._active_call_id = None
+        self._on_call_ended(call_id)
+
     # --- IntratoneSipClient callbacks (sync — must not await) -----------
 
     def _handle_call_established(self, info: CallEstablished) -> None:

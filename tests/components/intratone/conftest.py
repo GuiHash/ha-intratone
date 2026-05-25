@@ -68,7 +68,10 @@ def mock_call_manager():
     cm.async_stop = AsyncMock()
     cm.start_call = AsyncMock(return_value="fake-call-id")
     cm.hang_up = AsyncMock()
-    cm.abort_call = AsyncMock()
+    cm.abort_active_call = AsyncMock()
+    # No previous call by default — the coordinator's new-push handler only
+    # invokes abort_active_call when this is truthy.
+    cm.active_call_id = None
     with (
         patch(
             "custom_components.intratone.CallManager", return_value=cm
