@@ -17,7 +17,7 @@ if sys.version_info[:2] == (3, 12):
     # whitelist it; the fix landed in 0.13.210 which requires Python >=3.13.
     _orig_enumerate = threading.enumerate
     threading.enumerate = lambda: [
-        t for t in _orig_enumerate() if t.name != "_run_safe_shutdown_loop"
+        t for t in _orig_enumerate() if "_run_safe_shutdown_loop" not in t.name
     ]
 
 from custom_components.intratone.const import (
