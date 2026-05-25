@@ -33,7 +33,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libturbojpeg0-dev libopus0
 
       - name: Install Python dependencies
-        run: uv pip install --system -r requirements_test.txt
+        run: uv pip install --system --prerelease=allow -r requirements_test.txt
 
       - name: Run pytest
         run: pytest tests/components/intratone/ -v -n auto --tb=short
