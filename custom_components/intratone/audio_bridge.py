@@ -74,6 +74,11 @@ _PLI_INTERVAL_S = 1.0
 # How long to wait for the first VP8 RTP packet before launching the PLI loop
 # (we need the media SSRC, which we observe on incoming RTP).
 _PLI_WAIT_FIRST_RTP_S = 3.0
+# After the initial keyframe is received, send a periodic PLI every N seconds
+# to force a fresh I-frame and let the VP8 decoder resync. During the brief
+# window between each periodic PLI and the gateway's I-frame response (~1-3 s),
+# pre-keyframe P-frames are filtered so the decoder starts clean each cycle.
+_PLI_PERIODIC_INTERVAL_S = 30.0
 
 
 def _build_pli_packet(sender_ssrc: int, media_ssrc: int) -> bytes:
@@ -500,9 +505,19 @@ class _VideoRtpProtocol(asyncio.DatagramProtocol):
                 else 0
             )
             _LOGGER.info(
-                "VIDEO_KEYFRAME: first VP8 I-frame received %.0fms after first RTP",
+                "VIDEO_KEYFRAME: VP8 I-frame received %.0fms after first RTP",
                 elapsed_ms,
             )
+
+        # Don't forward VP8 to ffmpeg until a keyframe has been received.
+        # Pre-keyframe P-frames cause the VP8 decoder to enter an error state
+        # with no reference frame; once stuck, the decoder rejects all
+        # subsequent P-frames even after the keyframe arrives. Note: for the
+        # keyframe's own first RTP packet, keyframe_received is set to True
+        # above *before* we reach this check, so the keyframe itself always
+        # passes through.
+        if not self.keyframe_received:
+            return
 
         try:
             if self.rtp_packets_forwarded == 0:
@@ -862,7 +877,14 @@ class AudioBridge:
         arrives or we hit the burst limit. Asterisk advertises plain RTP/AVP
         (no `a=rtcp-fb`) so this is a deviation from RFC 4585; in practice
         Cogelec's gateway forwards inbound RTCP to the doorbell hardware,
-        which re-encodes with a keyframe ~50-200 ms after the first PLI."""
+        which re-encodes with a keyframe ~50-200 ms after the first PLI.
+
+        After the initial keyframe is received, this loop continues sending
+        periodic PLIs every _PLI_PERIODIC_INTERVAL_S seconds. Each periodic
+        PLI resets the forwarding gate (keyframe_received=False) so that
+        pre-keyframe P-frames are dropped until the gateway responds with a
+        fresh I-frame. This keeps the VP8 decoder from drifting into a stuck
+        state mid-call if the reference frame is ever lost."""
         try:
             # Wait for the first RTP packet so we know the media SSRC. Without
             # it our PLI has nothing to reference and the gateway would ignore
@@ -884,6 +906,9 @@ class AudioBridge:
                 self._video_rtp.ssrc_stats.items(),
                 key=lambda kv: kv[1]["count"],
             )[0]
+
+            # --- Initial PLI burst to get the first keyframe ---
+            got_keyframe = False
             t0 = time.monotonic()
             for i in range(_PLI_MAX_SENDS):
                 if self._video_rtp is None or self._video_rtcp is None:
@@ -891,10 +916,11 @@ class AudioBridge:
                 if self._video_rtp.keyframe_received:
                     elapsed_ms = (time.monotonic() - t0) * 1000
                     _LOGGER.info(
-                        "PLI_LOOP: keyframe arrived after %d PLI(s) in %.0fms — done",
+                        "PLI_LOOP: keyframe arrived after %d PLI(s) in %.0fms",
                         i, elapsed_ms,
                     )
-                    return
+                    got_keyframe = True
+                    break
                 self._video_rtcp.send_pli(media_ssrc)
                 if i == 0:
                     _LOGGER.info(
@@ -902,17 +928,57 @@ class AudioBridge:
                         self._video_rtcp._remote_addr, media_ssrc,
                     )
                 await asyncio.sleep(_PLI_INTERVAL_S)
-            _LOGGER.warning(
-                "PLI_LOOP: gave up after %d PLI(s) without a keyframe (gateway "
-                "may not honour RTCP feedback on RTP/AVP)", _PLI_MAX_SENDS,
-            )
-            # Ask CallManager to renegotiate the dialog as audio-only so the
-            # gateway stops sending VP8 we can't decode. Audio remains intact.
-            if self._on_video_failure is not None:
-                try:
-                    self._on_video_failure()
-                except Exception:  # noqa: BLE001
-                    _LOGGER.exception("on_video_failure callback raised")
+
+            if not got_keyframe:
+                _LOGGER.warning(
+                    "PLI_LOOP: gave up after %d PLI(s) without a keyframe (gateway "
+                    "may not honour RTCP feedback on RTP/AVP)", _PLI_MAX_SENDS,
+                )
+                # Ask CallManager to renegotiate the dialog as audio-only so
+                # the gateway stops sending VP8 we can't decode.
+                if self._on_video_failure is not None:
+                    try:
+                        self._on_video_failure()
+                    except Exception:  # noqa: BLE001
+                        _LOGGER.exception("on_video_failure callback raised")
+                return
+
+            # --- Periodic PLI to keep the VP8 decoder fresh ---
+            # Sending a fresh I-frame every _PLI_PERIODIC_INTERVAL_S lets the
+            # VP8 decoder resync if it drifted. We reset keyframe_received so
+            # the forwarding gate filters P-frames until the I-frame arrives.
+            while True:
+                await asyncio.sleep(_PLI_PERIODIC_INTERVAL_S)
+                if self._video_rtp is None or self._video_rtcp is None:
+                    return
+                # Reset the gate — datagram_received will drop P-frames until
+                # the gateway responds with the fresh keyframe.
+                self._video_rtp.keyframe_received = False
+                self._video_rtcp.send_pli(media_ssrc)
+                _LOGGER.debug(
+                    "PLI_LOOP: periodic PLI sent (media_ssrc=0x%08x) — "
+                    "waiting for fresh keyframe", media_ssrc,
+                )
+                # Gateway typically responds to PLI in 50-200 ms; 1 s is
+                # already very conservative. If no keyframe after 1 s the
+                # gateway is not honouring RTCP feedback — re-open the gate
+                # immediately rather than blacking out for the full interval.
+                timeout = time.monotonic() + 1.0
+                while (
+                    self._video_rtp is not None
+                    and not self._video_rtp.keyframe_received
+                    and time.monotonic() < timeout
+                ):
+                    await asyncio.sleep(0.05)
+                if self._video_rtp is not None and self._video_rtp.keyframe_received:
+                    _LOGGER.debug("PLI_LOOP: periodic keyframe received — resuming")
+                else:
+                    if self._video_rtp is not None:
+                        self._video_rtp.keyframe_received = True
+                    _LOGGER.warning(
+                        "PLI_LOOP: periodic keyframe not received within 1s — "
+                        "re-opening gate to avoid extended blackout"
+                    )
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
@@ -1071,10 +1137,6 @@ class AudioBridge:
                 "nobuffer",
                 "-flags",
                 "low_delay",
-                # Disable the RTP reordering buffer — Intratone delivers in
-                # order on a single-hop loopback path, no jitter to hide.
-                "-max_delay",
-                "0",
                 "-f",
                 "sdp",
                 "-i",
