@@ -13,6 +13,7 @@ After pairing, the integration creates these entities under one device:
 | `event.intratone_<ID>_sonnette` | Fires every time a visitor rings the intercom. Payload includes `door_name`, `door_number` (NBPORTE), `caller`, `call_id`. Usable as automation trigger. |
 | `camera.intratone_<ID>_interphone` | Placeholder image when idle. Live audio + video stream during a call. |
 | `lock.intratone_<ID>_porte` | Tap *Unlock* → opens the door (sends `opendoor:<code>` SIP MESSAGE, same backend as the official Intratone app). |
+| `switch.intratone_<ID>_backlight` | Toggle ON during an active call to ask the intercom hardware for its backlight / illuminator mode (low-light conditions). One-shot — the server resets it on call end. Some hardware models don't support it; in that case the signal is silently ignored. |
 | `binary_sensor.intratone_<ID>_push_channel_connected` | Diagnostic — `on` while the FCM push channel is up. If it goes `off`, you won't be notified of rings. |
 
 Exposed to HomeKit via HA's HomeKit Bridge, the camera tile on iPhone Home.app delivers:
@@ -39,6 +40,11 @@ push RTSP → go2rtc → HomeKit Bridge → SRTP → iPhone Home.app
 ```
 
 The FCM listener stays connected for the lifetime of the integration and reconnects with exponential backoff on failure. The SIP dialog opens only when the user actually taps the camera tile or the lock — mirrors the Cogelec app, which doesn't dial until you tap *Pick Up*. See [`INTRATONE_API.md`](INTRATONE_API.md) for the full REST + SIP reverse-engineering notes.
+
+The integration also reacts to two additional FCM push types Cogelec emits:
+
+- **`callCancel`** — the visitor walked away before any device picked up. We abort the in-flight SIP call (if any) and clear pending state so a subsequent tap on the iPhone tile doesn't open a stale stream. Apple's iOS doorbell notification itself can't be dismissed remotely — it will fade out on its own.
+- **`unregister`** — the Intratone server invalidated our credentials (account reset, building operator unbound the device, …). HA's reauth flow is triggered; if the silent JWT refresh succeeds (it usually does as long as the phone/device_id are still on file), pairing continues seamlessly. Otherwise you'll see a Repair card asking for a new invitation code.
 
 ## Caveats
 
@@ -162,6 +168,7 @@ homekit:
         - camera.intratone_<ID>_interphone
         - event.intratone_<ID>_sonnette
         - lock.intratone_<ID>_porte
+        - switch.intratone_<ID>_backlight  # optional, only on hardware that supports it
     entity_config:
       camera.intratone_<ID>_interphone:
         support_audio: true
@@ -216,6 +223,18 @@ template:
 You can also branch automations directly on `{{ trigger.event.data.door_number }}` inside a `platform: event` trigger on `event_type: state_changed` for the entity, if you don't need the value to persist as its own sensor.
 
 ## Troubleshooting
+
+### Enabling debug logs
+
+Add to `configuration.yaml` and restart HA:
+
+```yaml
+logger:
+  logs:
+    custom_components.intratone: debug
+```
+
+At `debug` level the integration logs every SIP message sent and received (TX/RX, credentials redacted), every FCM push received, and the exact ffmpeg command lines. Use these to diagnose ring delivery, audio, or video problems before opening an issue.
 
 **Ring doesn't reach iPhone** — verify `event.intratone_<ID>_sonnette` fires in HA (Developer Tools → Events) when someone rings. Check the FCM listener heartbeat in logs (`firebase_messaging` lines every ~20 s). Make sure your HomeKit Bridge accessory is paired and the `linked_doorbell_sensor` is set.
 

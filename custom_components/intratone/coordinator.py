@@ -118,13 +118,42 @@ class IntratoneCoordinator(DataUpdateCoordinator[CallState | None]):
         rings. Does NOT open the SIP dialog — that happens lazily when the
         user taps live view or Unlock.
 
-        Cogelec emits two payload shapes — the historical `call_id` +
-        `message` form, and a newer `TYPE=24` form keyed on
-        `NOTIFICATION_UUID`. We accept both and ignore anything else.
+        Cogelec emits several payload shapes — the historical `call_id` +
+        `message` ring, the newer `TYPE=24` form keyed on
+        `NOTIFICATION_UUID`, plus `notif_type` routed events (`callCancel`,
+        `unregister`, …). We dispatch each to its specific handler and
+        ignore the rest.
         """
+        notif_type = payload.get("notif_type")
+
+        # Visitor walked away before any device picked up — Cogelec sends a
+        # cancel push so the historical ring becomes invalid. Tear down any
+        # in-progress call and clear `_pending` so the iPhone tile won't
+        # try to fetch a dead stream. The iOS doorbell notification itself
+        # is Apple-managed; we can't dismiss it remotely, but the user no
+        # longer wastes a tap on a stale call.
+        if notif_type == "callCancel" or (
+            "cancel" in payload and notif_type is None
+        ):
+            await self._async_handle_call_cancel(payload)
+            return
+
+        # Server-side credential invalidation (account reset, building
+        # operator unbound this device, …). Re-pair flow is mostly silent
+        # since we keep the stored phone/device_id, but trigger HA's auth
+        # repair so the user sees a notification if the silent refresh
+        # also fails.
+        if notif_type == "unregister" or "unregister" in payload:
+            _LOGGER.warning(
+                "Received unregister push from Intratone — starting reauth flow"
+            )
+            self.entry.async_start_reauth(self.hass)
+            return
+
         is_call = (
             (payload.get("call_id") and payload.get("message"))
             or payload.get("TYPE") == "24"
+            or notif_type == "bell"
         )
         if not is_call:
             _LOGGER.debug("Push not a call, ignoring: %s", _redact(payload))
@@ -313,6 +342,35 @@ class IntratoneCoordinator(DataUpdateCoordinator[CallState | None]):
                 self.data.call_id,
             )
         return door_opened
+
+    async def async_toggle_backlight(self) -> bool:
+        """Send the in-dialog `contrast` SIP MESSAGE.
+
+        Asks the doorbell hardware to enable backlight mode (front
+        illuminator / high-gain camera mode) for the rest of the call.
+        Server resets the state on BYE so this only has effect while the
+        SIP dialog is up. Lazy-starts the call if the user toggles before
+        opening the camera view.
+        """
+        if self.data is None or self._call_manager is None:
+            return False
+        if self._pending is not None and not self._pending.started:
+            await self.async_ensure_call_started()
+            await self.async_wait_for_stream()
+        return self._call_manager.send_backlight()
+
+    async def _async_handle_call_cancel(self, payload: dict) -> None:
+        """Visitor walked away before pickup — abort any in-flight call so a
+        stale stream URL won't be served and the next FCM ring can start
+        fresh without waiting on the BYE grace window."""
+        canceled_id = payload.get("call_id") or payload.get("NOTIFICATION_UUID")
+        _LOGGER.info("Received callCancel push for call %s", canceled_id)
+        if (
+            self._call_manager is not None
+            and self._call_manager.active_call_id is not None
+        ):
+            await self._call_manager.abort_active_call()
+        self._pending = None
 
 
 _REDACT_KEYS = {"LOGIN", "PASS", "ip_adress"}

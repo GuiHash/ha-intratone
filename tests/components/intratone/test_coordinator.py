@@ -28,6 +28,7 @@ def coordinator_with_cm(coordinator):
     cm.start_call = AsyncMock(return_value="fake-call-id")
     cm.hang_up = AsyncMock()
     cm.abort_active_call = AsyncMock()
+    cm.send_backlight = MagicMock(return_value=True)
     cm.active_call_id = None
     coordinator.attach_call_manager(cm)
     return coordinator, cm
@@ -295,6 +296,78 @@ async def test_new_push_does_not_abort_when_no_previous_call(
     await coordinator.async_handle_push(_FULL_PUSH)
 
     cm.abort_active_call.assert_not_awaited()
+
+
+async def test_call_cancel_push_aborts_active_call(coordinator_with_cm) -> None:
+    """`notif_type=callCancel` aborts any in-flight call and clears _pending
+    so the iPhone tile won't try to fetch a dead stream."""
+    coordinator, cm = coordinator_with_cm
+    cm.active_call_id = "sip-call-going"
+    await coordinator.async_handle_push(_FULL_PUSH)
+    assert coordinator._pending is not None
+
+    await coordinator.async_handle_push(
+        {"notif_type": "callCancel", "call_id": "300705065"}
+    )
+
+    cm.abort_active_call.assert_awaited()
+    assert coordinator._pending is None
+
+
+async def test_call_cancel_via_cancel_extra(coordinator_with_cm) -> None:
+    """Alternative shape — older pushes carry a `cancel` extra field
+    without a `notif_type` (FirebaseMessaging.java:248)."""
+    coordinator, cm = coordinator_with_cm
+    cm.active_call_id = "sip-call-going"
+    await coordinator.async_handle_push(_FULL_PUSH)
+
+    await coordinator.async_handle_push({"cancel": "1", "call_id": "x"})
+
+    cm.abort_active_call.assert_awaited()
+    assert coordinator._pending is None
+
+
+async def test_unregister_push_triggers_reauth(coordinator_with_cm) -> None:
+    """`notif_type=unregister` means the server invalidated our creds;
+    kick off the HA reauth flow so the silent JWT refresh runs first and,
+    if it fails, the user sees a repair prompt."""
+    coordinator, _ = coordinator_with_cm
+    coordinator.entry.async_start_reauth = MagicMock()
+
+    await coordinator.async_handle_push({"notif_type": "unregister"})
+
+    coordinator.entry.async_start_reauth.assert_called_once_with(coordinator.hass)
+
+
+async def test_unregister_via_extra(coordinator_with_cm) -> None:
+    coordinator, _ = coordinator_with_cm
+    coordinator.entry.async_start_reauth = MagicMock()
+
+    await coordinator.async_handle_push({"unregister": "1"})
+
+    coordinator.entry.async_start_reauth.assert_called_once_with(coordinator.hass)
+
+
+async def test_async_toggle_backlight_sends_signal(coordinator_with_cm) -> None:
+    """Once the SIP dialog is up, toggling the switch sends the
+    `contrast` MESSAGE via the call manager."""
+    coordinator, cm = coordinator_with_cm
+    cm.start_call.return_value = "sip-call-bl"
+
+    await coordinator.async_handle_push(_FULL_PUSH)
+    await coordinator.async_ensure_call_started()
+    coordinator.set_stream_url("sip-call-bl", "rtsp://x")
+
+    assert await coordinator.async_toggle_backlight() is True
+    cm.send_backlight.assert_called_once()
+
+
+async def test_async_toggle_backlight_returns_false_without_call(
+    coordinator_with_cm,
+) -> None:
+    coordinator, cm = coordinator_with_cm
+    assert await coordinator.async_toggle_backlight() is False
+    cm.send_backlight.assert_not_called()
 
 
 async def test_wait_for_stream_timeout_returns_none_without_killing_call(

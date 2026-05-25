@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import re
 import secrets
 import time
@@ -56,9 +55,6 @@ _SIP_INSTANCE = f'"<urn:uuid:{uuid.uuid4()}>"'
 # re-INVITE refresh; we just answer 200 OK to its in-dialog INVITE.
 _SESSION_EXPIRES_S = 1800
 
-# Set INTRATONE_SIP_DEBUG=1 to dump the full SIP exchange. Authorization headers
-# are masked to keep credentials out of logs.
-_SIP_DEBUG = bool(int(os.environ.get("INTRATONE_SIP_DEBUG", "0") or "0"))
 _AUTH_MASK_RE = re.compile(
     r"(?im)^((?:proxy-)?authorization):.*$", re.MULTILINE
 )
@@ -247,8 +243,7 @@ class IntratoneSipClient(asyncio.Protocol):
             if msg is None:
                 return
             raw, parsed = msg
-            if _SIP_DEBUG:
-                _LOGGER.info("SIP RX:\n%s", _redact_sip(raw))
+            _LOGGER.debug("SIP RX:\n%s", _redact_sip(raw))
             self._dispatch(parsed, raw)
 
     def _extract_one_message(self) -> tuple[bytes, SipMessage] | None:
@@ -366,6 +361,22 @@ class IntratoneSipClient(asyncio.Protocol):
         seconds before BYE so the user has more time to tap Unlock."""
         return self._send_in_dialog_message(
             call_id, body="MUTE_OFF", label="MUTE_OFF"
+        )
+
+    def send_backlight(self, call_id: str) -> bool:
+        """Send the in-dialog SIP MESSAGE body `contrast`.
+
+        Cogelec's app calls this from the (hidden by default) `btnContrast`
+        UI element — strings.xml `call_overlay_contrast` describes the
+        feature as: "In poor lighting situations, you can enable the
+        backlight mode to better see your visitor. This is reset after
+        each call." The signal asks the doorbell hardware to turn on its
+        front illuminator / switch to a high-gain camera mode for the rest
+        of the call. The body is the literal text `contrast` (no value).
+        Harmless if the hardware doesn't support it (server simply
+        ignores the MESSAGE)."""
+        return self._send_in_dialog_message(
+            call_id, body="contrast", label="backlight"
         )
 
     def _send_in_dialog_message(
@@ -771,8 +782,7 @@ class IntratoneSipClient(asyncio.Protocol):
 
     def _send(self, data: bytes) -> None:
         assert self._transport is not None
-        if _SIP_DEBUG:
-            _LOGGER.info("SIP TX:\n%s", _redact_sip(data))
+        _LOGGER.debug("SIP TX:\n%s", _redact_sip(data))
         self._transport.write(data)
 
 
