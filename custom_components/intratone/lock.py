@@ -17,7 +17,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import IntratoneConfigEntry
 from .entity import IntratoneEntity
-from .rest_api import IntratoneAccess, IntratoneApiError
+from .rest_api import IntratoneAccess, IntratoneApiError, IntratoneAuthError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -127,7 +127,7 @@ class IntratoneAccessLock(IntratoneEntity, LockEntity):
     async def async_unlock(self, **_kwargs) -> None:
         try:
             ok = await self.coordinator.api.open_access(self._access)
-        except IntratoneApiError as err:
+        except (IntratoneApiError, IntratoneAuthError) as err:
             raise HomeAssistantError(f"Open access failed: {err}") from err
         if not ok:
             raise HomeAssistantError("Open access rejected by Intratone")

@@ -37,10 +37,12 @@ DEFAULT_GO2RTC_URL: Final = "rtsp://127.0.0.1:8554"
 
 # Remote door opening ("Clé mobile" / mobipass) — opening a door/gate without
 # anyone ringing. Confirmed against the decompiled iOS app v4.4.10
-# (`APIManager.openAccessWithCleMobil` → POST /access/open/clemobil). The same
-# endpoint serves both the legacy 2G "clemobil" mode and the new 4G-data
-# "mobipass" mode — only the `openmode` form field differs (there is no
-# `/access/open/data` endpoint). See INTRATONE_API.md §4.4.
+# (`APIManager.openAccessWithCleMobil` → POST /access/open/clemobil). Despite
+# its legacy name, this single endpoint is the API open path for `data`
+# (mobipass, 4G) and `ble` accesses; the body carries no mode, just
+# `phonenumber` + `access_id` (there is no `/access/open/data` endpoint).
+# `clemobil`-mode accesses are opened by a GSM phone call instead, not this
+# endpoint. See INTRATONE_API.md §4.5.
 PATH_ACCESS_LIST: Final = "api/access"
 PATH_ACCESS_OPEN: Final = "api/access/open/clemobil"
 
