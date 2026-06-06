@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.0](https://github.com/GuiHash/ha-intratone/compare/v0.2.1...v0.3.0) (2026-06-06)
+
+
+### Features
+
+* expose mobipass remote-open accesses as lock entities ([#40](https://github.com/GuiHash/ha-intratone/issues/40)) ([0c5cb9e](https://github.com/GuiHash/ha-intratone/commit/0c5cb9e07d19054b23d03f84dda89c0c4aaefea7))
+
+
+### Bug Fixes
+
+* correct clemobil open docs and catch auth errors on access unlock ([#42](https://github.com/GuiHash/ha-intratone/issues/42)) ([a5d09df](https://github.com/GuiHash/ha-intratone/commit/a5d09dfa95f444e2b0815034dfa46525bbd369ea))
+
 ## [0.2.1](https://github.com/GuiHash/ha-intratone/compare/v0.2.0...v0.2.1) (2026-05-25)
 
 
