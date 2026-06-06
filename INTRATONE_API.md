@@ -229,13 +229,91 @@ Header: `Authorization: Bearer <JWT>`
 
 Response: `{ "error": 0, "state": "ok", ... }` → door opened.
 
-### 4.4 — Other endpoints
+### 4.4 — `GET /api/access`  (List remote-openable accesses — "Clé mobile" / mobipass)
+
+Lists the doors/gates the account can open **without anyone ringing** — what the
+app shows as "Clé mobile" tiles, and what the **mobipass** service drives.
+
+Header: `Authorization: Bearer <JWT>`
+
+Response envelope (the app parses `response["data"]["list"]` — confirmed by
+disassembling `APIManager.getAccessList` in the decompiled iOS app v4.4.10):
+
+```json
+{ "v": "...", "error": 0, "state": "ok",
+  "data": {
+    "list": [
+      { "id": 11, "residence": "Résidence A", "name": "Portail véhicule",
+        "phonenumber": "0612345678", "openmode": "data" }
+    ]
+  } }
+```
+
+The per-item JSON keys — `id`, `residence`, `name`, `phonenumber`, `openmode` —
+were confirmed by disassembling the iOS `AccessItem` decoder (the keys are read
+literally there). Note the response key is **`openmode`** (lowercase, singular)
+even though the in-memory struct field is `openModes: [OpenMode]`; the value may
+arrive as a single string or a list.
+
+| field         | type             | notes                                          |
+| ------------- | ---------------- | ---------------------------------------------- |
+| `id`          | Int              | the **access_id** (stable key; sent to open)   |
+| `residence`   | String           | building/residence name (accesses group by it) |
+| `name`        | String           | door/gate label                                |
+| `phonenumber` | String           | number the legacy 2G flow used to call         |
+| `openmode`    | String / [String]| which open mode(s) this access supports        |
+
+`OpenMode` values (Android enum `CLEMOBIL`, `DATA`, `BLE`; iOS also has
+`unknown`). **How the access is opened depends on its first mode** — the app
+dispatches on `firstOrNull(openModes)` (Android `AccessViewModel.openAccess`):
+
+| primary mode | how the app opens it                                    | usable from a 3rd-party client? |
+| ------------ | ------------------------------------------------------- | ------------------------------- |
+| `data`       | REST API (§4.5) — **mobipass**, 4G                      | ✅ yes                          |
+| `ble`        | REST API (§4.5) — `openAccessByApiUseCase`              | ✅ yes                          |
+| `clemobil`   | **places a real GSM phone call** to `phonenumber` (`openAccessByPhoneUseCase` → `LaunchPhoneCall`) — legacy 2G FlashCall | ❌ no (needs a dialer) |
+
+So a non-phone client can only open `data`/`ble` accesses via §4.5; `clemobil`
+accesses require actually dialling the access's `phonenumber`.
+
+### 4.5 — `POST /api/access/open/clemobil`  (Open an access — mobipass & Clémobil)
+
+Opens a door/gate on demand, no incoming call required. Despite the legacy
+`clemobil` in its name, this is the **API open path the app uses for `data`
+(mobipass) and `ble` accesses** — `openAccessByApiUseCase` →
+`AccessApiService.openApnAccessOnAPI`. The body does **not** carry the mode; it
+holds only `phonenumber` + `access_id`. Confirmed on both platforms (Android
+Retrofit `@FormUrlEncoded @POST("/api/access/open/clemobil") @Field` and iOS
+`APIManager.openAccessWithCleMobil`).
+
+> **Not used for `clemobil`-mode accesses.** An access whose first mode is
+> `clemobil` is opened by the app via a **real GSM phone call** to its
+> `phonenumber`, not via this endpoint (see §4.4). So this endpoint only opens
+> `data`/`ble` accesses.
+
+Header: `Authorization: Bearer <JWT>`
+Body (`application/x-www-form-urlencoded`):
+
+| field         | value                      |
+| ------------- | -------------------------- |
+| `phonenumber` | the access's `phonenumber` |
+| `access_id`   | the access's `id`          |
+
+Response: `{ "error": 0, "state": "ok", ... }` → access opened.
+
+> **mobipass vs Clémobil.** Clémobil used a 2G *FlashCall* (the registered
+> phone dialled a number to open). With 2G being shut down (May 2026), mobipass
+> replaces it with a 4G-data flow (`openmode=data`) opened through the REST API
+> above. The decompiled latest apps contain no "mobipass" string at all, only
+> `clemobil`/`data`/`ble`.
+
+### 4.6 — Other endpoints
 
 | Method | Path                             | Purpose                                 |
 | ------ | -------------------------------- | --------------------------------------- |
-| GET    | `/api/access`                    | List remote-opening accesses ("Clé mobile") |
 | GET    | `/api/calls?page=1&limit=20`     | Recent call history                     |
-| POST   | `/api/access/open/clemobil`      | Open door without ringing (badge mobile, needs `phonenumber` + `access_id`) |
+| POST   | `/api/access/bookmark`           | Bookmark a favourite access             |
+| POST   | `/api/elevator/gohome`           | KONE elevator "go home" call            |
 | POST   | `/api/auth/verify`               | SMS-based registration: send SMS code   |
 | POST   | `/api/auth/register`             | SMS flow: register device (waits for code) |
 | POST   | `/api/auth/validate`             | SMS flow: validate received code        |

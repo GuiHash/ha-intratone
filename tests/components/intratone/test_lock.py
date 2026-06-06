@@ -7,7 +7,12 @@ from aioresponses import aioresponses
 from homeassistant.components.lock import LockState
 from homeassistant.helpers import entity_registry as er
 
-from custom_components.intratone.const import API_BASE, DOMAIN
+from custom_components.intratone.const import (
+    API_BASE,
+    DOMAIN,
+    PATH_ACCESS_LIST,
+    PATH_ACCESS_OPEN,
+)
 
 
 @pytest.fixture
@@ -79,3 +84,58 @@ async def test_unlock_calls_open_door_and_reverts(
         for c in calls
     ]
     assert len(matching) >= 1
+
+
+async def test_access_lock_unlock_opens_remote_access(
+    hass, mock_entry, mock_fcm_client, mock_call_manager, aiomock
+) -> None:
+    """A remote-open access ("Clé mobile" / mobipass) is exposed as a Lock,
+    and unlocking it POSTs to /access/open/clemobil."""
+    mock_entry.add_to_hass(hass)
+    aiomock.get(
+        f"{API_BASE}{PATH_ACCESS_LIST}",
+        payload={
+            "state": "ok",
+            "data": {
+                "list": [
+                    {
+                        "id": 77,
+                        "residence": "Ma résidence",
+                        "name": "Portail",
+                        "phonenumber": "0612345678",
+                        "openmode": "data",
+                    }
+                ]
+            },
+        },
+    )
+    aiomock.post(
+        f"{API_BASE}{PATH_ACCESS_OPEN}",
+        payload={"error": 0, "state": "ok"},
+    )
+
+    assert await hass.config_entries.async_setup(mock_entry.entry_id)
+    await hass.async_block_till_done()
+
+    registry = er.async_get(hass)
+    access_eid = registry.async_get_entity_id(
+        "lock", DOMAIN, f"{mock_entry.entry_id}_access_77"
+    )
+    assert access_eid is not None
+    assert hass.states.get(access_eid).state == LockState.LOCKED
+
+    await hass.services.async_call(
+        "lock", "unlock", {"entity_id": access_eid}, blocking=True
+    )
+
+    open_url = f"{API_BASE}{PATH_ACCESS_OPEN}"
+    matching = [
+        c for key, calls in aiomock.requests.items()
+        if str(key[1]) == open_url
+        for c in calls
+    ]
+    assert len(matching) == 1
+    assert matching[0].kwargs["data"] == {
+        "phonenumber": "0612345678",
+        "access_id": "77",
+    }

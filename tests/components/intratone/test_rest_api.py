@@ -8,8 +8,11 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from custom_components.intratone.const import (
     API_BASE,
+    PATH_ACCESS_LIST,
+    PATH_ACCESS_OPEN,
 )
 from custom_components.intratone.rest_api import (
+    IntratoneAccess,
     IntratoneAPI,
     IntratoneApiError,
     IntratoneAuthError,
@@ -66,6 +69,119 @@ async def test_answer_call_retries_after_jwt_refresh(hass, mock_entry, aiomock) 
     assert await api.answer_call("123") is True
     # Refreshed JWT now lives in the Store, not in entry.data.
     assert store.jwt == "newjwt"
+
+
+async def test_open_access_success(hass, mock_entry, aiomock) -> None:
+    mock_entry.add_to_hass(hass)
+    store = await _seeded_store(hass)
+    api = IntratoneAPI(hass, async_get_clientsession(hass), mock_entry, store)
+
+    aiomock.post(
+        f"{API_BASE}{PATH_ACCESS_OPEN}",
+        payload={"error": 0, "state": "ok"},
+    )
+    access = IntratoneAccess(
+        access_id="42",
+        phonenumber="0612345678",
+        name="Portail",
+        residence="Rés",
+        openmode="data",
+    )
+    assert await api.open_access(access) is True
+
+    open_url = f"{API_BASE}{PATH_ACCESS_OPEN}"
+    sent = next(
+        c for key, calls in aiomock.requests.items()
+        if str(key[1]) == open_url
+        for c in calls
+    )
+    assert sent.kwargs["data"] == {
+        "phonenumber": "0612345678",
+        "access_id": "42",
+    }
+
+
+async def test_open_access_refused_returns_false(hass, mock_entry, aiomock) -> None:
+    mock_entry.add_to_hass(hass)
+    store = await _seeded_store(hass)
+    api = IntratoneAPI(hass, async_get_clientsession(hass), mock_entry, store)
+
+    aiomock.post(
+        f"{API_BASE}{PATH_ACCESS_OPEN}",
+        payload={"error": 1, "state": "ok", "message": "not allowed"},
+    )
+    access = IntratoneAccess(
+        access_id="42",
+        phonenumber="0612345678",
+        name="Portail",
+        residence="Rés",
+        openmode="data",
+    )
+    assert await api.open_access(access) is False
+
+
+async def test_list_access_parses_and_filters(hass, mock_entry, aiomock) -> None:
+    mock_entry.add_to_hass(hass)
+    store = await _seeded_store(hass)
+    api = IntratoneAPI(hass, async_get_clientsession(hass), mock_entry, store)
+
+    aiomock.get(
+        f"{API_BASE}{PATH_ACCESS_LIST}",
+        payload={
+            "state": "ok",
+            "data": {
+                "list": [
+                    # Real key is `openmode` (lowercase); value as a single
+                    # string — the form confirmed in the decoders.
+                    {
+                        "id": 11,
+                        "residence": "Résidence A",
+                        "name": "Portail véhicule",
+                        "phonenumber": "0612345678",
+                        "openmode": "data",
+                    },
+                    # BLE accesses open via the REST API too (app routes ble →
+                    # openAccessByApiUseCase) — kept.
+                    {
+                        "id": 14,
+                        "residence": "Résidence A",
+                        "name": "Portail BLE",
+                        "phonenumber": "0600000002",
+                        "openmode": ["ble"],
+                    },
+                    # clemobil opens by a GSM phone call, not the API — dropped.
+                    {
+                        "id": 12,
+                        "residence": "Résidence A",
+                        "name": "Hall piéton",
+                        "phonenumber": "0698765432",
+                        "openmode": "clemobil",
+                    },
+                    # Unknown primary mode — dropped.
+                    {
+                        "id": 13,
+                        "residence": "Résidence A",
+                        "name": "Vieux portail",
+                        "phonenumber": "0600000000",
+                        "openmode": ["unknown"],
+                    },
+                    # No id — dropped.
+                    {
+                        "id": 0,
+                        "residence": "Résidence A",
+                        "name": "Sans id",
+                        "phonenumber": "0600000001",
+                        "openmode": "data",
+                    },
+                ]
+            },
+        },
+    )
+
+    accesses = await api.list_access()
+    assert [a.name for a in accesses] == ["Portail véhicule", "Portail BLE"]
+    assert accesses[0].openmode == "data"
+    assert accesses[1].openmode == "ble"
 
 
 async def test_register_with_invite_returns_data(hass, aiomock) -> None:
