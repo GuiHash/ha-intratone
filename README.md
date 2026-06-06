@@ -1,6 +1,6 @@
 # Intratone Doorbell — Home Assistant integration
 
-Native Home Assistant integration for the **Intratone** intercom system (manufactured by Cogelec, widely deployed in French apartment buildings). Exposes your apartment intercom as native HA entities and as a HomeKit accessory so calls ring directly on your iPhone, with one-way audio + video and a door-unlock button.
+Native Home Assistant integration for the **Intratone** intercom system (manufactured by Cogelec, widely deployed in French apartment buildings). Exposes your apartment intercom as native HA entities and as a HomeKit accessory so calls ring directly on your iPhone, with one-way audio + video and a door-unlock button. It also exposes Intratone's *Clé mobile* / **mobipass** remote-open accesses as lock entities, so you can open your building's gate **on demand without anyone ringing** — including hands-free via a voice assistant.
 
 [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=GuiHash&repository=ha-intratone&category=integration)
 
@@ -12,7 +12,8 @@ After pairing, the integration creates these entities under one device:
 |---|---|
 | `event.intratone_<ID>_doorbell` | Fires every time a visitor rings the intercom. Payload includes `door_name`, `door_number` (NBPORTE), `caller`, `call_id`. Usable as automation trigger. |
 | `camera.intratone_<ID>_intercom` | Placeholder image when idle. Live audio + video stream during a call. |
-| `lock.intratone_<ID>_door` | Tap *Unlock* → opens the door (sends `opendoor:<code>` SIP MESSAGE, same backend as the official Intratone app). |
+| `lock.intratone_<ID>_door` | Tap *Unlock* → opens the door (sends `opendoor:<code>` SIP MESSAGE, same backend as the official Intratone app). Only works **during an active call** (see Caveats). |
+| `lock.intratone_<ID>_<access>` | One per **data-openable** access — Intratone's *Clé mobile* / **mobipass** (`data`/4G) and `ble` accesses. Tap *Unlock* to open that gate/door **on demand, no visitor needed** (`POST /api/access/open/clemobil`). Created at setup from `GET /api/access` (one per residence × door). Voice-assistant & HomeKit friendly for hands-free opening. **Legacy 2G `clemobil` accesses are not exposed** — the app opens those by placing a real phone call, which HA can't do. Absent if your account has no data-openable accesses. |
 | `switch.intratone_<ID>_backlight` | Toggle ON during an active call to ask the intercom hardware for its backlight / illuminator mode (low-light conditions). One-shot — the server resets it on call end. Some hardware models don't support it; in that case the signal is silently ignored. |
 | `binary_sensor.intratone_<ID>_push_channel_connected` | Diagnostic — `on` while the FCM push channel is up. If it goes `off`, you won't be notified of rings. |
 
@@ -44,7 +45,7 @@ The integration also reacts to two additional FCM push types Cogelec emits:
 
 ## Caveats
 
-- **Door unlock requires an active call.** The unlock action sends a SIP MESSAGE inside the active call dialog. It only works in the **~25-second window** starting when the visitor presses the button and ending when the intercom hangs up. There's currently no way to open the door without a visitor ringing — see [Not yet implemented](#not-yet-implemented).
+- **Intercom door unlock requires an active call.** `lock.intratone_<ID>_door` sends a SIP MESSAGE inside the active call dialog, so it only works in the **~25-second window** starting when the visitor presses the button and ending when the intercom hangs up. To open a gate/door **without anyone ringing**, use the remote-open access locks (*Clé mobile* / mobipass, `lock.intratone_<ID>_<access>`) instead — those work any time.
 - **Audio quality**: bounded by G.711 µ-law @ 8 kHz (Intratone's wire codec). Some accounts receive only comfort-noise µ-law from the server during a call rather than the real microphone stream — same behaviour observed on the official Intratone iOS app for those accounts, only the GSM fallback carries real audio. Not a bug in this integration; it's a server / account-side condition.
 - **Video quality**: bitrate is set by the intercom hardware (~5-10 kbps observed, ~2–5 fps). Equivalent quality to the official app — there's no client-side knob to request higher quality.
 - **Video startup delay**: The Intratone server schedules VP8 keyframes infrequently. After tapping the HomeKit tile, expect a **5–15 second black screen** before video appears. This is not a bug — ffmpeg can't start encoding until it receives an I-frame from the server. If no video appears after ~20 s, see [Troubleshooting](#troubleshooting).
@@ -55,7 +56,6 @@ The integration also reacts to two additional FCM push types Cogelec emits:
 ## Not yet implemented
 
 - **Talkback** (iPhone microphone → visitor). The "Talk" button shows in HomeKit but does nothing. **Blocked on upstream**: Home Assistant's HomeKit Bridge and HAP-python don't expose camera microphone input at all today. We'll add it when one of them does.
-- **Remote door unlock without a visitor ringing** (Intratone's *Clé mobile* feature). The API supports it (`POST /api/access/open/clemobil`), the integration just doesn't wire it up yet.
 - **Call history**, **multiple intercoms in one config entry**, **HomeKit Secure Video**.
 
 ## Prerequisites
@@ -164,6 +164,7 @@ homekit:
         - camera.intratone_<ID>_intercom
         - event.intratone_<ID>_doorbell
         - lock.intratone_<ID>_door
+        - lock.intratone_<ID>_<access>     # remote-open accesses (Clé mobile / mobipass), one per gate/door
         - switch.intratone_<ID>_backlight  # optional, only on hardware that supports it
     entity_config:
       camera.intratone_<ID>_intercom:
@@ -259,7 +260,7 @@ No call history, audio, or video is persisted to disk by the integration — RTP
 
 ## Credits
 
-Reverse-engineered from the official Cogelec / Intratone Android app (APK 4.6.3). HTTP, SIP and RTP behaviour mirrors what the official app does so the integration cohabits cleanly alongside it on the same account.
+Reverse-engineered from the official Cogelec / Intratone Android app (APK 4.6.3) and iOS app (IPA 4.4.10). HTTP, SIP and RTP behaviour mirrors what the official app does so the integration cohabits cleanly alongside it on the same account. See [`INTRATONE_API.md`](INTRATONE_API.md) for the full API notes, including the *Clé mobile* / mobipass remote-open endpoints.
 
 ## License
 

@@ -17,6 +17,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import IntratoneConfigEntry
 from .entity import IntratoneEntity
+from .rest_api import IntratoneAccess, IntratoneApiError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -28,7 +29,36 @@ async def async_setup_entry(
     entry: IntratoneConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    async_add_entities([IntratoneDoorLock(entry.runtime_data.coordinator)])
+    coordinator = entry.runtime_data.coordinator
+    # The door lock is available immediately. Remote-open accesses ("Clé
+    # mobile" / mobipass) need a REST round-trip to list — fetch them in the
+    # background so a slow/failing API never delays the doorbell entities.
+    async_add_entities([IntratoneDoorLock(coordinator)])
+
+    async def _add_access_locks() -> None:
+        try:
+            accesses = await entry.runtime_data.api.list_access()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Could not fetch remote-open accesses: %s", err)
+            return
+        if accesses:
+            _LOGGER.debug(
+                "Creating %d remote-open access lock(s): %s",
+                len(accesses),
+                ", ".join(f"{a.residence}/{a.name} ({a.openmode})" for a in accesses),
+            )
+            async_add_entities(
+                IntratoneAccessLock(coordinator, access) for access in accesses
+            )
+        else:
+            _LOGGER.debug(
+                "No remote-open access locks created "
+                "(no data/ble accesses, or account not provisioned)"
+            )
+
+    entry.async_create_background_task(
+        hass, _add_access_locks(), "intratone_access_locks"
+    )
 
 
 class IntratoneDoorLock(IntratoneEntity, LockEntity):
@@ -49,6 +79,58 @@ class IntratoneDoorLock(IntratoneEntity, LockEntity):
             raise HomeAssistantError(
                 "Open door failed — no active call or API error (see logs)"
             )
+
+        self._attr_is_locked = False
+        self.async_write_ha_state()
+
+        if self._revert_task is not None and not self._revert_task.done():
+            self._revert_task.cancel()
+        self._revert_task = self.hass.async_create_task(self._revert_to_locked())
+
+    async def async_lock(self, **_kwargs) -> None:
+        # No-op: the relay self-closes; we just flip the visible state.
+        self._attr_is_locked = True
+        self.async_write_ha_state()
+
+    async def _revert_to_locked(self) -> None:
+        try:
+            await asyncio.sleep(UNLOCK_VISIBLE_S)
+        except asyncio.CancelledError:
+            return
+        self._attr_is_locked = True
+        self.async_write_ha_state()
+
+    async def async_will_remove_from_hass(self) -> None:
+        if self._revert_task is not None and not self._revert_task.done():
+            self._revert_task.cancel()
+
+
+class IntratoneAccessLock(IntratoneEntity, LockEntity):
+    """Remote-open access ("Clé mobile" / mobipass) exposed as a Lock.
+
+    Unlike `IntratoneDoorLock`, this opens a door/gate on demand via the REST
+    API — no incoming call required. Same momentary, assumed-state behaviour so
+    HomeKit / voice assistants get an "Unlock" action.
+    """
+
+    _attr_assumed_state = True
+
+    def __init__(self, coordinator, access: IntratoneAccess) -> None:
+        super().__init__(coordinator)
+        self._access = access
+        self._attr_unique_id = f"{coordinator.entry.entry_id}_access_{access.access_id}"
+        label = " — ".join(p for p in (access.residence, access.name) if p)
+        self._attr_name = label or "Accès"
+        self._attr_is_locked = True
+        self._revert_task: asyncio.Task | None = None
+
+    async def async_unlock(self, **_kwargs) -> None:
+        try:
+            ok = await self.coordinator.api.open_access(self._access)
+        except IntratoneApiError as err:
+            raise HomeAssistantError(f"Open access failed: {err}") from err
+        if not ok:
+            raise HomeAssistantError("Open access rejected by Intratone")
 
         self._attr_is_locked = False
         self.async_write_ha_state()
