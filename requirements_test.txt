@@ -1,6 +1,6 @@
 pytest-homeassistant-custom-component==0.13.195 ; python_version == "3.12"
 pytest-homeassistant-custom-component==0.13.316 ; python_version == "3.13"
-pytest-homeassistant-custom-component>=0.13.337 ; python_version >= "3.14"
+pytest-homeassistant-custom-component>=0.13.339 ; python_version >= "3.14"
 pytest-xdist
 aioresponses
 firebase-messaging>=0.4.5
