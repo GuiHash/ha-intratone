@@ -120,6 +120,39 @@ async def test_open_access_refused_returns_false(hass, mock_entry, aiomock) -> N
     assert await api.open_access(access) is False
 
 
+async def test_open_access_server_error_raises_with_body_and_status(
+    hass, mock_entry, aiomock
+) -> None:
+    """A `state:error` open (e.g. ACCESS_OPENING_CLEMOBIL_FAILED) is retried
+    once after a JWT refresh; if it fails again the raised error carries the
+    HTTP status and full body so diagnostics can tell a rate-limit (429) from a
+    plain refusal (see issue #39)."""
+    mock_entry.add_to_hass(hass)
+    store = await _seeded_store(hass)
+    api = IntratoneAPI(hass, async_get_clientsession(hass), mock_entry, store)
+
+    error_body = {"state": "error", "code": "ACCESS_OPENING_CLEMOBIL_FAILED"}
+    # First open fails → JWT refresh → second open fails too (HTTP 429).
+    aiomock.post(f"{API_BASE}{PATH_ACCESS_OPEN}", payload=error_body, status=429)
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={"state": "ok", "data": {"jwt": "newjwt", "id": "3844428"}},
+    )
+    aiomock.post(f"{API_BASE}{PATH_ACCESS_OPEN}", payload=error_body, status=429)
+
+    access = IntratoneAccess(
+        access_id="42",
+        phonenumber="0612345678",
+        name="Portail",
+        residence="Rés",
+        openmode="data",
+    )
+    with pytest.raises(IntratoneApiError) as exc:
+        await api.open_access(access)
+    assert exc.value.status == 429
+    assert exc.value.body == error_body
+
+
 async def test_list_access_parses_and_filters(hass, mock_entry, aiomock) -> None:
     mock_entry.add_to_hass(hass)
     store = await _seeded_store(hass)

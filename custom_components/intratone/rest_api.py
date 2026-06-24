@@ -44,7 +44,19 @@ class IntratoneAuthError(Exception):
 
 
 class IntratoneApiError(Exception):
-    """Raised on unexpected API errors."""
+    """Raised on unexpected API errors.
+
+    Carries the HTTP `status` and parsed `body` (when available) so callers can
+    log the full server response for diagnostics instead of just a message —
+    e.g. to tell a transient open failure from a rate-limit (HTTP 429).
+    """
+
+    def __init__(
+        self, message: str, *, status: int | None = None, body: Any = None
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        self.body = body
 
 
 @dataclass(frozen=True)
@@ -113,17 +125,34 @@ class IntratoneAPI:
         async with self._session.post(
             API_BASE + path, data=form, headers=headers, timeout=REQUEST_TIMEOUT
         ) as resp:
+            status = resp.status
             try:
                 body = await resp.json(content_type=None)
             except aiohttp.ContentTypeError as err:
-                raise IntratoneApiError(f"Non-JSON response from {path}: {err}") from err
+                raise IntratoneApiError(
+                    f"Non-JSON response from {path} (HTTP {status}): {err}",
+                    status=status,
+                ) from err
 
             if not isinstance(body, dict):
-                raise IntratoneApiError(f"Unexpected response shape from {path}: {body!r}")
+                raise IntratoneApiError(
+                    f"Unexpected response shape from {path} (HTTP {status}): {body!r}",
+                    status=status,
+                    body=body,
+                )
 
             if body.get("state") == "error":
                 msg = body.get("message") or body.get("code") or "unknown"
-                raise IntratoneApiError(f"API error from {path}: {msg}")
+                # Full body + status at debug so a beta-tester's logs show
+                # exactly what the server returned (rate-limit, gate offline…).
+                _LOGGER.debug(
+                    "API error from %s (HTTP %s): %s", path, status, body
+                )
+                raise IntratoneApiError(
+                    f"API error from {path} (HTTP {status}): {msg}",
+                    status=status,
+                    body=body,
+                )
 
             return body
 
@@ -208,19 +237,30 @@ class IntratoneAPI:
             async with self._session.get(
                 API_BASE + path, headers=headers, timeout=REQUEST_TIMEOUT
             ) as resp:
+                status = resp.status
                 try:
                     body = await resp.json(content_type=None)
                 except aiohttp.ContentTypeError as err:
                     raise IntratoneApiError(
-                        f"Non-JSON response from {path}: {err}"
+                        f"Non-JSON response from {path} (HTTP {status}): {err}",
+                        status=status,
                     ) from err
             if not isinstance(body, dict):
                 raise IntratoneApiError(
-                    f"Unexpected response shape from {path}: {body!r}"
+                    f"Unexpected response shape from {path} (HTTP {status}): {body!r}",
+                    status=status,
+                    body=body,
                 )
             if body.get("state") == "error":
                 msg = body.get("message") or body.get("code") or "unknown"
-                raise IntratoneApiError(f"API error from {path}: {msg}")
+                _LOGGER.debug(
+                    "API error from %s (HTTP %s): %s", path, status, body
+                )
+                raise IntratoneApiError(
+                    f"API error from {path} (HTTP {status}): {msg}",
+                    status=status,
+                    body=body,
+                )
             return body
 
         try:
@@ -265,9 +305,29 @@ class IntratoneAPI:
         )
         try:
             body = await self._post_form(PATH_ACCESS_OPEN, form, jwt=self.jwt)
-        except IntratoneApiError:
+        except IntratoneApiError as first_err:
+            # A first failure is usually just an expired JWT (401): refresh once
+            # and retry. If the retry also fails, the server is genuinely
+            # refusing the open — log the full response (status + body) so a
+            # beta-tester can see why (rate-limit/HTTP 429, gate offline, …)
+            # before re-raising for the lock to surface.
+            _LOGGER.debug(
+                "Open access id=%s first attempt failed, retrying after JWT "
+                "refresh: %s",
+                access.access_id,
+                first_err,
+            )
             await self.refresh_jwt()
-            body = await self._post_form(PATH_ACCESS_OPEN, form, jwt=self.jwt)
+            try:
+                body = await self._post_form(PATH_ACCESS_OPEN, form, jwt=self.jwt)
+            except IntratoneApiError as err:
+                _LOGGER.warning(
+                    "Open access id=%s failed (HTTP %s): %s",
+                    access.access_id,
+                    err.status,
+                    err.body if err.body is not None else err,
+                )
+                raise
 
         ok = body.get("error") == 0
         if ok:
