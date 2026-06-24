@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/GuiHash/ha-intratone/compare/v0.3.0...v0.3.1) (2026-06-24)
+
+
+### Bug Fixes
+
+* **rest-api:** surface HTTP status and full body on API errors ([#52](https://github.com/GuiHash/ha-intratone/issues/52)) ([7b9114d](https://github.com/GuiHash/ha-intratone/commit/7b9114de51c7ef3b8459dd3e66e89e840b1ebe36))
+
 ## [0.3.0](https://github.com/GuiHash/ha-intratone/compare/v0.2.1...v0.3.0) (2026-06-06)
 
 
