@@ -18,44 +18,32 @@ pytest_plugins = ["pytest_homeassistant_custom_component"]
 
 
 # ---------------------------------------------------------------------------
-# aiohttp 3.14+ compatibility shim for aioresponses
+# aiohttp 3.14 compatibility shim for aioresponses
 #
-# aiohttp 3.14 renamed ClientResponse.__init__'s `writer` kwarg to
-# `stream_writer` (now required).  aioresponses 0.7.9 still passes
-# `writer=None`, which raises TypeError.  Detect the kwarg name at import
-# time and patch _build_response only when the rename is present.
+# aiohttp 3.14 added a required `stream_writer` kwarg to
+# ClientResponse.__init__ (alongside the existing `writer`) and now reads
+# `stream_writer.output_size` when `writer is None`.  aioresponses 0.7.9
+# only passes `writer=None`, so construction fails with TypeError (missing
+# stream_writer) / AttributeError (None has no output_size).  When the
+# installed aiohttp has `stream_writer`, wrap the response class aioresponses
+# instantiates so it supplies a stub stream_writer.
 # ---------------------------------------------------------------------------
 import aioresponses.core as _arc
 from aiohttp import ClientResponse as _ClientResponse
 
-_cr_params = set(inspect.signature(_ClientResponse.__init__).parameters)
-if "stream_writer" in _cr_params and "writer" not in _cr_params:
-    _orig_build = _arc.RequestMatch._build_response
+if "stream_writer" in inspect.signature(_ClientResponse.__init__).parameters:
+    _OrigClientResponse = _arc.ClientResponse
 
-    def _build_response_stream_writer(  # type: ignore[override]
-        self,
-        url,
-        method="GET",
-        request_headers=None,
-        status=200,
-        body="",
-        content_type="application/json",
-        payload=None,
-        headers=None,
-        response_class=None,
-        reason=None,
-    ):
-        _rc = response_class if response_class is not None else _ClientResponse
+    class _StubStreamWriter:
+        output_size = 0
 
-        def _compat(m, u, *, writer=None, **kw):
-            return _rc(m, u, stream_writer=writer, **kw)
+    class _CompatClientResponse(_OrigClientResponse):
+        def __init__(self, *args, **kwargs):
+            if kwargs.get("stream_writer") is None:
+                kwargs["stream_writer"] = _StubStreamWriter()
+            super().__init__(*args, **kwargs)
 
-        return _orig_build(
-            self, url, method, request_headers, status, body,
-            content_type, payload, headers, _compat, reason,
-        )
-
-    _arc.RequestMatch._build_response = _build_response_stream_writer
+    _arc.ClientResponse = _CompatClientResponse
 
 
 @pytest.fixture(autouse=True)
