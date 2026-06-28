@@ -53,6 +53,21 @@
       "reauth_successful": "Re-couplage réussi."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Options Intratone",
+        "data": {
+          "video_enabled": "Activer la vidéo (VP8)",
+          "go2rtc_url": "URL RTSP du relais go2rtc"
+        },
+        "data_description": {
+          "video_enabled": "Négocie la vidéo VP8 avec la passerelle Intratone et la transmet à go2rtc. Désactivé pour le mode audio uniquement.",
+          "go2rtc_url": "URL RTSP sur laquelle go2rtc écoute. Par défaut : rtsp://127.0.0.1:8554. Les utilisateurs HA OS avec le go2rtc intégré doivent utiliser rtsp://127.0.0.1:18554."
+        }
+      }
+    }
+  },
   "services": {
     "simulate_ring": {
       "name": "Simuler une sonnerie",
