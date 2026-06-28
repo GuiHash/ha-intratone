@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/GuiHash/ha-intratone/compare/v0.3.1...v0.3.2) (2026-06-28)
+
+
+### Bug Fixes
+
+* **translations:** add en.json and fix missing options labels in fr.json ([#54](https://github.com/GuiHash/ha-intratone/issues/54)) ([450cb36](https://github.com/GuiHash/ha-intratone/commit/450cb36f1621aa68193825d4a929fbbd400c01cd))
+
 ## [0.3.1](https://github.com/GuiHash/ha-intratone/compare/v0.3.0...v0.3.1) (2026-06-24)
 
 
