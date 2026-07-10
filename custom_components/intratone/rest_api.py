@@ -102,7 +102,7 @@ class IntratoneAccess:
 class MobipassState:
     """The four CléMobil/Mobipass flags from the `api/auth/device` response.
 
-    Parsed from `data.{openingaccess,refreshaccess,mobipass_compatible,mobipass}`
+    Parsed from `data.{openingaccess,access_refresh,mobipass_compatible,mobipass}`
     (each sent by the server as the string `"1"`/`"0"`). Mirrors the Android
     `AuthDevice` model. `needs_transfer` is the issue-#61 condition: the account
     supports the single-owner Mobipass scheme (`mobipass_compatible`) but the key
@@ -128,7 +128,7 @@ def _parse_mobipass_state(data: dict[str, Any]) -> MobipassState:
 
     return MobipassState(
         opening_access=flag("openingaccess"),
-        refresh_access=flag("refreshaccess"),
+        refresh_access=flag("access_refresh"),
         mobipass_compatible=flag("mobipass_compatible"),
         mobipass=flag("mobipass"),
     )

@@ -238,7 +238,7 @@ async def test_authenticate_device_parses_mobipass_state(
                 "jwt": "j",
                 "id": "3844428",
                 "openingaccess": "0",
-                "refreshaccess": "1",
+                "access_refresh": "1",
                 "mobipass_compatible": "1",
                 "mobipass": "0",
             },
