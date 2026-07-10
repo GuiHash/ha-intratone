@@ -18,6 +18,23 @@ APP_TOKEN: Final = ">KompY95?oijeIKR8049?OLysIekjpceKejLAHhh"
 APP_VERSION: Final = "4.6.4"
 DEVICE_BUNDLE_ID: Final = "com.cogelec.notificationpush"
 
+# Device profile reported at registration (issue #61). The server derives an
+# account's `mobipass_compatible` flag from the *registered device profile*, not
+# from the live request — so it is fixed when the device first registers and a
+# restart never refreshes it. A tester proved (mitmproxy on the same account):
+# registering with a real-phone profile returns `mobipass_compatible: 1` and the
+# transfer succeeds, while our old "HA-Bridge"/"HomeAssistant" profile returns
+# `0` + MOBIPASS_NOT_AVAILABLE. Some residences gate on this, others don't (hence
+# it worked for some accounts already). We mirror the official Android app's
+# register shape: `os` is upper-case "ANDROID", with a realistic phone model.
+# Note: this only affects NEW registrations — an affected user must remove and
+# re-add the integration for the fresh profile to take effect.
+DEVICE_OS: Final = "ANDROID"
+DEVICE_OSV: Final = "36"
+DEVICE_MODEL: Final = "SM-S931B"
+DEVICE_MANUFACTURER: Final = "samsung"
+DEVICE_DESCRIPTION: Final = "Galaxy S25"
+
 FCM_PROJECT_ID: Final = "android-ipvideo-studio"
 FCM_APP_ID: Final = "1:676502914290:android:5393f05ec7f22bd6"
 FCM_API_KEY: Final = "AIzaSyB7RtCyt6LZWMruWKj7Z_9Ii7_VAIVdSKU"
