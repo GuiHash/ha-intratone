@@ -10,12 +10,15 @@ from custom_components.intratone.const import (
     API_BASE,
     PATH_ACCESS_LIST,
     PATH_ACCESS_OPEN,
+    PATH_MOBIPASS_ACTIVATE,
+    PATH_MOBIPASS_VERIFY,
 )
 from custom_components.intratone.rest_api import (
     IntratoneAccess,
     IntratoneAPI,
     IntratoneApiError,
     IntratoneAuthError,
+    IntratoneMobipassError,
     authenticate_for_invite,
     register_with_invite,
 )
@@ -215,6 +218,118 @@ async def test_list_access_parses_and_filters(hass, mock_entry, aiomock) -> None
     assert [a.name for a in accesses] == ["Portail véhicule", "Portail BLE"]
     assert accesses[0].openmode == "data"
     assert accesses[1].openmode == "ble"
+
+
+async def test_authenticate_device_parses_mobipass_state(
+    hass, mock_entry, aiomock
+) -> None:
+    """The CléMobil/Mobipass flags are read off the auth/device response."""
+    mock_entry.add_to_hass(hass)
+    store = await _seeded_store(hass)
+    api = IntratoneAPI(hass, async_get_clientsession(hass), mock_entry, store)
+
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={
+            "state": "ok",
+            "data": {
+                "jwt": "j",
+                "id": "3844428",
+                "openingaccess": "0",
+                "refreshaccess": "1",
+                "mobipass_compatible": "1",
+                "mobipass": "0",
+            },
+        },
+    )
+
+    await api.authenticate_device()
+    state = api.mobipass_state
+    assert state is not None
+    assert state.mobipass_compatible is True
+    assert state.mobipass is False
+    assert state.opening_access is False
+    assert state.refresh_access is True
+    # Eligible for Mobipass but key held elsewhere → transfer needed (issue #61).
+    assert state.needs_transfer is True
+
+
+async def test_mobipass_activate_success(hass, mock_entry, aiomock) -> None:
+    mock_entry.add_to_hass(hass)
+    store = await _seeded_store(hass)
+    api = IntratoneAPI(hass, async_get_clientsession(hass), mock_entry, store)
+
+    aiomock.post(
+        f"{API_BASE}{PATH_MOBIPASS_ACTIVATE}",
+        payload={"state": "ok", "error": 0},
+    )
+    # No raise = OTP request accepted.
+    await api.mobipass_activate()
+
+
+async def test_mobipass_verify_invalid_code_raises_with_code(
+    hass, mock_entry, aiomock
+) -> None:
+    """A wrong OTP comes back as error!=0 + MOBIPASS_OTP_INVALID and is surfaced
+    as an IntratoneMobipassError carrying that code (no JWT-refresh retry)."""
+    mock_entry.add_to_hass(hass)
+    store = await _seeded_store(hass)
+    api = IntratoneAPI(hass, async_get_clientsession(hass), mock_entry, store)
+
+    aiomock.post(
+        f"{API_BASE}{PATH_MOBIPASS_VERIFY}",
+        payload={
+            "state": "ok",
+            "error": 1,
+            "code": "MOBIPASS_OTP_INVALID",
+            "message": "bad code",
+        },
+    )
+    with pytest.raises(IntratoneMobipassError) as exc:
+        await api.mobipass_verify("000000")
+    assert exc.value.code == "MOBIPASS_OTP_INVALID"
+
+
+async def test_mobipass_activate_retries_after_jwt_refresh(
+    hass, mock_entry, aiomock
+) -> None:
+    """A first non-Mobipass failure (expired JWT) triggers one refresh + retry."""
+    mock_entry.add_to_hass(hass)
+    store = await _seeded_store(hass)
+    api = IntratoneAPI(hass, async_get_clientsession(hass), mock_entry, store)
+
+    aiomock.post(
+        f"{API_BASE}{PATH_MOBIPASS_ACTIVATE}",
+        payload={"state": "error", "message": "expired"},
+    )
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={"state": "ok", "data": {"jwt": "newjwt", "id": "3844428"}},
+    )
+    aiomock.post(
+        f"{API_BASE}{PATH_MOBIPASS_ACTIVATE}",
+        payload={"state": "ok", "error": 0},
+    )
+
+    await api.mobipass_activate()
+    assert store.jwt == "newjwt"
+
+
+async def test_mobipass_not_available_is_not_retried(
+    hass, mock_entry, aiomock
+) -> None:
+    """A genuine MOBIPASS_* rejection is raised immediately, not retried."""
+    mock_entry.add_to_hass(hass)
+    store = await _seeded_store(hass)
+    api = IntratoneAPI(hass, async_get_clientsession(hass), mock_entry, store)
+
+    aiomock.post(
+        f"{API_BASE}{PATH_MOBIPASS_ACTIVATE}",
+        payload={"state": "error", "code": "MOBIPASS_NOT_AVAILABLE"},
+    )
+    with pytest.raises(IntratoneMobipassError) as exc:
+        await api.mobipass_activate()
+    assert exc.value.code == "MOBIPASS_NOT_AVAILABLE"
 
 
 async def test_register_with_invite_returns_data(hass, aiomock) -> None:

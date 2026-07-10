@@ -5,14 +5,85 @@ from __future__ import annotations
 import pytest
 from aioresponses import aioresponses
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import issue_registry as ir
 
-from custom_components.intratone.const import API_BASE, DOMAIN
+from custom_components.intratone.const import API_BASE, DOMAIN, PATH_ACCESS_LIST
 
 
 @pytest.fixture
 def aiomock():
     with aioresponses() as m:
         yield m
+
+
+async def test_mobipass_repair_created_when_transfer_needed(
+    hass, mock_entry, mock_fcm_client, mock_call_manager, aiomock
+) -> None:
+    """auth/device reporting compatible-but-not-here raises the transfer repair."""
+    mock_entry.add_to_hass(hass)
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={
+            "state": "ok",
+            "data": {
+                "jwt": "j",
+                "id": "3844428",
+                "mobipass_compatible": "1",
+                "mobipass": "0",
+            },
+        },
+        repeat=True,
+    )
+    aiomock.get(
+        f"{API_BASE}{PATH_ACCESS_LIST}",
+        payload={"state": "ok", "data": {"list": []}},
+        repeat=True,
+    )
+
+    assert await hass.config_entries.async_setup(mock_entry.entry_id)
+    await hass.async_block_till_done()
+
+    issue = ir.async_get(hass).async_get_issue(
+        DOMAIN, f"mobipass_transfer_{mock_entry.entry_id}"
+    )
+    assert issue is not None
+    assert issue.is_fixable
+    assert issue.data == {"entry_id": mock_entry.entry_id}
+
+
+async def test_mobipass_repair_absent_when_key_held_here(
+    hass, mock_entry, mock_fcm_client, mock_call_manager, aiomock
+) -> None:
+    """When the key is already active on this device, no repair is raised."""
+    mock_entry.add_to_hass(hass)
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={
+            "state": "ok",
+            "data": {
+                "jwt": "j",
+                "id": "3844428",
+                "mobipass_compatible": "1",
+                "mobipass": "1",
+            },
+        },
+        repeat=True,
+    )
+    aiomock.get(
+        f"{API_BASE}{PATH_ACCESS_LIST}",
+        payload={"state": "ok", "data": {"list": []}},
+        repeat=True,
+    )
+
+    assert await hass.config_entries.async_setup(mock_entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert (
+        ir.async_get(hass).async_get_issue(
+            DOMAIN, f"mobipass_transfer_{mock_entry.entry_id}"
+        )
+        is None
+    )
 
 
 async def test_full_setup_push_open_door(

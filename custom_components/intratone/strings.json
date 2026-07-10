@@ -37,6 +37,17 @@
         "data": {
           "invite_code": "Invitation code"
         }
+      },
+      "reconfigure": {
+        "title": "Transfer the CléMobil to Home Assistant",
+        "description": "Since mid-2026, Intratone lets only one device per phone number open doors remotely (the “CléMobil” / Mobipass key). Continuing sends a one-time code by SMS to your phone number and moves the key to Home Assistant.\n\n**Remote opening will stop working in the official Intratone app on your phone** until you transfer it back there. Doorbell calls and opening a door during a call are unaffected."
+      },
+      "mobipass_otp": {
+        "title": "Enter the transfer code",
+        "description": "Type the code Intratone just texted you to finish moving the CléMobil to Home Assistant.",
+        "data": {
+          "code": "Transfer code"
+        }
       }
     },
     "error": {
@@ -46,11 +57,50 @@
       "sms_failed": "Intratone refused to send an SMS to this phone. Check the number and country code.",
       "fcm_failed": "Could not register with Firebase Cloud Messaging. Check your internet connection.",
       "auth_failed": "Could not authenticate with Intratone after registration.",
+      "mobipass_code_invalid": "The transfer code was rejected. Check it and try again.",
+      "mobipass_code_blocked": "Too many attempts — the transfer code is temporarily blocked. Try again later.",
+      "mobipass_not_available": "The CléMobil feature isn’t available for your account.",
+      "mobipass_failed": "The CléMobil transfer failed. Check the logs and try again.",
       "unknown": "Unexpected error. Check the logs."
     },
     "abort": {
       "already_configured": "This Intratone device is already configured.",
-      "reauth_successful": "Re-pairing successful."
+      "reauth_successful": "Re-pairing successful.",
+      "reconfigure_successful": "Reconfiguration successful.",
+      "mobipass_transfer_successful": "The CléMobil is now active on Home Assistant. Your doors should appear shortly.",
+      "mobipass_already_active": "The CléMobil is already active on Home Assistant — nothing to transfer.",
+      "mobipass_not_eligible": "Your account doesn’t use the CléMobil single-owner scheme, so there’s nothing to transfer.",
+      "not_loaded": "The Intratone integration must be loaded before transferring the CléMobil."
+    }
+  },
+  "issues": {
+    "mobipass_transfer": {
+      "title": "Transfer the CléMobil to Home Assistant",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Transfer the CléMobil to Home Assistant",
+            "description": "Intratone lets only one device per phone number open doors remotely (the “CléMobil” / Mobipass key), and it is currently held by another device — so your remote-open doors don’t appear in Home Assistant.\n\nContinuing sends a one-time code by SMS to your phone number and moves the key here. **Remote opening will stop working in the official Intratone app on your phone** until you transfer it back. Doorbell calls and opening a door during a call are unaffected."
+          },
+          "otp": {
+            "title": "Enter the transfer code",
+            "description": "Type the code Intratone just texted you to finish moving the CléMobil to Home Assistant.",
+            "data": {
+              "code": "Transfer code"
+            }
+          }
+        },
+        "error": {
+          "mobipass_code_invalid": "The transfer code was rejected. Check it and try again.",
+          "mobipass_code_blocked": "Too many attempts — the transfer code is temporarily blocked. Try again later.",
+          "mobipass_not_available": "The CléMobil feature isn’t available for your account.",
+          "mobipass_failed": "The CléMobil transfer failed. Check the logs and try again.",
+          "unknown": "Unexpected error. Check the logs."
+        },
+        "abort": {
+          "not_loaded": "The Intratone integration must be loaded before transferring the CléMobil."
+        }
+      }
     }
   },
   "options": {

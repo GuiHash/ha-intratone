@@ -16,6 +16,9 @@ from custom_components.intratone.const import (
     CONF_NUMERIC_ID,
     CONF_TEL,
     DOMAIN,
+    PATH_ACCESS_LIST,
+    PATH_MOBIPASS_ACTIVATE,
+    PATH_MOBIPASS_VERIFY,
 )
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -199,6 +202,103 @@ async def test_reauth_silent_refresh_succeeds(
     # JWT was refreshed into the Store, not into entry.data.
     assert CONF_JWT not in mock_entry.data
     assert mock_entry.runtime_data.store.jwt == "renewed.jwt"
+
+
+async def _setup_loaded_entry(hass, mock_entry, aiomock, *, needs_transfer=True) -> None:
+    """Load an entry so its runtime_data.api is available to the flow.
+
+    The auth/device flags decide whether the reconfigure precheck offers the
+    transfer (`needs_transfer` → compatible but key held elsewhere) or aborts.
+    """
+    mobipass = "0" if needs_transfer else "1"
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={
+            "state": "ok",
+            "data": {
+                "jwt": "j",
+                "id": "3844428",
+                "mobipass_compatible": "1",
+                "mobipass": mobipass,
+            },
+        },
+        repeat=True,
+    )
+    aiomock.get(
+        f"{API_BASE}{PATH_ACCESS_LIST}",
+        payload={"state": "ok", "data": {"list": []}},
+        repeat=True,
+    )
+    mock_entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(mock_entry.entry_id)
+    await hass.async_block_till_done()
+
+
+async def test_mobipass_transfer_happy_path(
+    hass, mock_entry: MockConfigEntry, aiomock, mock_fcm_client, mock_call_manager
+) -> None:
+    """Reconfigure → activate (SMS) → enter code → transfer succeeds and reloads."""
+    await _setup_loaded_entry(hass, mock_entry, aiomock)
+    aiomock.post(
+        f"{API_BASE}{PATH_MOBIPASS_ACTIVATE}", payload={"state": "ok", "error": 0}
+    )
+    aiomock.post(
+        f"{API_BASE}{PATH_MOBIPASS_VERIFY}", payload={"state": "ok", "error": 0}
+    )
+
+    result = await mock_entry.start_reconfigure_flow(hass)
+    assert result["step_id"] == "reconfigure"
+
+    # Confirm the warning → triggers the SMS → advances to the OTP form.
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["step_id"] == "mobipass_otp"
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"code": "123456"}
+    )
+    await hass.async_block_till_done()
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "mobipass_transfer_successful"
+
+
+async def test_mobipass_transfer_invalid_code_shows_error(
+    hass, mock_entry: MockConfigEntry, aiomock, mock_fcm_client, mock_call_manager
+) -> None:
+    """A rejected OTP keeps the user on the code form with a mapped error."""
+    await _setup_loaded_entry(hass, mock_entry, aiomock)
+    aiomock.post(
+        f"{API_BASE}{PATH_MOBIPASS_ACTIVATE}", payload={"state": "ok", "error": 0}
+    )
+    aiomock.post(
+        f"{API_BASE}{PATH_MOBIPASS_VERIFY}",
+        payload={
+            "state": "ok",
+            "error": 1,
+            "code": "MOBIPASS_OTP_INVALID",
+            "message": "bad",
+        },
+    )
+
+    result = await mock_entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["step_id"] == "mobipass_otp"
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"code": "000000"}
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "mobipass_code_invalid"}
+
+
+async def test_mobipass_reconfigure_aborts_when_key_already_here(
+    hass, mock_entry: MockConfigEntry, aiomock, mock_fcm_client, mock_call_manager
+) -> None:
+    """Reconfigure short-circuits (no SMS) when the key is already on HA."""
+    await _setup_loaded_entry(hass, mock_entry, aiomock, needs_transfer=False)
+
+    result = await mock_entry.start_reconfigure_flow(hass)
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "mobipass_already_active"
 
 
 async def test_reauth_falls_back_to_form_when_silent_refresh_rejected(

@@ -1,9 +1,9 @@
 # Intratone API — Reverse Engineering Notes
 
-Reverse-engineered from APK `com.cogelec.notificationpush` (v4.6.3) and live
-traffic analysis. Goal: build a virtual device (e.g. Home Assistant integration)
-that receives doorbell push notifications, answers SIP calls, and opens doors
-without a physical phone.
+Reverse-engineered from APK `com.cogelec.notificationpush` (v4.6.3, plus the
+`mobipass` transfer flow in §4.7 from v4.6.4) and live traffic analysis. Goal:
+build a virtual device (e.g. Home Assistant integration) that receives doorbell
+push notifications, answers SIP calls, and opens doors without a physical phone.
 
 ---
 
@@ -208,10 +208,31 @@ Response:
     "jwt": "eyJhbGciOiJIUzUxMiJ9...",
     "expire_at": "2026-05-21 10:34:00",
     "expire_gmt_at": "2026-05-21 08:34:00",
-    "openingaccess": 0,
-    "access_refresh": 0
+    "openingaccess": "0",
+    "refreshaccess": "0",
+    "mobipass_compatible": "1",
+    "mobipass": "0"
   } }
 ```
+
+#### CléMobil / Mobipass flags (`data.*`, each a `"1"`/`"0"` string)
+
+Confirmed by decompiling the Android `AuthDevice` parser in v4.6.4
+(`AuthRepositoryImpl` reads them into four booleans). These are the cleanest
+signal for whether the remote-open key is usable on *this* device:
+
+| field                 | meaning                                                                 |
+| --------------------- | ----------------------------------------------------------------------- |
+| `openingaccess`       | remote-open (CléMobil) currently enabled on this device                 |
+| `refreshaccess`       | client should refresh its access list                                   |
+| `mobipass_compatible` | the account/number is eligible for the single-owner **Mobipass** scheme |
+| `mobipass`            | the Mobipass key is currently **active on this device**                 |
+
+Since ~June 2026 only one device per phone number may hold the key. The app
+treats the key as usable when `mobipass_compatible && mobipass`. So
+**`mobipass_compatible == "1"` and `mobipass == "0"`** means the number is
+eligible but the key lives on another device (typically the user's phone) — a
+transfer is required before `GET /api/access` returns anything (see §4.7).
 
 ### 4.3 — `POST /api/calls/{call_id}/answer`  (Open door)
 
@@ -304,19 +325,63 @@ Response: `{ "error": 0, "state": "ok", ... }` → access opened.
 > **mobipass vs Clémobil.** Clémobil used a 2G *FlashCall* (the registered
 > phone dialled a number to open). With 2G being shut down (May 2026), mobipass
 > replaces it with a 4G-data flow (`openmode=data`) opened through the REST API
-> above. The decompiled latest apps contain no "mobipass" string at all, only
-> `clemobil`/`data`/`ble`.
+> above. The iOS v4.4.10 binary had no "mobipass" string (only
+> `clemobil`/`data`/`ble`), but the Android v4.6.4 app added a whole `mobipass`
+> package — the ownership-transfer feature documented in §4.7.
 
 ### 4.6 — Other endpoints
 
 | Method | Path                             | Purpose                                 |
 | ------ | -------------------------------- | --------------------------------------- |
 | GET    | `/api/calls?page=1&limit=20`     | Recent call history                     |
-| POST   | `/api/access/bookmark`           | Bookmark a favourite access             |
+| POST   | `/api/access/bookmark`           | Bookmark favourite accesses (body: `BookmarkRequest[]`) |
+| POST   | `/api/access/refresh`            | Refresh the access list (body: favourite id list) |
 | POST   | `/api/elevator/gohome`           | KONE elevator "go home" call            |
-| POST   | `/api/auth/verify`               | SMS-based registration: send SMS code   |
-| POST   | `/api/auth/register`             | SMS flow: register device (waits for code) |
-| POST   | `/api/auth/validate`             | SMS flow: validate received code        |
+| POST   | `/api/auth/verify`               | Phone pre-check: `verifyUser(tel, tel_ind)` → returns what the backend knows about a number (`total`, `visioactivate`, `openingaccess`, …) before onboarding |
+| POST   | `/api/auth/register`             | SMS flow: register device (triggers the SMS) |
+| POST   | `/api/auth/validate`             | SMS flow: validate the received code    |
+| POST   | `/api/auth/vdwelling`            | Registration via an **ALLOHA** card (`registerDeviceAlloha`) |
+| POST   | `/api/auth/register/idealys`     | Registration for **Idealys** hardware (`registerDeviceIdelays`) |
+
+### 4.7 — CléMobil / Mobipass transfer (single-owner key handover)
+
+Since ~June 2026 the remote-open key ("CléMobil", internally **Mobipass**) can
+be held by only one device per phone number. Moving it to a new device needs a
+one-time code (OTP) sent by SMS. Reverse-engineered from the Android
+`MobipassRemoteDataSource` (Retrofit) in v4.6.4. Both calls are JWT-authed and
+target `sip.intratone.info`.
+
+Detect the need first via the `mobipass_compatible`/`mobipass` flags on
+`/api/auth/device` (§4.2): eligible + not-here ⇒ transfer required.
+
+**Step 1 — request the code (sends the SMS):**
+
+```
+POST /api/mobipass/activate
+Authorization: Bearer <JWT>
+(empty body — the device/number is identified by the JWT)
+```
+
+**Step 2 — verify the code (performs the transfer):**
+
+```
+POST /api/mobipass/otp/verify
+Authorization: Bearer <JWT>
+Content-Type: application/x-www-form-urlencoded
+
+otp=<CODE FROM SMS>
+```
+
+Success (`error == 0`) hands the key to this device and revokes it on the
+previous one; `GET /api/access` then returns the `data`/`ble` accesses again.
+Failures come back as `error != 0` with a `code`:
+
+| `code`                 | meaning                                              |
+| ---------------------- | ---------------------------------------------------- |
+| `MOBIPASS_OTP_INVALID` | wrong/expired code (verify step)                     |
+| `MOBIPASS_CODE_BLOCKED`| too many attempts — temporarily blocked              |
+| `MOBIPASS_NOT_AVAILABLE`| Mobipass not available for this account             |
+| `MOBIPASS_CODE_SMS_SENT`| a code was already sent (activate step)             |
 
 ---
 
@@ -484,3 +549,9 @@ listening on the client side.
 7. **`openingaccess: 0` in the JWT** doesn't prevent opening the door via
    `/calls/{id}/answer`. It controls only the "Clé mobile" badge-style open
    (the `/api/access/open/clemobil` endpoint).
+
+8. **The CléMobil key is single-owner since ~June 2026.** If `GET /api/access`
+   suddenly returns nothing and `/api/auth/device` reports
+   `mobipass_compatible: "1"`, `mobipass: "0"`, the key was claimed by another
+   device (usually the user's phone). Recover it with the transfer flow in §4.7
+   — this revokes remote opening in the official app on that other device.
