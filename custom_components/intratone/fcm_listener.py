@@ -18,13 +18,16 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import issue_registry as ir
 
 from .const import (
     DEVICE_BUNDLE_ID,
+    DOMAIN,
     FCM_API_KEY,
     FCM_APP_ID,
     FCM_PROJECT_ID,
     FCM_SENDER_ID,
+    FCM_TOKEN_ISSUE_PREFIX,
 )
 from .store import IntratoneCredentialsStore
 
@@ -181,9 +184,10 @@ class FcmListener:
             credentials=creds,
             credentials_updated_callback=_on_creds_updated,
         )
-        await self._client.checkin_or_register()
+        token = await self._client.checkin_or_register()
         await self._client.start()
         self._set_connected(True)
+        self._check_token_registration(token)
 
         # Poll the client's run_state. The library's _listen task swallows
         # connection errors and after 3 sequential errors calls _terminate()
@@ -204,6 +208,40 @@ class FcmListener:
                     )
         finally:
             self._set_connected(False)
+
+    @callback
+    def _check_token_registration(self, token: str | None) -> None:
+        """Raise a repair when the live FCM token no longer matches Intratone's.
+
+        Intratone only records our push token (`id_fcm`) during onboarding /
+        re-pair. `firebase-messaging` keeps the token stable while its
+        credentials stay valid, but if Google ever rotates it, Intratone keeps
+        pushing to the dead token: doorbell notifications stop silently while
+        the MCS socket (and the connectivity sensor) stays up.
+
+        `store.fcm_token` is the last token we registered — a mismatch means a
+        re-pair is required. We deliberately do NOT overwrite it here, so the
+        mismatch keeps signalling until the re-pair actually re-registers the
+        new token (`repairs.FcmTokenStaleRepairFlow`).
+        """
+        issue_id = f"{FCM_TOKEN_ISSUE_PREFIX}{self._entry.entry_id}"
+        registered = self._store.fcm_token
+        if registered and token and token != registered:
+            _LOGGER.warning(
+                "FCM token rotated since pairing — Intratone still targets the "
+                "old token; push notifications need a re-pair to be restored"
+            )
+            ir.async_create_issue(
+                self._hass,
+                DOMAIN,
+                issue_id,
+                is_fixable=True,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key="fcm_token_stale",
+                data={"entry_id": self._entry.entry_id},
+            )
+        else:
+            ir.async_delete_issue(self._hass, DOMAIN, issue_id)
 
     @callback
     def _persist_creds(self, new_creds: dict) -> None:

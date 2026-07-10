@@ -52,6 +52,11 @@ DEFAULT_INDICATIF: Final = "33"
 
 JWT_REFRESH_INTERVAL_HOURS: Final = 12
 
+# Repair issue raised when the live FCM push token no longer matches the one
+# registered with Intratone (Google rotated it): pushes silently stop until a
+# re-pair re-sends `id_fcm`. Keyed per entry: f"{prefix}{entry.entry_id}".
+FCM_TOKEN_ISSUE_PREFIX: Final = "fcm_token_stale_"
+
 CONF_VIDEO_ENABLED: Final = "video_enabled"
 CONF_GO2RTC_URL: Final = "go2rtc_url"
 DEFAULT_GO2RTC_URL: Final = "rtsp://127.0.0.1:8554"

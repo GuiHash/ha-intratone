@@ -181,3 +181,107 @@ async def test_mobipass_repair_fix_flow_invalid_code(
     assert data["errors"] == {"base": "mobipass_code_invalid"}
     # Issue is still present until the transfer actually succeeds.
     assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is not None
+
+
+async def _setup_entry_with_stale_token(hass, mock_entry, mock_fcm_client, aiomock):
+    """Load an entry whose live token differs from the stored one → repair.
+
+    Returns the expected issue_id.
+    """
+    from unittest.mock import AsyncMock
+
+    # Store keeps "fake-fcm-token"; the client reports a rotated token.
+    mock_fcm_client.instance.checkin_or_register = AsyncMock(
+        return_value="rotated-token"
+    )
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={"state": "ok", "data": {"jwt": "j", "id": "3844428"}},
+        repeat=True,
+    )
+    aiomock.get(
+        f"{API_BASE}{PATH_ACCESS_LIST}",
+        payload={"state": "ok", "data": {"list": []}},
+        repeat=True,
+    )
+    mock_entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(mock_entry.entry_id)
+    await hass.async_block_till_done()
+    return f"fcm_token_stale_{mock_entry.entry_id}"
+
+
+async def test_fcm_token_stale_fix_flow_happy_path(
+    hass,
+    hass_client,
+    mock_entry: MockConfigEntry,
+    mock_fcm_client,
+    mock_call_manager,
+    aiomock,
+) -> None:
+    """Re-pair via the push-token repair: invite code re-registers the token."""
+    assert await async_setup_component(hass, "repairs", {})
+    issue_id = await _setup_entry_with_stale_token(
+        hass, mock_entry, mock_fcm_client, aiomock
+    )
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is not None
+
+    aiomock.post(
+        f"{API_BASE}api/auth/registercodes",
+        payload={"state": "ok", "data": {"id": "3844428", "tel": "0671124546"}},
+    )
+
+    client = await hass_client()
+    resp = await client.post(
+        "/api/repairs/issues/fix",
+        json={"handler": DOMAIN, "issue_id": issue_id},
+    )
+    assert resp.status == 200
+    data = await resp.json()
+    flow_id = data["flow_id"]
+    assert data["step_id"] == "confirm"
+
+    resp = await client.post(
+        f"/api/repairs/issues/fix/{flow_id}", json={"invite_code": "448789-1206"}
+    )
+    data = await resp.json()
+    assert data["type"] == "create_entry"
+
+    await hass.async_block_till_done()
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is None
+    # The rotated token is now recorded as the one registered with Intratone.
+    assert mock_entry.runtime_data.store.fcm_token == "rotated-token"
+
+
+async def test_fcm_token_stale_fix_flow_invalid_code(
+    hass,
+    hass_client,
+    mock_entry: MockConfigEntry,
+    mock_fcm_client,
+    mock_call_manager,
+    aiomock,
+) -> None:
+    """A rejected invite code keeps the form up and leaves the issue in place."""
+    assert await async_setup_component(hass, "repairs", {})
+    issue_id = await _setup_entry_with_stale_token(
+        hass, mock_entry, mock_fcm_client, aiomock
+    )
+
+    aiomock.post(
+        f"{API_BASE}api/auth/registercodes",
+        payload={"state": "error", "message": "bad code"},
+    )
+
+    client = await hass_client()
+    resp = await client.post(
+        "/api/repairs/issues/fix",
+        json={"handler": DOMAIN, "issue_id": issue_id},
+    )
+    flow_id = (await resp.json())["flow_id"]
+
+    resp = await client.post(
+        f"/api/repairs/issues/fix/{flow_id}", json={"invite_code": "448789-1206"}
+    )
+    data = await resp.json()
+    assert data["type"] == "form"
+    assert data["errors"] == {"base": "invalid_code"}
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is not None
