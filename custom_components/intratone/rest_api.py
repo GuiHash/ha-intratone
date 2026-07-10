@@ -700,6 +700,46 @@ async def register_with_invite(
     return data
 
 
+async def verify_user(
+    session: aiohttp.ClientSession,
+    *,
+    tel: str,
+    indicatif: str,
+) -> dict[str, Any]:
+    """POST /api/auth/verify — the app's first onboarding call (issue #61).
+
+    The official app hits this the moment a phone number is entered, *before*
+    `register`. Body is just `tel` + `tel_indicatif` (no JWT, no device id). The
+    `data` block carries account-level flags — `compatible`, `openingaccess`,
+    `inuse`, `total` — i.e. whether the account is CléMobil/Mobipass-eligible and
+    whether the key is currently held by a device. Mirrors `AuthApi.verifyUser`.
+
+    Returns the `data` block (empty on any failure — this call is best-effort:
+    we replicate the app's sequence and surface the account flags for diagnosis,
+    but a failure here must not block onboarding).
+    """
+    form = {"tel": tel, "tel_indicatif": indicatif}
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/json",
+        "User-Agent": APP_USER_AGENT,
+    }
+    try:
+        async with session.post(
+            API_BASE + "api/auth/verify",
+            data=form,
+            headers=headers,
+            timeout=REQUEST_TIMEOUT,
+        ) as resp:
+            body = await resp.json(content_type=None)
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+        # ValueError covers a non-JSON/empty body (e.g. an HTML 5xx page).
+        return {}
+    if not isinstance(body, dict):
+        return {}
+    return body.get("data") or {}
+
+
 async def register_phone_for_sms(
     session: aiohttp.ClientSession,
     *,

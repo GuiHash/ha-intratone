@@ -35,6 +35,7 @@ from .rest_api import (
     register_phone_for_sms,
     register_with_invite,
     validate_sms_code,
+    verify_user,
 )
 from .store import IntratoneCredentialsStore
 
@@ -145,6 +146,15 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
                 device_id = uuid.uuid4().hex[:16]
                 try:
                     session = async_get_clientsession(self.hass)
+                    # Mirror the official app, which calls api/auth/verify first
+                    # (before register). Best-effort: it surfaces the account-level
+                    # CléMobil flags (compatible/openingaccess/inuse/total) for
+                    # diagnosis and matches the app's onboarding sequence, but must
+                    # not block pairing if it fails. See issue #61.
+                    verify_data = await verify_user(
+                        session, tel=phone, indicatif=indicatif
+                    )
+                    _LOGGER.debug("auth/verify account flags: %s", verify_data)
                     fcm_token, fcm_creds = await fcm_register_standalone(None)
                     await register_phone_for_sms(
                         session,
