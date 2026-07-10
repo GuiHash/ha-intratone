@@ -23,6 +23,7 @@ from custom_components.intratone.rest_api import (
     IntratoneMobipassError,
     authenticate_for_invite,
     register_with_invite,
+    verify_user,
 )
 from custom_components.intratone.store import IntratoneCredentialsStore
 
@@ -431,3 +432,29 @@ async def test_authenticate_for_invite_tries_normalized_phone(hass, aiomock) -> 
         async_get_clientsession(hass), tel="0612345678", device_id="ha-test"
     )
     assert data["jwt"] == "ok"
+
+
+async def test_verify_user_returns_account_flags(hass, aiomock) -> None:
+    """api/auth/verify surfaces the account-level CléMobil flags."""
+    aiomock.post(
+        f"{API_BASE}api/auth/verify",
+        payload={
+            "state": "ok",
+            "data": {"compatible": "1", "openingaccess": "1", "inuse": "0"},
+        },
+    )
+    data = await verify_user(
+        async_get_clientsession(hass), tel="612345678", indicatif="33"
+    )
+    assert data["compatible"] == "1"
+    assert data["openingaccess"] == "1"
+
+
+async def test_verify_user_best_effort_on_failure(hass, aiomock) -> None:
+    """verify is best-effort: a server error must yield {} (never raise), so it
+    can't block onboarding."""
+    aiomock.post(f"{API_BASE}api/auth/verify", status=500)
+    data = await verify_user(
+        async_get_clientsession(hass), tel="612345678", indicatif="33"
+    )
+    assert data == {}

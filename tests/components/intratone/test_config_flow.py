@@ -122,6 +122,18 @@ async def test_sms_happy_path_creates_entry(
     hass, aiomock, patched_fcm_register
 ) -> None:
     aiomock.post(
+        f"{API_BASE}api/auth/verify",
+        payload={
+            "state": "ok",
+            "data": {
+                "compatible": "1",
+                "openingaccess": "1",
+                "inuse": "0",
+                "total": 1,
+            },
+        },
+    )
+    aiomock.post(
         f"{API_BASE}api/auth/register",
         payload={"state": "ok", "data": {"id": "3844428"}},
     )
@@ -159,6 +171,18 @@ async def test_sms_happy_path_creates_entry(
 async def test_sms_invalid_code_shows_error(
     hass, aiomock, patched_fcm_register
 ) -> None:
+    aiomock.post(
+        f"{API_BASE}api/auth/verify",
+        payload={
+            "state": "ok",
+            "data": {
+                "compatible": "1",
+                "openingaccess": "1",
+                "inuse": "0",
+                "total": 1,
+            },
+        },
+    )
     aiomock.post(
         f"{API_BASE}api/auth/register",
         payload={"state": "ok", "data": {"id": "3844428"}},
