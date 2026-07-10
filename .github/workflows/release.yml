@@ -12,6 +12,25 @@ jobs:
   release-please:
     runs-on: ubuntu-24.04
     steps:
-      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 #v5
+      - id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 #v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      # The steps below only run when release-please cut a new GitHub release.
+      # They package the integration and attach it as a release asset so HACS
+      # can install from the zip (which also feeds GitHub's download_count).
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 #v4.3.1
+        if: ${{ steps.release.outputs.release_created }}
+
+      - name: Build integration zip
+        if: ${{ steps.release.outputs.release_created }}
+        run: |
+          cd custom_components/intratone
+          zip -r "$GITHUB_WORKSPACE/ha-intratone.zip" . -x '*__pycache__*' '*.pyc'
+
+      - name: Attach zip to release
+        if: ${{ steps.release.outputs.release_created }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ steps.release.outputs.tag_name }}" ha-intratone.zip --clobber
