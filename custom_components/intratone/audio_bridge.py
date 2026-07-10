@@ -35,6 +35,7 @@ import socket
 import struct
 import tempfile
 import time
+from dataclasses import dataclass
 from typing import Callable
 
 from .stun import build_binding_response, is_stun_binding_request
@@ -307,8 +308,14 @@ class _RtpProtocol(asyncio.DatagramProtocol):
                 data[:64].hex(),
             )
 
-        # Every 50 packets: condensed per-packet snapshot.
-        if self.packets_received % 50 == 0 and self.packets_received > 0:
+        # Every 50 packets: condensed per-packet snapshot. The min/max/unique
+        # sampling scans the whole payload — only pay for it when the DEBUG
+        # log line it feeds is actually emitted.
+        if (
+            self.packets_received % 50 == 0
+            and self.packets_received > 0
+            and _LOGGER.isEnabledFor(logging.DEBUG)
+        ):
             sample_min = min(payload)
             sample_max = max(payload)
             unique = len(set(payload))
@@ -413,6 +420,11 @@ class _VideoRtpProtocol(asyncio.DatagramProtocol):
         self.keyframe_received = False
         self.first_rtp_at: float | None = None
         self.first_keyframe_at: float | None = None
+        # Event mirrors of the two milestones above, so the PLI loop can wait
+        # on them instead of polling — the first PLI (keyframe request) goes
+        # out the instant the first RTP packet reveals the media SSRC.
+        self.first_rtp_event = asyncio.Event()
+        self.keyframe_event = asyncio.Event()
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         self._transport = transport  # type: ignore[assignment]
@@ -486,6 +498,7 @@ class _VideoRtpProtocol(asyncio.DatagramProtocol):
         if not self._first_rtp_logged:
             self._first_rtp_logged = True
             self.first_rtp_at = time.monotonic()
+            self.first_rtp_event.set()
             _LOGGER.debug(
                 "VIDEO_RX_FIRST: total=%d V=2 PT=%d M=%d ssrc=0x%08x src=%s:%d "
                 "first48=%s",
@@ -498,6 +511,7 @@ class _VideoRtpProtocol(asyncio.DatagramProtocol):
         # sources). Stop the PLI loop once we observe the first I-frame.
         if not self.keyframe_received and _is_vp8_keyframe(data[12:]):
             self.keyframe_received = True
+            self.keyframe_event.set()
             self.first_keyframe_at = time.monotonic()
             elapsed_ms = (
                 (self.first_keyframe_at - self._start_time) * 1000
@@ -613,6 +627,19 @@ class _VideoRtcpProtocol(asyncio.DatagramProtocol):
             self._transport = None
 
 
+@dataclass
+class _PrewarmedFfmpeg:
+    """ffmpeg spawned by `prewarm()` before the 200 OK, waiting to be adopted
+    by `start()` — or killed if the negotiation doesn't match / call dies."""
+
+    video: bool
+    process: asyncio.subprocess.Process
+    stderr_task: asyncio.Task
+    push_ready: asyncio.Event
+    video_port: int | None
+    sdp_path: str | None
+
+
 def _pick_free_udp_port() -> int:
     """Bind UDP(127.0.0.1, 0), return the assigned port, release.
 
@@ -669,6 +696,10 @@ class AudioBridge:
         # budget without seeing a keyframe — CallManager wires this to a SIP
         # re-INVITE that drops the dead video media line.
         self._on_video_failure = None
+        # In-flight `prewarm()` spawn, if any — consumed (or discarded) by
+        # `start()`, discarded by `stop()` / `cancel_prewarm()`.
+        self._prewarm_task: asyncio.Task[_PrewarmedFfmpeg] | None = None
+        self._prewarm_cleanup_task: asyncio.Task | None = None
 
     @property
     def rtsp_url(self) -> str:
@@ -685,6 +716,111 @@ class AudioBridge:
     @property
     def packets_sent(self) -> int:
         return self._rtp.packets_sent if self._rtp else 0
+
+    def prewarm(self, video: bool) -> None:
+        """Spawn ffmpeg while the SIP dialog is still negotiating.
+
+        ffmpeg's inputs are local-only (stdin + loopback SDP) — nothing from
+        the 200 OK is needed to start it, so its ~100-400 ms init cost can
+        overlap the INVITE→200 OK round-trip instead of adding to it.
+        `start()` adopts the process when the negotiated media matches and
+        discards it otherwise (e.g. the server rejected our m=video offer).
+
+        Only the video variant is safe to prewarm: with an SDP input ffmpeg
+        idles until RTP arrives, so an unused prewarm has zero side effects.
+        The lavfi placeholder variant would ANNOUNCE to go2rtc immediately,
+        publishing a stream before the call even exists.
+        """
+        if self.is_running or self._prewarm_task is not None:
+            return
+        self._prewarm_task = asyncio.create_task(self._do_prewarm(video))
+
+    async def _do_prewarm(self, video: bool) -> _PrewarmedFfmpeg:
+        video_port: int | None = None
+        sdp_path: str | None = None
+        if video:
+            video_port = _pick_free_udp_port()
+            sdp_path = self._write_video_sdp(video_port)
+        push_ready = asyncio.Event()
+        try:
+            process = await self._spawn_ffmpeg(video_sdp_path=sdp_path)
+        except Exception:
+            if sdp_path is not None:
+                try:
+                    os.unlink(sdp_path)
+                except OSError:
+                    pass
+            raise
+        stderr_task = asyncio.create_task(self._drain_stderr(process, push_ready))
+        _LOGGER.debug("FFMPEG_PREWARM: spawned (video=%s)", video)
+        return _PrewarmedFfmpeg(
+            video=video,
+            process=process,
+            stderr_task=stderr_task,
+            push_ready=push_ready,
+            video_port=video_port,
+            sdp_path=sdp_path,
+        )
+
+    async def _consume_prewarm(self) -> _PrewarmedFfmpeg | None:
+        task = self._prewarm_task
+        self._prewarm_task = None
+        if task is None:
+            return None
+        try:
+            return await task
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning(
+                "FFMPEG_PREWARM: spawn failed — falling back to on-demand spawn",
+                exc_info=True,
+            )
+            return None
+
+    def cancel_prewarm(self) -> None:
+        """Discard any unadopted prewarm from sync context (SIP callbacks).
+
+        Used when the call dies before the 200 OK: the bridge itself is only
+        stopped after the post-BYE grace window (60 s), and the prewarmed
+        ffmpeg shouldn't idle that long. The async cleanup is tracked so
+        `stop()` can await it."""
+        task = self._prewarm_task
+        self._prewarm_task = None
+        if task is None:
+            return
+        self._prewarm_cleanup_task = asyncio.create_task(
+            self._cleanup_prewarm(task)
+        )
+
+    async def _cleanup_prewarm(self, task: asyncio.Task[_PrewarmedFfmpeg]) -> None:
+        try:
+            prewarmed = await task
+        except Exception:  # noqa: BLE001 — spawn failure: nothing to reap
+            return
+        await self._discard_prewarm(prewarmed)
+
+    async def _abort_prewarm(self) -> None:
+        prewarmed = await self._consume_prewarm()
+        if prewarmed is not None:
+            await self._discard_prewarm(prewarmed)
+        cleanup = self._prewarm_cleanup_task
+        self._prewarm_cleanup_task = None
+        if cleanup is not None and not cleanup.done():
+            await cleanup
+
+    async def _discard_prewarm(self, prewarmed: _PrewarmedFfmpeg) -> None:
+        if prewarmed.process.returncode is None:
+            try:
+                prewarmed.process.kill()
+                await prewarmed.process.wait()
+            except ProcessLookupError:
+                pass
+        if not prewarmed.stderr_task.done():
+            prewarmed.stderr_task.cancel()
+        if prewarmed.sdp_path is not None:
+            try:
+                os.unlink(prewarmed.sdp_path)
+            except OSError:
+                pass
 
     async def start(
         self,
@@ -724,13 +860,42 @@ class AudioBridge:
         )
 
         ffmpeg_video_port: int | None = None
-        if video_enabled:
-            ffmpeg_video_port = _pick_free_udp_port()
-            self._video_sdp_path = self._write_video_sdp(ffmpeg_video_port)
-
-        self._ffmpeg_push_ready = asyncio.Event()
-        self._process = await self._spawn_ffmpeg(video_sdp_path=self._video_sdp_path)
-        self._stderr_task = asyncio.create_task(self._drain_stderr(self._process))
+        prewarmed = await self._consume_prewarm()
+        if (
+            prewarmed is not None
+            and prewarmed.video == video_enabled
+            and prewarmed.process.returncode is None
+        ):
+            # ffmpeg was spawned while the SIP dialog was still negotiating —
+            # its startup cost already overlapped the INVITE→200 OK round-trip.
+            self._process = prewarmed.process
+            self._stderr_task = prewarmed.stderr_task
+            self._ffmpeg_push_ready = prewarmed.push_ready
+            self._video_sdp_path = prewarmed.sdp_path
+            ffmpeg_video_port = prewarmed.video_port
+            _LOGGER.info(
+                "FFMPEG_PREWARM: adopting ffmpeg spawned during SIP negotiation"
+            )
+        else:
+            if prewarmed is not None:
+                _LOGGER.info(
+                    "FFMPEG_PREWARM: discarding (prewarm video=%s, negotiated "
+                    "video=%s, rc=%s)",
+                    prewarmed.video,
+                    video_enabled,
+                    prewarmed.process.returncode,
+                )
+                await self._discard_prewarm(prewarmed)
+            if video_enabled:
+                ffmpeg_video_port = _pick_free_udp_port()
+                self._video_sdp_path = self._write_video_sdp(ffmpeg_video_port)
+            self._ffmpeg_push_ready = asyncio.Event()
+            self._process = await self._spawn_ffmpeg(
+                video_sdp_path=self._video_sdp_path
+            )
+            self._stderr_task = asyncio.create_task(
+                self._drain_stderr(self._process, self._ffmpeg_push_ready)
+            )
         assert self._process.stdin is not None
         ffmpeg_stdin = self._process.stdin
 
@@ -889,13 +1054,14 @@ class AudioBridge:
             # Wait for the first RTP packet so we know the media SSRC. Without
             # it our PLI has nothing to reference and the gateway would ignore
             # it. Cap the wait — if no RTP comes in, the call is dead anyway.
-            deadline = time.monotonic() + _PLI_WAIT_FIRST_RTP_S
-            while (
-                self._video_rtp is not None
-                and not self._video_rtp.ssrc_stats
-                and time.monotonic() < deadline
-            ):
-                await asyncio.sleep(0.05)
+            if self._video_rtp is not None and not self._video_rtp.ssrc_stats:
+                try:
+                    await asyncio.wait_for(
+                        self._video_rtp.first_rtp_event.wait(),
+                        timeout=_PLI_WAIT_FIRST_RTP_S,
+                    )
+                except asyncio.TimeoutError:
+                    pass
             if self._video_rtp is None or not self._video_rtp.ssrc_stats:
                 _LOGGER.debug("PLI_LOOP: no VP8 RTP within %ss — giving up",
                               _PLI_WAIT_FIRST_RTP_S)
@@ -927,7 +1093,27 @@ class AudioBridge:
                         "PLI_LOOP: first PLI sent to %s for media_ssrc=0x%08x",
                         self._video_rtcp._remote_addr, media_ssrc,
                     )
-                await asyncio.sleep(_PLI_INTERVAL_S)
+                # Wake up as soon as the keyframe lands instead of sleeping
+                # the full interval — the next iteration logs it and breaks.
+                try:
+                    await asyncio.wait_for(
+                        self._video_rtp.keyframe_event.wait(),
+                        timeout=_PLI_INTERVAL_S,
+                    )
+                except asyncio.TimeoutError:
+                    pass
+
+            # A keyframe that arrived during the final wait must not trigger
+            # the audio-only downgrade — the video is fine.
+            if (
+                not got_keyframe
+                and self._video_rtp is not None
+                and self._video_rtp.keyframe_received
+            ):
+                got_keyframe = True
+                _LOGGER.info(
+                    "PLI_LOOP: keyframe arrived after %d PLI(s)", _PLI_MAX_SENDS
+                )
 
             if not got_keyframe:
                 _LOGGER.warning(
@@ -954,6 +1140,7 @@ class AudioBridge:
                 # Reset the gate — datagram_received will drop P-frames until
                 # the gateway responds with the fresh keyframe.
                 self._video_rtp.keyframe_received = False
+                self._video_rtp.keyframe_event.clear()
                 self._video_rtcp.send_pli(media_ssrc)
                 _LOGGER.debug(
                     "PLI_LOOP: periodic PLI sent (media_ssrc=0x%08x) — "
@@ -963,18 +1150,18 @@ class AudioBridge:
                 # already very conservative. If no keyframe after 1 s the
                 # gateway is not honouring RTCP feedback — re-open the gate
                 # immediately rather than blacking out for the full interval.
-                timeout = time.monotonic() + 1.0
-                while (
-                    self._video_rtp is not None
-                    and not self._video_rtp.keyframe_received
-                    and time.monotonic() < timeout
-                ):
-                    await asyncio.sleep(0.05)
+                try:
+                    await asyncio.wait_for(
+                        self._video_rtp.keyframe_event.wait(), timeout=1.0
+                    )
+                except asyncio.TimeoutError:
+                    pass
                 if self._video_rtp is not None and self._video_rtp.keyframe_received:
                     _LOGGER.debug("PLI_LOOP: periodic keyframe received — resuming")
                 else:
                     if self._video_rtp is not None:
                         self._video_rtp.keyframe_received = True
+                        self._video_rtp.keyframe_event.set()
                     _LOGGER.warning(
                         "PLI_LOOP: periodic keyframe not received within 1s — "
                         "re-opening gate to avoid extended blackout"
@@ -1017,6 +1204,9 @@ class AudioBridge:
 
     async def stop(self) -> None:
         """Tear down ffmpeg + RTP socket(s) + keepalive. Always safe."""
+        # A prewarmed ffmpeg that start() never adopted (call died before the
+        # 200 OK) must not outlive the call.
+        await self._abort_prewarm()
         rtp = self._rtp
         if rtp is not None:
             rtp.dump_summary()
@@ -1277,17 +1467,21 @@ class AudioBridge:
         except asyncio.CancelledError:
             raise
 
-    async def _drain_stderr(self, process: asyncio.subprocess.Process) -> None:
+    async def _drain_stderr(
+        self,
+        process: asyncio.subprocess.Process,
+        ready_event: asyncio.Event | None,
+    ) -> None:
         """Read ffmpeg's stderr line by line and log it. Without this the pipe
         eventually fills (~64 KB) and ffmpeg blocks on write, stalling audio.
 
         Also watches for the `Output #0, rtsp, ...` marker that confirms the
         RTSP ANNOUNCE+RECORD handshake against go2rtc succeeded — once seen,
-        signals `_ffmpeg_push_ready` so `start()` can return a URL HomeKit
-        can actually consume."""
+        signals `ready_event` so `start()` can return a URL HomeKit can
+        actually consume. Passed explicitly (not read from self) because a
+        prewarmed ffmpeg drains stderr before `start()` adopts its event."""
         if process.stderr is None:
             return
-        ready_event = self._ffmpeg_push_ready
         # ffmpeg emits a lot of noise at -loglevel info (frame= progress, codec
         # init, mapping). Real problems include words like "Error", "Invalid",
         # "Failed", "Broken pipe". Forward those at WARNING so prod users see
