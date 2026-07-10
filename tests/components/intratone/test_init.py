@@ -86,6 +86,57 @@ async def test_mobipass_repair_absent_when_key_held_here(
     )
 
 
+async def test_fcm_token_stale_repair_created_on_rotation(
+    hass, mock_entry, mock_fcm_client, mock_call_manager, aiomock
+) -> None:
+    """A live FCM token that no longer matches the registered one raises a repair."""
+    from unittest.mock import AsyncMock
+
+    # Store holds "fake-fcm-token" (migrated from entry.data); simulate Google
+    # rotating the token so checkin_or_register returns a different value.
+    mock_fcm_client.instance.checkin_or_register = AsyncMock(
+        return_value="rotated-token"
+    )
+    mock_entry.add_to_hass(hass)
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={"state": "ok", "data": {"jwt": "fake.jwt.token", "id": "3844428"}},
+        repeat=True,
+    )
+
+    assert await hass.config_entries.async_setup(mock_entry.entry_id)
+    await hass.async_block_till_done()
+
+    issue = ir.async_get(hass).async_get_issue(
+        DOMAIN, f"fcm_token_stale_{mock_entry.entry_id}"
+    )
+    assert issue is not None
+    assert issue.is_fixable
+    assert issue.data == {"entry_id": mock_entry.entry_id}
+
+
+async def test_no_fcm_token_stale_repair_when_token_matches(
+    hass, mock_entry, mock_fcm_client, mock_call_manager, aiomock
+) -> None:
+    """The default token matches the stored one → no push-token repair."""
+    mock_entry.add_to_hass(hass)
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={"state": "ok", "data": {"jwt": "fake.jwt.token", "id": "3844428"}},
+        repeat=True,
+    )
+
+    assert await hass.config_entries.async_setup(mock_entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert (
+        ir.async_get(hass).async_get_issue(
+            DOMAIN, f"fcm_token_stale_{mock_entry.entry_id}"
+        )
+        is None
+    )
+
+
 async def test_full_setup_push_open_door(
     hass, mock_entry, mock_fcm_client, mock_call_manager, aiomock
 ) -> None:

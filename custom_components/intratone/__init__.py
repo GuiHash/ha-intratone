@@ -26,6 +26,7 @@ from .const import (
     CONF_VIDEO_ENABLED,
     DEFAULT_GO2RTC_URL,
     DOMAIN,
+    FCM_TOKEN_ISSUE_PREFIX,
 )
 from .coordinator import IntratoneCoordinator
 from .fcm_listener import FcmListener
@@ -289,5 +290,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: IntratoneConfigEntry) -
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: IntratoneConfigEntry) -> None:
-    """Clean up the CléMobil-transfer repair when the entry is removed."""
+    """Clean up per-entry repairs when the entry is removed."""
     ir.async_delete_issue(hass, DOMAIN, _mobipass_issue_id(entry))
+    ir.async_delete_issue(hass, DOMAIN, f"{FCM_TOKEN_ISSUE_PREFIX}{entry.entry_id}")

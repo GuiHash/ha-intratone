@@ -99,6 +99,29 @@
           "not_loaded": "L'intégration Intratone doit être chargée avant de transférer la CléMobil."
         }
       }
+    },
+    "fcm_token_stale": {
+      "title": "Les notifications d'interphone sont peut-être interrompues — re-couplage nécessaire",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Rétablir les notifications d'interphone",
+            "description": "Votre jeton push a été renouvelé par Google : Intratone continue d'envoyer les notifications d'interphone vers une adresse qui ne fonctionne plus — les nouveaux appels n'arriveront plus dans Home Assistant tant que vous n'aurez pas re-couplé l'appareil.\n\nGénérez un nouveau code d'invitation dans l'application Intratone officielle → « Mes infos » → « Ajouter un appareil » puis saisissez-le ci-dessous pour ré-enregistrer cet appareil.",
+            "data": {
+              "invite_code": "Code d'invitation"
+            }
+          }
+        },
+        "error": {
+          "invalid_format": "Format invalide. Attendu : `XXXXXX-XXXX`.",
+          "invalid_code": "Le code d'invitation a été refusé par Intratone. Générez-en un nouveau et réessayez.",
+          "auth_failed": "Impossible de s'authentifier auprès d'Intratone après le ré-enregistrement.",
+          "unknown": "Erreur inattendue. Consultez les logs."
+        },
+        "abort": {
+          "not_loaded": "L'intégration Intratone doit être chargée avant le re-couplage."
+        }
+      }
     }
   },
   "options": {

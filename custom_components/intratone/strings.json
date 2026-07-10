@@ -99,6 +99,29 @@
           "not_loaded": "The Intratone integration must be loaded before transferring the CléMobil."
         }
       }
+    },
+    "fcm_token_stale": {
+      "title": "Doorbell notifications may have stopped — re-pair required",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Restore doorbell notifications",
+            "description": "Your push token was rotated by Google, so Intratone is still sending doorbell notifications to an address that no longer works — new rings will not reach Home Assistant until you re-pair.\n\nGenerate a fresh invitation code in the official Intratone app → 'Mes infos' → 'Ajouter un appareil' and enter it below to re-register this device.",
+            "data": {
+              "invite_code": "Invitation code"
+            }
+          }
+        },
+        "error": {
+          "invalid_format": "Invalid format. Expected `XXXXXX-XXXX`.",
+          "invalid_code": "The invitation code was rejected by Intratone. Generate a fresh one and try again.",
+          "auth_failed": "Could not authenticate with Intratone after re-registration.",
+          "unknown": "Unexpected error. Check the logs."
+        },
+        "abort": {
+          "not_loaded": "The Intratone integration must be loaded before re-pairing."
+        }
+      }
     }
   },
   "options": {
