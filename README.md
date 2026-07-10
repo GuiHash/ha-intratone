@@ -13,7 +13,7 @@ After pairing, the integration creates these entities under one device:
 | `event.intratone_<ID>_doorbell` | Fires every time a visitor rings the intercom. Payload includes `door_name`, `door_number` (NBPORTE), `caller`, `call_id`. Usable as automation trigger. |
 | `camera.intratone_<ID>_intercom` | Placeholder image when idle. Live audio + video stream during a call. |
 | `lock.intratone_<ID>_door` | Tap *Unlock* → opens the door (sends `opendoor:<code>` SIP MESSAGE, same backend as the official Intratone app). Only works **during an active call** (see Caveats). |
-| `lock.intratone_<ID>_<access>` | One per **data-openable** access — Intratone's *Clé mobile* / **mobipass** (`data`/4G) and `ble` accesses. Tap *Unlock* to open that gate/door **on demand, no visitor needed** (`POST /api/access/open/clemobil`). Created at setup from `GET /api/access` (one per residence × door). Voice-assistant & HomeKit friendly for hands-free opening. **Legacy 2G `clemobil` accesses are not exposed** — the app opens those by placing a real phone call, which HA can't do. Absent if your account has no data-openable accesses. |
+| `lock.intratone_<ID>_<access>` | One per **data-openable** access — Intratone's *Clé mobile* / **mobipass** (`data`/4G) and `ble` accesses. Tap *Unlock* to open that gate/door **on demand, no visitor needed** (`POST /api/access/open/clemobil`). Created at setup from `GET /api/access` (one per residence × door). Voice-assistant & HomeKit friendly for hands-free opening. **Legacy 2G `clemobil` accesses are not exposed** — the app opens those by placing a real phone call, which HA can't do. Absent if your account has no data-openable accesses, or until you [transfer the *Clé mobile* to HA](#transferring-the-clé-mobile-to-home-assistant) (single-owner since mid-2026). |
 | `switch.intratone_<ID>_backlight` | Toggle ON during an active call to ask the intercom hardware for its backlight / illuminator mode (low-light conditions). One-shot — the server resets it on call end. Some hardware models don't support it; in that case the signal is silently ignored. |
 | `binary_sensor.intratone_<ID>_push_channel_connected` | Diagnostic — `on` while the FCM push channel is up. If it goes `off`, you won't be notified of rings. |
 
@@ -52,6 +52,7 @@ The integration also reacts to two additional FCM push types Cogelec emits:
 - **Camera entity is HomeKit-only**: `camera.intratone_<ID>_intercom` only delivers live video through the HomeKit + go2rtc path. Adding it to a Lovelace card or viewing it in Developer Tools → States will show "does not support play stream service" — this is expected.
 - **France only**: tested against `sip.intratone.info`. Other Cogelec deployments untested.
 - **Both devices ring in parallel.** The official Intratone app on your phone continues to receive rings alongside HA. Whichever device opens first triggers the relay; the other still rings.
+- **The *Clé mobile* remote-open key is single-owner (since ~mid-2026).** Only one device per phone number can hold it, so the on-demand access locks live on either your phone **or** HA — not both. Ringing and in-call door unlock are unaffected. See [Transferring the *Clé mobile* to Home Assistant](#transferring-the-clé-mobile-to-home-assistant).
 
 ## Not yet implemented
 
@@ -151,6 +152,18 @@ If your account doesn't have a phone (some installer-managed setups), generate a
 The integration registers an FCM push subscription and obtains a long-lived device JWT (rotated every 12 h). Both your existing phone and HA receive ring notifications in parallel; both can open the door.
 
 If HA detects expired credentials it triggers a re-authentication flow that **silently** refreshes the JWT from the stored phone + device_id — you should not need to re-pair in normal use. The form only appears if the backend has unbound your device (rare, e.g. account reset on the Intratone side).
+
+### Transferring the *Clé mobile* to Home Assistant
+
+Since ~mid-2026 Intratone lets **only one device per phone number** hold the remote-open key (*Clé mobile* / **mobipass**). If the key currently lives on your phone (the usual case), the `lock.intratone_<ID>_<access>` entities won't appear — `GET /api/access` returns nothing until the key is moved to HA. See [issue #61](https://github.com/GuiHash/ha-intratone/issues/61).
+
+To move it onto Home Assistant:
+
+1. **Settings → Devices & Services → Intratone Doorbell → ⋮ → Reconfigure**.
+2. Read the warning and confirm. Intratone texts a **one-time transfer code** to your account's phone number.
+3. Enter the code. On success the access locks appear within a few seconds.
+
+**This revokes on-demand remote opening in the official Intratone app on your phone** (only one device can hold it). Doorbell ringing and opening a door *during a call* (`lock.intratone_<ID>_door`) are unaffected on both devices — this only concerns the ring-free *Clé mobile* opening. To move the key back, redo the transfer from the official app.
 
 ## HomeKit Bridge configuration
 
@@ -260,7 +273,7 @@ No call history, audio, or video is persisted to disk by the integration — RTP
 
 ## Credits
 
-Reverse-engineered from the official Cogelec / Intratone Android app (APK 4.6.3) and iOS app (IPA 4.4.10). HTTP, SIP and RTP behaviour mirrors what the official app does so the integration cohabits cleanly alongside it on the same account. See [`INTRATONE_API.md`](INTRATONE_API.md) for the full API notes, including the *Clé mobile* / mobipass remote-open endpoints.
+Reverse-engineered from the official Cogelec / Intratone Android app (APK 4.6.3, plus the mobipass transfer flow from 4.6.4) and iOS app (IPA 4.4.10). HTTP, SIP and RTP behaviour mirrors what the official app does so the integration cohabits cleanly alongside it on the same account. See [`INTRATONE_API.md`](INTRATONE_API.md) for the full API notes, including the *Clé mobile* / mobipass remote-open and transfer endpoints.
 
 ## License
 

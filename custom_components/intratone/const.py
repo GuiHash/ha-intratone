@@ -46,6 +46,21 @@ DEFAULT_GO2RTC_URL: Final = "rtsp://127.0.0.1:8554"
 PATH_ACCESS_LIST: Final = "api/access"
 PATH_ACCESS_OPEN: Final = "api/access/open/clemobil"
 
+# Mobipass ("CléMobil") ownership transfer. Since ~June 2026 Cogelec lets only
+# one device per phone number hold the remote-open key; moving it to a new
+# device needs a one-time code sent by SMS (issue #61). Reverse-engineered from
+# Android `com.cogelec.notificationpush` v4.6.4 (`MobipassRemoteDataSource`):
+#   POST api/mobipass/activate    → triggers the SMS (empty body, JWT auth)
+#   POST api/mobipass/otp/verify  → completes the transfer (form field `otp`)
+PATH_MOBIPASS_ACTIVATE: Final = "api/mobipass/activate"
+PATH_MOBIPASS_VERIFY: Final = "api/mobipass/otp/verify"
+
+# `code` values the server returns on a failed Mobipass request (the Android
+# `HTTPResponse.code`), mapped to user-facing errors in the config flow.
+MOBIPASS_CODE_OTP_INVALID: Final = "MOBIPASS_OTP_INVALID"
+MOBIPASS_CODE_BLOCKED: Final = "MOBIPASS_CODE_BLOCKED"
+MOBIPASS_CODE_NOT_AVAILABLE: Final = "MOBIPASS_NOT_AVAILABLE"
+
 # `openmode` values. The official app routes the "open" tap by the access's
 # *first* mode (Android `AccessViewModel.openAccess`):
 #   - `data` (mobipass, 4G) and `ble`  → REST API open (what we can do)

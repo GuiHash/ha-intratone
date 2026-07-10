@@ -37,6 +37,17 @@
         "data": {
           "invite_code": "Code d'invitation"
         }
+      },
+      "reconfigure": {
+        "title": "Transférer la CléMobil vers Home Assistant",
+        "description": "Depuis mi-2026, Intratone n'autorise qu'un seul appareil par numéro de téléphone à ouvrir les portes à distance (la clé « CléMobil » / Mobipass). En continuant, un code à usage unique sera envoyé par SMS à votre numéro et la clé sera transférée vers Home Assistant.\n\n**L'ouverture à distance cessera de fonctionner dans l'application Intratone officielle sur votre téléphone** jusqu'à ce que vous l'y transfériez à nouveau. Les appels d'interphone et l'ouverture pendant un appel ne sont pas affectés."
+      },
+      "mobipass_otp": {
+        "title": "Saisir le code de transfert",
+        "description": "Tapez le code qu'Intratone vient de vous envoyer par SMS pour finaliser le transfert de la CléMobil vers Home Assistant.",
+        "data": {
+          "code": "Code de transfert"
+        }
       }
     },
     "error": {
@@ -46,11 +57,50 @@
       "sms_failed": "Intratone refuse d'envoyer un SMS à ce numéro. Vérifiez le numéro et l'indicatif pays.",
       "fcm_failed": "Impossible de s'enregistrer auprès de Firebase. Vérifiez votre connexion.",
       "auth_failed": "Impossible de s'authentifier auprès d'Intratone après l'enregistrement.",
+      "mobipass_code_invalid": "Le code de transfert a été refusé. Vérifiez-le et réessayez.",
+      "mobipass_code_blocked": "Trop de tentatives — le code de transfert est temporairement bloqué. Réessayez plus tard.",
+      "mobipass_not_available": "La fonction CléMobil n'est pas disponible pour votre compte.",
+      "mobipass_failed": "Le transfert de la CléMobil a échoué. Consultez les logs et réessayez.",
       "unknown": "Erreur inattendue. Consultez les logs."
     },
     "abort": {
       "already_configured": "Cet appareil Intratone est déjà configuré.",
-      "reauth_successful": "Re-couplage réussi."
+      "reauth_successful": "Re-couplage réussi.",
+      "reconfigure_successful": "Reconfiguration réussie.",
+      "mobipass_transfer_successful": "La CléMobil est maintenant active sur Home Assistant. Vos portes devraient apparaître sous peu.",
+      "mobipass_already_active": "La CléMobil est déjà active sur Home Assistant — rien à transférer.",
+      "mobipass_not_eligible": "Votre compte n'utilise pas le système CléMobil mono-appareil, il n'y a donc rien à transférer.",
+      "not_loaded": "L'intégration Intratone doit être chargée avant de transférer la CléMobil."
+    }
+  },
+  "issues": {
+    "mobipass_transfer": {
+      "title": "Transférer la CléMobil vers Home Assistant",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Transférer la CléMobil vers Home Assistant",
+            "description": "Intratone n'autorise qu'un seul appareil par numéro de téléphone à ouvrir les portes à distance (la clé « CléMobil » / Mobipass), et elle est actuellement détenue par un autre appareil — vos portes à ouverture à distance n'apparaissent donc pas dans Home Assistant.\n\nEn continuant, un code à usage unique sera envoyé par SMS à votre numéro et la clé sera transférée ici. **L'ouverture à distance cessera de fonctionner dans l'application Intratone officielle sur votre téléphone** jusqu'à ce que vous l'y transfériez à nouveau. Les appels d'interphone et l'ouverture pendant un appel ne sont pas affectés."
+          },
+          "otp": {
+            "title": "Saisir le code de transfert",
+            "description": "Tapez le code qu'Intratone vient de vous envoyer par SMS pour finaliser le transfert de la CléMobil vers Home Assistant.",
+            "data": {
+              "code": "Code de transfert"
+            }
+          }
+        },
+        "error": {
+          "mobipass_code_invalid": "Le code de transfert a été refusé. Vérifiez-le et réessayez.",
+          "mobipass_code_blocked": "Trop de tentatives — le code de transfert est temporairement bloqué. Réessayez plus tard.",
+          "mobipass_not_available": "La fonction CléMobil n'est pas disponible pour votre compte.",
+          "mobipass_failed": "Le transfert de la CléMobil a échoué. Consultez les logs et réessayez.",
+          "unknown": "Erreur inattendue. Consultez les logs."
+        },
+        "abort": {
+          "not_loaded": "L'intégration Intratone doit être chargée avant de transférer la CléMobil."
+        }
+      }
     }
   },
   "options": {

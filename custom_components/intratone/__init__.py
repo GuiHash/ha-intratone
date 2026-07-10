@@ -11,9 +11,10 @@ import voluptuous as vol
 from homeassistant.components.network import async_get_source_ip
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .call_manager import CallManager
@@ -42,6 +43,10 @@ PLATFORMS: list[Platform] = [
 ]
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+# Repair issue surfaced when the CléMobil/Mobipass key must be transferred to
+# this device (issue #61). One per config entry.
+MOBIPASS_ISSUE_PREFIX = "mobipass_transfer_"
 
 SERVICE_SIMULATE_RING = "simulate_ring"
 SIMULATE_RING_SCHEMA = vol.Schema(
@@ -161,10 +166,67 @@ async def async_setup_entry(hass: HomeAssistant, entry: IntratoneConfigEntry) ->
         store=store,
     )
 
-    api.async_start_jwt_refresh()
+    api.async_start_jwt_refresh(
+        on_refresh=lambda: _evaluate_mobipass_issue(hass, entry)
+    )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # Detect whether the CléMobil/Mobipass key must be transferred to this
+    # device (issue #61). Best-effort and in the background so a slow/failing
+    # auth never delays the doorbell entities; re-checked on every JWT refresh.
+    entry.async_create_background_task(
+        hass, _async_initial_mobipass_check(hass, entry), "intratone_mobipass_check"
+    )
     return True
+
+
+def _mobipass_issue_id(entry: IntratoneConfigEntry) -> str:
+    return f"{MOBIPASS_ISSUE_PREFIX}{entry.entry_id}"
+
+
+@callback
+def _evaluate_mobipass_issue(
+    hass: HomeAssistant, entry: IntratoneConfigEntry
+) -> None:
+    """Create or clear the CléMobil-transfer repair from the latest flags.
+
+    Reads `api.mobipass_state` (populated by the last `authenticate_device`);
+    does no network I/O of its own. `needs_transfer` is true when the account
+    supports Mobipass but the key is held by another device (the user's phone),
+    so `list_access()` returns nothing until it is transferred here.
+    """
+    api: IntratoneAPI = entry.runtime_data.api
+    state = api.mobipass_state
+    issue_id = _mobipass_issue_id(entry)
+    if state is not None and state.needs_transfer:
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            issue_id,
+            is_fixable=True,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key="mobipass_transfer",
+            data={"entry_id": entry.entry_id},
+        )
+    else:
+        ir.async_delete_issue(hass, DOMAIN, issue_id)
+
+
+async def _async_initial_mobipass_check(
+    hass: HomeAssistant, entry: IntratoneConfigEntry
+) -> None:
+    """Fetch fresh Mobipass flags once at setup, then (re)evaluate the repair."""
+    api: IntratoneAPI = entry.runtime_data.api
+    try:
+        # authenticate_device() populates api.mobipass_state (flags live only on
+        # the auth/device response). It doesn't persist the JWT, so this is a
+        # cheap read of the current ownership state.
+        await api.authenticate_device()
+    except Exception:  # noqa: BLE001
+        _LOGGER.debug("Mobipass check skipped (auth/device failed)", exc_info=True)
+        return
+    _evaluate_mobipass_issue(hass, entry)
 
 
 async def _async_migrate_legacy_creds(
@@ -217,3 +279,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: IntratoneConfigEntry) -
         await runtime.call_manager.async_stop()
         runtime.api.async_stop()
     return unload_ok
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: IntratoneConfigEntry) -> None:
+    """Clean up the CléMobil-transfer repair when the entry is removed."""
+    ir.async_delete_issue(hass, DOMAIN, _mobipass_issue_id(entry))

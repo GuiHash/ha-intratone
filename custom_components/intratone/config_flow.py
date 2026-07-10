@@ -22,11 +22,15 @@ from .const import (
     DEFAULT_GO2RTC_URL,
     DEFAULT_INDICATIF,
     DOMAIN,
+    MOBIPASS_CODE_BLOCKED,
+    MOBIPASS_CODE_NOT_AVAILABLE,
+    MOBIPASS_CODE_OTP_INVALID,
 )
 from .fcm_listener import fcm_register_standalone
 from .rest_api import (
     IntratoneApiError,
     IntratoneAuthError,
+    IntratoneMobipassError,
     authenticate_for_invite,
     register_phone_for_sms,
     register_with_invite,
@@ -47,6 +51,14 @@ PHONE_SCHEMA = vol.Schema(
     }
 )
 SMS_SCHEMA = vol.Schema({vol.Required("code"): str})
+MOBIPASS_OTP_SCHEMA = vol.Schema({vol.Required("code"): str})
+
+# Server `code` → config-flow error key for the CléMobil transfer.
+_MOBIPASS_ERRORS = {
+    MOBIPASS_CODE_OTP_INVALID: "mobipass_code_invalid",
+    MOBIPASS_CODE_BLOCKED: "mobipass_code_blocked",
+    MOBIPASS_CODE_NOT_AVAILABLE: "mobipass_not_available",
+}
 
 
 def _normalize_phone(raw: str, indicatif: str) -> str:
@@ -219,6 +231,90 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="sms", data_schema=SMS_SCHEMA, errors=errors
+        )
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """CléMobil transfer — step 1: warn, then trigger the SMS transfer code.
+
+        Since ~June 2026 the remote-open key ("CléMobil" / Mobipass) can live on
+        only one device per phone number (issue #61). Confirming here sends a
+        one-time code by SMS and, once entered, moves the key onto Home
+        Assistant — revoking it in the official app on the user's phone.
+        """
+        entry = self._get_reconfigure_entry()
+        api = getattr(entry, "runtime_data", None) and entry.runtime_data.api
+        if api is None:
+            return self.async_abort(reason="not_loaded")
+
+        # Only offer the transfer when it's actually needed. Refresh the flags
+        # first (best-effort — if the check fails, fall through and let the user
+        # try anyway rather than block on a transient error).
+        if user_input is None:
+            try:
+                await api.authenticate_device()
+            except Exception:  # noqa: BLE001
+                _LOGGER.debug("mobipass reconfigure precheck failed", exc_info=True)
+            state = api.mobipass_state
+            if state is not None and not state.needs_transfer:
+                return self.async_abort(
+                    reason="mobipass_already_active"
+                    if state.mobipass
+                    else "mobipass_not_eligible"
+                )
+
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            try:
+                await api.mobipass_activate()
+            except IntratoneMobipassError as err:
+                _LOGGER.warning("mobipass activate refused: %s", err)
+                errors["base"] = _MOBIPASS_ERRORS.get(err.code, "mobipass_failed")
+            except (IntratoneAuthError, IntratoneApiError) as err:
+                _LOGGER.warning("mobipass activate failed: %s", err)
+                errors["base"] = "mobipass_failed"
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Unexpected mobipass activate error")
+                errors["base"] = "unknown"
+            else:
+                return await self.async_step_mobipass_otp()
+
+        return self.async_show_form(
+            step_id="reconfigure", data_schema=vol.Schema({}), errors=errors
+        )
+
+    async def async_step_mobipass_otp(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """CléMobil transfer — step 2: enter the SMS code to complete the transfer."""
+        entry = self._get_reconfigure_entry()
+        api = getattr(entry, "runtime_data", None) and entry.runtime_data.api
+        if api is None:
+            return self.async_abort(reason="not_loaded")
+
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            try:
+                await api.mobipass_verify(user_input["code"].strip())
+            except IntratoneMobipassError as err:
+                _LOGGER.warning("mobipass verify refused: %s", err)
+                errors["base"] = _MOBIPASS_ERRORS.get(err.code, "mobipass_failed")
+            except (IntratoneAuthError, IntratoneApiError) as err:
+                _LOGGER.warning("mobipass verify failed: %s", err)
+                errors["base"] = "mobipass_failed"
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Unexpected mobipass verify error")
+                errors["base"] = "unknown"
+            else:
+                # Reload so lock.py re-runs list_access() and the freshly
+                # transferred accesses appear as lock entities.
+                return self.async_update_reload_and_abort(
+                    entry, reason="mobipass_transfer_successful"
+                )
+
+        return self.async_show_form(
+            step_id="mobipass_otp", data_schema=MOBIPASS_OTP_SCHEMA, errors=errors
         )
 
     async def async_step_reauth(

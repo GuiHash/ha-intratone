@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -31,6 +32,8 @@ from .const import (
     JWT_REFRESH_INTERVAL_HOURS,
     PATH_ACCESS_LIST,
     PATH_ACCESS_OPEN,
+    PATH_MOBIPASS_ACTIVATE,
+    PATH_MOBIPASS_VERIFY,
 )
 from .store import IntratoneCredentialsStore
 
@@ -59,6 +62,25 @@ class IntratoneApiError(Exception):
         self.body = body
 
 
+class IntratoneMobipassError(IntratoneApiError):
+    """A Mobipass ("CléMobil") transfer request was refused by the server.
+
+    Carries the server `code` (e.g. `MOBIPASS_OTP_INVALID`) so the config flow
+    can map it to a specific user-facing message.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        status: int | None = None,
+        body: Any = None,
+    ) -> None:
+        super().__init__(message, status=status, body=body)
+        self.code = code
+
+
 @dataclass(frozen=True)
 class IntratoneAccess:
     """One remote-openable access ("Clé mobile" / mobipass entry).
@@ -76,6 +98,54 @@ class IntratoneAccess:
     openmode: str
 
 
+@dataclass(frozen=True)
+class MobipassState:
+    """The four CléMobil/Mobipass flags from the `api/auth/device` response.
+
+    Parsed from `data.{openingaccess,refreshaccess,mobipass_compatible,mobipass}`
+    (each sent by the server as the string `"1"`/`"0"`). Mirrors the Android
+    `AuthDevice` model. `needs_transfer` is the issue-#61 condition: the account
+    supports the single-owner Mobipass scheme (`mobipass_compatible`) but the key
+    is currently held by another device (`not mobipass`) — typically the user's
+    phone — so `list_access()` returns nothing until the key is transferred here.
+    """
+
+    opening_access: bool
+    refresh_access: bool
+    mobipass_compatible: bool
+    mobipass: bool
+
+    @property
+    def needs_transfer(self) -> bool:
+        return self.mobipass_compatible and not self.mobipass
+
+
+def _parse_mobipass_state(data: dict[str, Any]) -> MobipassState:
+    """Read the CléMobil/Mobipass flags out of an `api/auth/device` `data` block."""
+
+    def flag(key: str) -> bool:
+        return str(data.get(key, "0")) == "1"
+
+    return MobipassState(
+        opening_access=flag("openingaccess"),
+        refresh_access=flag("refreshaccess"),
+        mobipass_compatible=flag("mobipass_compatible"),
+        mobipass=flag("mobipass"),
+    )
+
+
+def _mobipass_error(body: dict[str, Any], status: int | None) -> IntratoneMobipassError:
+    """Build an `IntratoneMobipassError` from a server error body."""
+    code = str(body.get("code") or "") or None
+    message = body.get("message") or code or "unknown"
+    return IntratoneMobipassError(
+        f"Mobipass request refused: {message}",
+        code=code,
+        status=status,
+        body=body,
+    )
+
+
 class IntratoneAPI:
     """Async client for the Intratone REST API."""
 
@@ -91,6 +161,10 @@ class IntratoneAPI:
         self._entry = entry
         self._store = store
         self._refresh_unsub = None
+        # Latest CléMobil/Mobipass flags, refreshed on every `authenticate_device`
+        # (i.e. on setup's first refresh and every periodic JWT refresh). `None`
+        # until the first successful auth. See `MobipassState.needs_transfer`.
+        self.mobipass_state: MobipassState | None = None
 
     @property
     def jwt(self) -> str | None:
@@ -190,6 +264,7 @@ class IntratoneAPI:
 
             data = body.get("data") or {}
             if data.get("jwt"):
+                self.mobipass_state = _parse_mobipass_state(data)
                 return data
 
         raise IntratoneAuthError(
@@ -340,6 +415,62 @@ class IntratoneAPI:
             )
         return ok
 
+    async def mobipass_activate(self) -> None:
+        """POST /api/mobipass/activate — request the CléMobil transfer code by SMS.
+
+        Empty body; the device/phone is identified by the JWT. Raises
+        `IntratoneMobipassError` when the server refuses (e.g. Mobipass not
+        available for the account).
+        """
+        await self._mobipass_post(PATH_MOBIPASS_ACTIVATE, {})
+
+    async def mobipass_verify(self, otp: str) -> None:
+        """POST /api/mobipass/otp/verify — complete the transfer with the SMS code.
+
+        On success the CléMobil key now belongs to this device (and is revoked
+        on the user's phone). Raises `IntratoneMobipassError` (code
+        `MOBIPASS_OTP_INVALID`) on a wrong/expired code.
+        """
+        await self._mobipass_post(PATH_MOBIPASS_VERIFY, {"otp": otp})
+
+    async def _mobipass_post(self, path: str, form: dict[str, str]) -> None:
+        """POST a Mobipass endpoint and raise on any server-signalled failure.
+
+        Mobipass rejections arrive either as the shared `state:error` envelope
+        or as a `state:ok` body with `error != 0`; both carry a `MOBIPASS_*`
+        `code` (surfaced as `IntratoneMobipassError`). A first *non-Mobipass*
+        failure is treated as an expired JWT and retried once after a refresh,
+        mirroring `open_access`.
+        """
+        if not self.jwt:
+            raise IntratoneAuthError("No JWT available")
+
+        async def _attempt() -> None:
+            try:
+                body = await self._post_form(path, form, jwt=self.jwt)
+            except IntratoneApiError as err:
+                err_body = err.body if isinstance(err.body, dict) else None
+                if err_body and str(err_body.get("code") or "").startswith(
+                    "MOBIPASS"
+                ):
+                    raise _mobipass_error(err_body, err.status) from err
+                raise  # non-Mobipass (likely 401) — let the caller retry
+            if body.get("error") not in (0, None):
+                raise _mobipass_error(body, None)
+
+        try:
+            await _attempt()
+        except IntratoneMobipassError:
+            raise
+        except IntratoneApiError as first_err:
+            _LOGGER.debug(
+                "Mobipass %s first attempt failed, retrying after JWT refresh: %s",
+                path,
+                first_err,
+            )
+            await self.refresh_jwt()
+            await _attempt()
+
     async def refresh_jwt(self) -> None:
         """Refresh the JWT and persist it via the credentials Store."""
         data = await self.authenticate_device()
@@ -357,14 +488,27 @@ class IntratoneAPI:
                 )
         _LOGGER.debug("Intratone JWT refreshed")
 
-    def async_start_jwt_refresh(self) -> None:
-        """Schedule periodic JWT refresh."""
+    def async_start_jwt_refresh(
+        self, on_refresh: Callable[[], None] | None = None
+    ) -> None:
+        """Schedule periodic JWT refresh.
+
+        `on_refresh` (optional) is invoked after each successful refresh — used
+        to re-evaluate the CléMobil/Mobipass state (now up to date on
+        `self.mobipass_state`) without an extra network call.
+        """
 
         async def _tick(_now) -> None:
             try:
                 await self.refresh_jwt()
             except Exception as err:  # noqa: BLE001
                 _LOGGER.warning("JWT refresh failed: %s", err)
+                return
+            if on_refresh is not None:
+                try:
+                    on_refresh()
+                except Exception:  # noqa: BLE001
+                    _LOGGER.debug("post-refresh hook failed", exc_info=True)
 
         self._refresh_unsub = async_track_time_interval(
             self._hass, _tick, timedelta(hours=JWT_REFRESH_INTERVAL_HOURS)
