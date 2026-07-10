@@ -209,13 +209,13 @@ Response:
     "expire_at": "2026-05-21 10:34:00",
     "expire_gmt_at": "2026-05-21 08:34:00",
     "openingaccess": "0",
-    "refreshaccess": "0",
+    "access_refresh": "0",
     "mobipass_compatible": "1",
     "mobipass": "0"
   } }
 ```
 
-#### CléMobil / Mobipass flags (`data.*`, each a `"1"`/`"0"` string)
+#### CléMobil / Mobipass flags (`data.*`, each `1`/`0` — sent as int or string)
 
 Confirmed by decompiling the Android `AuthDevice` parser in v4.6.4
 (`AuthRepositoryImpl` reads them into four booleans):
@@ -223,7 +223,7 @@ Confirmed by decompiling the Android `AuthDevice` parser in v4.6.4
 | field                 | meaning                                                                 |
 | --------------------- | ----------------------------------------------------------------------- |
 | `openingaccess`       | remote-open (CléMobil) currently enabled on this device                 |
-| `refreshaccess`       | client should refresh its access list                                   |
+| `access_refresh`      | client should refresh its access list                                   |
 | `mobipass_compatible` | the account/number is eligible for the single-owner **Mobipass** scheme |
 | `mobipass`            | the Mobipass key is currently **active on this device**                 |
 
