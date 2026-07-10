@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/GuiHash/ha-intratone/compare/v0.4.0...v0.5.0) (2026-07-10)
+
+
+### Features
+
+* **brand:** add intratone wordmark logo assets ([#65](https://github.com/GuiHash/ha-intratone/issues/65)) ([f932afd](https://github.com/GuiHash/ha-intratone/commit/f932afdd04b411b8c19c8b692c5a6ca4f7a8621c))
+
 ## [0.4.0](https://github.com/GuiHash/ha-intratone/compare/v0.3.2...v0.4.0) (2026-07-10)
 
 
