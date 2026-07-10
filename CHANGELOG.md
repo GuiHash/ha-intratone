@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.3](https://github.com/GuiHash/ha-intratone/compare/v0.6.2...v0.6.3) (2026-07-10)
+
+
+### Bug Fixes
+
+* **mobipass:** handle MOBIPASS_SMS_SENT and correct code constants ([#61](https://github.com/GuiHash/ha-intratone/issues/61)) ([ebb5749](https://github.com/GuiHash/ha-intratone/commit/ebb574929fe12655707bd1f1c43ef57e87b3dfaa))
+* **mobipass:** register as a real phone profile to unlock CléMobil transfer ([#61](https://github.com/GuiHash/ha-intratone/issues/61)) ([95f000b](https://github.com/GuiHash/ha-intratone/commit/95f000b5ead5ef8108185be2dbcc59110b0c91d7))
+
 ## [0.6.2](https://github.com/GuiHash/ha-intratone/compare/v0.6.1...v0.6.2) (2026-07-10)
 
 
