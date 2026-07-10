@@ -134,6 +134,19 @@ def _parse_mobipass_state(data: dict[str, Any]) -> MobipassState:
     )
 
 
+def _redact_auth_data(data: dict[str, Any]) -> dict[str, Any]:
+    """A copy of an `auth/device` `data` block with secrets masked for logs.
+
+    Lets testers paste the full raw block (issue #61 diagnosis) without leaking
+    their JWT or phone number.
+    """
+    redacted = dict(data)
+    for key in ("jwt", "tel", "device_id"):
+        if redacted.get(key):
+            redacted[key] = "***"
+    return redacted
+
+
 def _mobipass_error(body: dict[str, Any], status: int | None) -> IntratoneMobipassError:
     """Build an `IntratoneMobipassError` from a server error body."""
     code = str(body.get("code") or "") or None
@@ -265,11 +278,15 @@ class IntratoneAPI:
             data = body.get("data") or {}
             if data.get("jwt"):
                 self.mobipass_state = _parse_mobipass_state(data)
-                # Logged so testers on affected accounts (issue #61) can report
-                # the real flag values — they aren't reliably set for our client
-                # (the app is fed them via FCM push), so we don't gate on them.
+                # Log the raw data block (secrets masked) AND the parsed flags:
+                # the flags we parse aren't a reliable signal for our client
+                # (issue #61 — the app is fed them via FCM push), so the raw
+                # block lets a tester's log reveal the real signal even if it
+                # lives in a field we don't parse yet.
                 _LOGGER.debug(
-                    "auth/device mobipass flags: %s", self.mobipass_state
+                    "auth/device data (redacted): %s | parsed mobipass flags: %s",
+                    _redact_auth_data(data),
+                    self.mobipass_state,
                 )
                 return data
 
@@ -461,6 +478,10 @@ class IntratoneAPI:
                 ):
                     raise _mobipass_error(err_body, err.status) from err
                 raise  # non-Mobipass (likely 401) — let the caller retry
+            # Log the raw response including success — `_post_form` only logs on
+            # a `state:error` envelope, so without this the "it worked" path
+            # (SMS sent / transfer completed) is invisible in a tester's log.
+            _LOGGER.debug("Mobipass %s response: %s", path, body)
             if body.get("error") not in (0, None):
                 raise _mobipass_error(body, None)
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 from aioresponses import aioresponses
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -252,6 +254,42 @@ async def test_authenticate_device_parses_mobipass_state(
     assert state.refresh_access is True
     # Eligible for Mobipass but key held elsewhere → transfer needed (issue #61).
     assert state.needs_transfer is True
+
+
+async def test_authenticate_device_logs_redacted_data(
+    hass, mock_entry, aiomock, caplog
+) -> None:
+    """The debug dump of auth/device masks JWT + phone but keeps signal fields."""
+    mock_entry.add_to_hass(hass)
+    store = await _seeded_store(hass)
+    api = IntratoneAPI(hass, async_get_clientsession(hass), mock_entry, store)
+
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={
+            "state": "ok",
+            "data": {
+                "jwt": "secret.jwt.value",
+                "id": "3844428",
+                "tel": "0671124546",
+                "mobipass_compatible": "1",
+                "mobipass": "0",
+            },
+        },
+    )
+
+    with caplog.at_level(
+        logging.DEBUG, logger="custom_components.intratone.rest_api"
+    ):
+        await api.authenticate_device()
+
+    assert "auth/device data (redacted)" in caplog.text
+    # Secrets are masked …
+    assert "secret.jwt.value" not in caplog.text
+    assert "0671124546" not in caplog.text
+    assert "***" in caplog.text
+    # … but the fields we need for diagnosis are kept.
+    assert "mobipass_compatible" in caplog.text
 
 
 async def test_mobipass_activate_success(hass, mock_entry, aiomock) -> None:
