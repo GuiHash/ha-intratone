@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.2](https://github.com/GuiHash/ha-intratone/compare/v0.6.1...v0.6.2) (2026-07-10)
+
+
+### Bug Fixes
+
+* **mobipass:** report appversion 4.6.4 to unlock CléMobil transfer ([#61](https://github.com/GuiHash/ha-intratone/issues/61)) ([73418c9](https://github.com/GuiHash/ha-intratone/commit/73418c94c263267b8eb46b90216e9cf681628588))
+
 ## [0.6.1](https://github.com/GuiHash/ha-intratone/compare/v0.6.0...v0.6.1) (2026-07-10)
 
 
