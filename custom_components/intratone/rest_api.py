@@ -1,6 +1,6 @@
 """Async REST client for the Intratone API.
 
-Reverse-engineered from `com.cogelec.notificationpush` v4.6.3.
+Reverse-engineered from `com.cogelec.notificationpush` v4.6.4.
 All endpoints use form-urlencoded POST and Bearer JWT auth.
 See INTRATONE_API.md for the full reference.
 """
