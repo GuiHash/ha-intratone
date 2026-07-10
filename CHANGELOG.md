@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.7.0](https://github.com/GuiHash/ha-intratone/compare/v0.6.3...v0.7.0) (2026-07-10)
+
+
+### Features
+
+* **fcm:** detect push-token rotation and surface a re-pair repair ([#78](https://github.com/GuiHash/ha-intratone/issues/78)) ([b2c4157](https://github.com/GuiHash/ha-intratone/commit/b2c415795fc8652a4586afd022c26b6883873f32))
+
+
+### Bug Fixes
+
+* **mobipass:** use Android-style 16-hex device_id for CléMobil eligibility ([#81](https://github.com/GuiHash/ha-intratone/issues/81)) ([88cd50f](https://github.com/GuiHash/ha-intratone/commit/88cd50fcf71e7601f815b8ba1377c2e08af1f0f1))
+
+
+### Performance Improvements
+
+* **video:** cut stream startup latency and harden the VP8 keyframe path ([#80](https://github.com/GuiHash/ha-intratone/issues/80)) ([ba38e61](https://github.com/GuiHash/ha-intratone/commit/ba38e612bc90a935ba484e2c9b1d9dc2eff16031))
+
 ## [0.6.3](https://github.com/GuiHash/ha-intratone/compare/v0.6.2...v0.6.3) (2026-07-10)
 
 
