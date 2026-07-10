@@ -30,6 +30,7 @@ from .const import (
     API_OPENABLE_MODES,
     DEVICE_BUNDLE_ID,
     JWT_REFRESH_INTERVAL_HOURS,
+    MOBIPASS_CODE_SMS_SENT,
     PATH_ACCESS_LIST,
     PATH_ACCESS_OPEN,
     PATH_MOBIPASS_ACTIVATE,
@@ -461,9 +462,12 @@ class IntratoneAPI:
 
         Mobipass rejections arrive either as the shared `state:error` envelope
         or as a `state:ok` body with `error != 0`; both carry a `MOBIPASS_*`
-        `code` (surfaced as `IntratoneMobipassError`). A first *non-Mobipass*
-        failure is treated as an expired JWT and retried once after a refresh,
-        mirroring `open_access`.
+        `code` (surfaced as `IntratoneMobipassError`). The one non-error `code`
+        is `MOBIPASS_SMS_SENT` (the transfer code was already sent, e.g. on a
+        retried activate): the app treats it as "proceed to code entry", so we
+        return normally instead of raising. A first *non-Mobipass* failure is
+        treated as an expired JWT and retried once after a refresh, mirroring
+        `open_access`.
         """
         if not self.jwt:
             raise IntratoneAuthError("No JWT available")
@@ -473,9 +477,11 @@ class IntratoneAPI:
                 body = await self._post_form(path, form, jwt=self.jwt)
             except IntratoneApiError as err:
                 err_body = err.body if isinstance(err.body, dict) else None
-                if err_body and str(err_body.get("code") or "").startswith(
-                    "MOBIPASS"
-                ):
+                code = str(err_body.get("code") or "") if err_body else ""
+                if code == MOBIPASS_CODE_SMS_SENT:
+                    _LOGGER.debug("Mobipass %s: transfer code already sent", path)
+                    return
+                if code.startswith("MOBIPASS"):
                     raise _mobipass_error(err_body, err.status) from err
                 raise  # non-Mobipass (likely 401) — let the caller retry
             # Log the raw response including success — `_post_form` only logs on
@@ -483,6 +489,9 @@ class IntratoneAPI:
             # (SMS sent / transfer completed) is invisible in a tester's log.
             _LOGGER.debug("Mobipass %s response: %s", path, body)
             if body.get("error") not in (0, None):
+                if str(body.get("code") or "") == MOBIPASS_CODE_SMS_SENT:
+                    _LOGGER.debug("Mobipass %s: transfer code already sent", path)
+                    return
                 raise _mobipass_error(body, None)
 
         try:

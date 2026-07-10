@@ -59,7 +59,7 @@
       "auth_failed": "Impossible de s'authentifier auprès d'Intratone après l'enregistrement.",
       "mobipass_code_invalid": "Le code de transfert a été refusé. Vérifiez-le et réessayez.",
       "mobipass_code_blocked": "Trop de tentatives — le code de transfert est temporairement bloqué. Réessayez plus tard.",
-      "mobipass_not_available": "La fonction CléMobil n'est pas disponible pour votre compte.",
+      "mobipass_not_available": "Intratone n'autorise pas le transfert de la CléMobil vers ce compte depuis Home Assistant — ses serveurs ne considèrent pas votre compte comme éligible, et cela ne peut pas être forcé ici. L'ouverture d'une porte pendant un appel reste possible.",
       "mobipass_failed": "Le transfert de la CléMobil a échoué. Consultez les logs et réessayez.",
       "unknown": "Erreur inattendue. Consultez les logs."
     },
@@ -91,7 +91,7 @@
         "error": {
           "mobipass_code_invalid": "Le code de transfert a été refusé. Vérifiez-le et réessayez.",
           "mobipass_code_blocked": "Trop de tentatives — le code de transfert est temporairement bloqué. Réessayez plus tard.",
-          "mobipass_not_available": "La fonction CléMobil n'est pas disponible pour votre compte.",
+          "mobipass_not_available": "Intratone n'autorise pas le transfert de la CléMobil vers ce compte depuis Home Assistant — ses serveurs ne considèrent pas votre compte comme éligible, et cela ne peut pas être forcé ici. L'ouverture d'une porte pendant un appel reste possible.",
           "mobipass_failed": "Le transfert de la CléMobil a échoué. Consultez les logs et réessayez.",
           "unknown": "Erreur inattendue. Consultez les logs."
         },

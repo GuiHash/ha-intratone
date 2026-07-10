@@ -59,7 +59,7 @@
       "auth_failed": "Could not authenticate with Intratone after registration.",
       "mobipass_code_invalid": "The transfer code was rejected. Check it and try again.",
       "mobipass_code_blocked": "Too many attempts — the transfer code is temporarily blocked. Try again later.",
-      "mobipass_not_available": "The CléMobil feature isn’t available for your account.",
+      "mobipass_not_available": "Intratone won’t transfer the CléMobil to this account from Home Assistant — its servers don’t report your account as eligible, and it can’t be forced from here. Opening a door during an active call is unaffected.",
       "mobipass_failed": "The CléMobil transfer failed. Check the logs and try again.",
       "unknown": "Unexpected error. Check the logs."
     },
@@ -91,7 +91,7 @@
         "error": {
           "mobipass_code_invalid": "The transfer code was rejected. Check it and try again.",
           "mobipass_code_blocked": "Too many attempts — the transfer code is temporarily blocked. Try again later.",
-          "mobipass_not_available": "The CléMobil feature isn’t available for your account.",
+          "mobipass_not_available": "Intratone won’t transfer the CléMobil to this account from Home Assistant — its servers don’t report your account as eligible, and it can’t be forced from here. Opening a door during an active call is unaffected.",
           "mobipass_failed": "The CléMobil transfer failed. Check the logs and try again.",
           "unknown": "Unexpected error. Check the logs."
         },
