@@ -264,7 +264,7 @@ The integration stores in the HA config entry:
 
 - The **JWT** issued by Intratone (rotated every 12 h, or silently re-minted on auth failure).
 - The **FCM credentials** handed back by Google's MCS (used to keep the push channel open across restarts).
-- The **device id** generated locally during pairing (`ha-intratone-<random>`).
+- The **device id** generated locally during pairing (a random 16-character hex string, mimicking an Android `ANDROID_ID`).
 - The **numeric account id** and **phone number** associated with the Intratone account that was paired.
 
 No call history, audio, or video is persisted to disk by the integration — RTP frames are transcoded and forwarded to go2rtc/HomeKit in real time, then dropped.

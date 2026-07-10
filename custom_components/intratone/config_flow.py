@@ -139,7 +139,10 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
             if not phone or not indicatif:
                 errors["phone"] = "invalid_format"
             else:
-                device_id = f"ha-intratone-{uuid.uuid4().hex[:12]}"
+                # 16-char hex mimics Android's Settings.Secure.ANDROID_ID; some
+                # Intratone residences gate CléMobil/Mobipass eligibility on this
+                # device_id shape (issue #61).
+                device_id = uuid.uuid4().hex[:16]
                 try:
                     session = async_get_clientsession(self.hass)
                     fcm_token, fcm_creds = await fcm_register_standalone(None)
@@ -441,11 +444,14 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
         """
         session = async_get_clientsession(self.hass)
 
+        # 16-char hex mimics Android's Settings.Secure.ANDROID_ID; some Intratone
+        # residences gate CléMobil/Mobipass eligibility on this device_id shape
+        # (issue #61).
         device_id = (
             self._reauth_entry.data.get(CONF_DEVICE_ID)
             if self._reauth_entry is not None
             else None
-        ) or f"ha-intratone-{uuid.uuid4().hex[:12]}"
+        ) or uuid.uuid4().hex[:16]
 
         existing_creds: dict[str, Any] | None = None
         if self._reauth_entry is not None and self._reauth_entry.unique_id:
