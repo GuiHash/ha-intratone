@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.1](https://github.com/GuiHash/ha-intratone/compare/v0.7.0...v0.7.1) (2026-07-10)
+
+
+### Bug Fixes
+
+* **intratone:** call api/auth/verify at SMS onboarding to mirror the app ([#61](https://github.com/GuiHash/ha-intratone/issues/61)) ([fe686cd](https://github.com/GuiHash/ha-intratone/commit/fe686cd4f1374b7586ef13934849b3ba269b1bb8))
+* **intratone:** send the official app's okhttp User-Agent on API requests ([#61](https://github.com/GuiHash/ha-intratone/issues/61)) ([21d426b](https://github.com/GuiHash/ha-intratone/commit/21d426bbf06d065caacbf30d3ace73a9af96f5cb))
+
 ## [0.7.0](https://github.com/GuiHash/ha-intratone/compare/v0.6.3...v0.7.0) (2026-07-10)
 
 
