@@ -23,6 +23,7 @@ from .const import (
     API_BASE,
     APP_ID,
     APP_TOKEN,
+    APP_USER_AGENT,
     APP_VERSION,
     CONF_DEVICE_ID,
     CONF_NUMERIC_ID,
@@ -211,6 +212,7 @@ class IntratoneAPI:
         headers = {
             "Content-Type": "application/x-www-form-urlencoded",
             "Accept": "application/json",
+            "User-Agent": APP_USER_AGENT,
         }
         if jwt:
             headers["Authorization"] = f"Bearer {jwt}"
@@ -337,6 +339,7 @@ class IntratoneAPI:
             headers = {
                 "Accept": "application/json",
                 "Authorization": f"Bearer {self.jwt}",
+                "User-Agent": APP_USER_AGENT,
             }
             async with self._session.get(
                 API_BASE + path, headers=headers, timeout=REQUEST_TIMEOUT
@@ -674,6 +677,7 @@ async def register_with_invite(
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
         "Accept": "application/json",
+        "User-Agent": APP_USER_AGENT,
     }
     async with session.post(
         API_BASE + "api/auth/registercodes",
@@ -726,6 +730,7 @@ async def register_phone_for_sms(
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
         "Accept": "application/json",
+        "User-Agent": APP_USER_AGENT,
     }
     async with session.post(
         API_BASE + "api/auth/register",
@@ -772,6 +777,7 @@ async def validate_sms_code(
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
         "Accept": "application/json",
+        "User-Agent": APP_USER_AGENT,
     }
     async with session.post(
         API_BASE + "api/auth/validate",
@@ -809,6 +815,7 @@ async def authenticate_for_invite(
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
         "Accept": "application/json",
+        "User-Agent": APP_USER_AGENT,
     }
     last: dict[str, Any] = {}
     for candidate in candidates:

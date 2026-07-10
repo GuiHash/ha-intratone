@@ -34,6 +34,8 @@ DEVICE_OSV: Final = "36"
 DEVICE_MODEL: Final = "SM-S931B"
 DEVICE_MANUFACTURER: Final = "samsung"
 DEVICE_DESCRIPTION: Final = "Galaxy S25"
+# User-Agent sent by the official Android app (okhttp); mirror it on every Intratone request (issue #61).
+APP_USER_AGENT: Final = "okhttp/5.0.0-alpha.2"
 
 FCM_PROJECT_ID: Final = "android-ipvideo-studio"
 FCM_APP_ID: Final = "1:676502914290:android:5393f05ec7f22bd6"
