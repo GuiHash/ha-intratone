@@ -60,10 +60,16 @@ PATH_MOBIPASS_ACTIVATE: Final = "api/mobipass/activate"
 PATH_MOBIPASS_VERIFY: Final = "api/mobipass/otp/verify"
 
 # `code` values the server returns on a failed Mobipass request (the Android
-# `HTTPResponse.code`), mapped to user-facing errors in the config flow.
+# `HTTPResponse.code`), mapped to user-facing errors in the config flow. Values
+# verified against `MiiConstants` in the decompiled app v4.6.4 — note the blocked
+# and SMS codes are `MOBIPASS_BLOCKED` / `MOBIPASS_SMS_SENT` (no `_CODE_`).
 MOBIPASS_CODE_OTP_INVALID: Final = "MOBIPASS_OTP_INVALID"
-MOBIPASS_CODE_BLOCKED: Final = "MOBIPASS_CODE_BLOCKED"
+MOBIPASS_CODE_BLOCKED: Final = "MOBIPASS_BLOCKED"
 MOBIPASS_CODE_NOT_AVAILABLE: Final = "MOBIPASS_NOT_AVAILABLE"
+# Not an error: the transfer code was already sent (e.g. on a retried activate).
+# The app treats this as "proceed to code entry" (CodeSentingException shows no
+# error), so we do too.
+MOBIPASS_CODE_SMS_SENT: Final = "MOBIPASS_SMS_SENT"
 
 # `openmode` values. The official app routes the "open" tap by the access's
 # *first* mode (Android `AccessViewModel.openAccess`):

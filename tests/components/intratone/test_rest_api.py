@@ -370,6 +370,23 @@ async def test_mobipass_not_available_is_not_retried(
     assert exc.value.code == "MOBIPASS_NOT_AVAILABLE"
 
 
+async def test_mobipass_sms_already_sent_is_not_an_error(
+    hass, mock_entry, aiomock
+) -> None:
+    """MOBIPASS_SMS_SENT means the code was already sent (e.g. a retried
+    activate); the app moves straight to code entry, so we must NOT raise."""
+    mock_entry.add_to_hass(hass)
+    store = await _seeded_store(hass)
+    api = IntratoneAPI(hass, async_get_clientsession(hass), mock_entry, store)
+
+    aiomock.post(
+        f"{API_BASE}{PATH_MOBIPASS_ACTIVATE}",
+        payload={"state": "error", "code": "MOBIPASS_SMS_SENT"},
+    )
+    # No raise = caller proceeds to the OTP-entry step.
+    await api.mobipass_activate()
+
+
 async def test_register_with_invite_returns_data(hass, aiomock) -> None:
     aiomock.post(
         f"{API_BASE}api/auth/registercodes",

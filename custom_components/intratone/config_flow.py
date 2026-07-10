@@ -248,11 +248,12 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
         if api is None:
             return self.async_abort(reason="not_loaded")
 
-        # No eligibility precheck: the `auth/device` mobipass flags proved
-        # unreliable for our client (the official app is fed them via FCM push,
-        # so an eligible account can still report mobipass_compatible=0 — see
-        # issue #61). We let the server be the authority instead: mobipass_activate
-        # returns MOBIPASS_NOT_AVAILABLE when the transfer genuinely doesn't apply.
+        # The manual reconfigure path is intentionally ungated. Auto-detection
+        # (the Repair) already keys off the `auth/device` mobipass flags
+        # (`mobipass_compatible && !mobipass`); this manual entry is the override
+        # for when that doesn't surface. We let the server be the authority:
+        # mobipass_activate returns MOBIPASS_NOT_AVAILABLE when the transfer
+        # genuinely doesn't apply, which we map to a clear message (issue #61).
         errors: dict[str, str] = {}
         if user_input is not None:
             try:
