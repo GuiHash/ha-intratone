@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/GuiHash/ha-intratone/compare/v0.6.0...v0.6.1) (2026-07-10)
+
+
+### Bug Fixes
+
+* **mobipass:** read the access_refresh flag under its real key ([#61](https://github.com/GuiHash/ha-intratone/issues/61)) ([895de99](https://github.com/GuiHash/ha-intratone/commit/895de9955d68cc024c0bbd8624c5effc41e62183))
+
 ## [0.6.0](https://github.com/GuiHash/ha-intratone/compare/v0.5.0...v0.6.0) (2026-07-10)
 
 ### Bug Fixes
