@@ -49,6 +49,26 @@ _POST_BYE_GRACE_S = 60
 # the FCM listener thread.
 _SIP_CONNECT_TIMEOUT_S = 5.0
 
+# Kernel receive-buffer target for RTP sockets. A VP8 keyframe arrives as a
+# multi-packet burst, and the event loop can be busy for hundreds of ms while
+# ffmpeg spawns; if the kernel drops part of that burst, the forwarding gate
+# stays closed until the next natural keyframe (8-12 s of black screen). Only
+# ever *raise* the buffer — some platforms (macOS) default higher than this,
+# and the kernel may clamp the request (Linux caps at net.core.rmem_max).
+_RTP_RCVBUF_BYTES = 262144
+
+
+def _new_rtp_socket() -> socket.socket:
+    """UDP socket preconfigured for RTP reception (non-blocking, big rcvbuf)."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setblocking(False)
+    try:
+        if sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF) < _RTP_RCVBUF_BYTES:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, _RTP_RCVBUF_BYTES)
+    except OSError:
+        pass  # best effort — the default buffer still works
+    return sock
+
 
 def _bind_rtp_socket() -> socket.socket:
     """Bind a UDP socket on a free port in the RTP range and hand it back.
@@ -58,8 +78,7 @@ def _bind_rtp_socket() -> socket.socket:
     """
     last_error: OSError | None = None
     for port in _RTP_PORT_RANGE:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setblocking(False)
+        sock = _new_rtp_socket()
         try:
             sock.bind(("0.0.0.0", port))
             return sock
@@ -80,16 +99,14 @@ def _bind_rtp_pair() -> tuple[socket.socket, socket.socket]:
     """
     last_error: OSError | None = None
     for port in _RTP_PORT_RANGE:
-        rtp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        rtp_sock.setblocking(False)
+        rtp_sock = _new_rtp_socket()
         try:
             rtp_sock.bind(("0.0.0.0", port))
         except OSError as err:
             last_error = err
             rtp_sock.close()
             continue
-        rtcp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        rtcp_sock.setblocking(False)
+        rtcp_sock = _new_rtp_socket()
         try:
             rtcp_sock.bind(("0.0.0.0", port + 1))
             return rtp_sock, rtcp_sock
@@ -262,6 +279,12 @@ class CallManager:
             raise
 
         self._active_call_id = call_id
+        # Overlap ffmpeg's startup (~100-400 ms) with the INVITE→200 OK
+        # round-trip — its inputs are local-only, nothing from the answer is
+        # needed. Video-only: see AudioBridge.prewarm for why the placeholder
+        # variant must stay on-demand.
+        if video_rtp_port is not None:
+            self._bridge.prewarm(video=True)
         effective_max_s = (
             max_duration_s if max_duration_s and max_duration_s > 0 else _MAX_CALL_DURATION_S
         )
@@ -385,6 +408,11 @@ class CallManager:
         if self._max_duration_task is not None and not self._max_duration_task.done():
             self._max_duration_task.cancel()
         self._max_duration_task = None
+        # If the call died before CONFIRMED, the prewarmed ffmpeg was never
+        # adopted by bridge.start() — reap it now instead of letting it idle
+        # until the grace-period teardown calls bridge.stop() (60 s away).
+        # No-op when the prewarm was consumed (normal established call).
+        self._bridge.cancel_prewarm()
         # If the call never reached CONFIRMED, both RTP sockets were bound but
         # never handed to AudioBridge — close them here to avoid leaks.
         self._close_pending_sockets()

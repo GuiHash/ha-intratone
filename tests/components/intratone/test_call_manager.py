@@ -474,6 +474,74 @@ async def test_max_call_duration_forces_teardown(manager, fake_bridge, ended_cal
     assert ended_calls == [call_id]
 
 
+# --- ffmpeg prewarm -------------------------------------------------------
+
+
+async def test_start_call_prewarms_video_ffmpeg(fake_bridge):
+    """With video enabled, start_call must kick the ffmpeg prewarm right after
+    the INVITE goes out — its startup overlaps the INVITE→200 OK round-trip."""
+    mgr = CallManager(
+        local_host=LOCAL_HOST,
+        on_call_active=lambda *_: None,
+        on_call_ended=lambda *_: None,
+        video_enabled=True,
+        audio_bridge=fake_bridge,
+    )
+
+    async def fake_create_connection(protocol_factory, **_kwargs):
+        proto = protocol_factory()
+        transport = _FakeTcpTransport()
+        proto.connection_made(transport)
+        return transport, proto
+
+    def _fake_sock(port: int) -> MagicMock:
+        sock = MagicMock()
+        sock.getsockname = MagicMock(return_value=("0.0.0.0", port))
+        sock.close = MagicMock()
+        return sock
+
+    with (
+        patch.object(
+            asyncio.get_running_loop(),
+            "create_connection",
+            side_effect=fake_create_connection,
+        ),
+        patch(
+            "custom_components.intratone.call_manager._bind_rtp_socket",
+            return_value=_fake_sock(16400),
+        ),
+        patch(
+            "custom_components.intratone.call_manager._bind_rtp_pair",
+            return_value=(_fake_sock(16402), _fake_sock(16403)),
+        ),
+    ):
+        await mgr.async_start()
+        call_id = await mgr.start_call(TARGET_URI, SERVER_IP, SIP_USER, SIP_PASS)
+        assert call_id is not None
+        fake_bridge.prewarm.assert_called_once_with(video=True)
+        await mgr.async_stop()
+
+
+async def test_call_terminated_before_established_cancels_prewarm(
+    manager, fake_bridge
+):
+    """INVITE rejected before 200 OK → the bridge is only stopped after the
+    60 s grace window; the unadopted prewarmed ffmpeg must be reaped now."""
+    call_id = await manager.start_call(TARGET_URI, SERVER_IP, SIP_USER, SIP_PASS)
+    assert call_id is not None
+    manager._handle_call_terminated(call_id)
+    fake_bridge.cancel_prewarm.assert_called_once()
+
+
+async def test_start_call_does_not_prewarm_without_video(manager, fake_bridge):
+    """Audio-only config: the lavfi placeholder ffmpeg pushes to go2rtc as
+    soon as it spawns, so prewarming it would publish a stream before the
+    call even exists — must stay on-demand."""
+    call_id = await manager.start_call(TARGET_URI, SERVER_IP, SIP_USER, SIP_PASS)
+    assert call_id is not None
+    fake_bridge.prewarm.assert_not_called()
+
+
 # --- socket binder --------------------------------------------------------
 
 
@@ -490,6 +558,39 @@ def test_bind_rtp_socket_returns_bound_socket(socket_enabled):
         assert port % 2 == 0  # RTP convention: even ports
     finally:
         sock.close()
+
+
+def test_bind_rtp_socket_never_shrinks_receive_buffer(socket_enabled):
+    """The RTP receive buffer must be at least the OS default — a VP8 keyframe
+    burst dropped while the event loop is busy (ffmpeg spawn) costs the full
+    8-12 s natural keyframe interval, so shrinking the buffer is a regression."""
+    import socket as socket_mod
+
+    from custom_components.intratone.call_manager import (
+        _bind_rtp_pair,
+        _bind_rtp_socket,
+    )
+
+    plain = socket_mod.socket(socket_mod.AF_INET, socket_mod.SOCK_DGRAM)
+    try:
+        default_rcvbuf = plain.getsockopt(
+            socket_mod.SOL_SOCKET, socket_mod.SO_RCVBUF
+        )
+    finally:
+        plain.close()
+
+    sock = _bind_rtp_socket()
+    rtp_sock, rtcp_sock = _bind_rtp_pair()
+    try:
+        for s in (sock, rtp_sock):
+            assert (
+                s.getsockopt(socket_mod.SOL_SOCKET, socket_mod.SO_RCVBUF)
+                >= default_rcvbuf
+            )
+    finally:
+        sock.close()
+        rtp_sock.close()
+        rtcp_sock.close()
 
 
 def test_bind_rtp_pair_returns_adjacent_ports(socket_enabled):

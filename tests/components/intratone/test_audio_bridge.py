@@ -7,6 +7,7 @@ pytest-socket blocks them) and the ffmpeg lifecycle with mocked subprocess.
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
 import struct
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -420,6 +421,197 @@ async def test_stderr_is_drained_to_logger(
     await bridge.stop()
 
 
+# --- AudioBridge.prewarm ---------------------------------------------------
+
+
+def _make_fake_process():
+    """Standalone fake ffmpeg process — unlike the `fake_process` fixture,
+    several can coexist in one test (prewarm + on-demand respawn)."""
+    proc = MagicMock()
+    proc.returncode = None
+    proc.stdin = MagicMock()
+    proc.stdin.is_closing = MagicMock(return_value=False)
+    proc.stdin.close = MagicMock()
+    proc.stdin.write = MagicMock()
+    stderr_lines = iter([b"Output #0, rtsp, to 'rtsp://test':\n", b""])
+    proc.stderr = MagicMock()
+    proc.stderr.readline = AsyncMock(side_effect=lambda: next(stderr_lines))
+    proc.send_signal = MagicMock(
+        side_effect=lambda sig: setattr(proc, "_last_signal", sig)
+    )
+    proc.kill = MagicMock()
+
+    async def _wait():
+        proc.returncode = 0
+        return 0
+
+    proc.wait = AsyncMock(side_effect=_wait)
+    return proc
+
+
+def _patch_spawn(processes):
+    return patch(
+        "custom_components.intratone.audio_bridge.asyncio.create_subprocess_exec",
+        new=AsyncMock(side_effect=processes),
+    )
+
+
+def _patch_video_port(port: int = 55555):
+    return patch(
+        "custom_components.intratone.audio_bridge._pick_free_udp_port",
+        return_value=port,
+    )
+
+
+async def test_prewarm_ffmpeg_is_reused_by_video_start(fake_datagram_endpoint):
+    """prewarm() spawns the video-SDP ffmpeg during SIP negotiation; a video
+    start() must reuse that process instead of spawning a second one."""
+    with _patch_spawn([_make_fake_process()]) as spawn, _patch_video_port():
+        bridge = AudioBridge()
+        bridge.prewarm(video=True)
+        await asyncio.sleep(0)
+        assert spawn.await_count == 1
+        args = " ".join(spawn.await_args.args[1:])
+        assert "-f sdp" in args  # video variant, not the lavfi placeholder
+
+        url = await bridge.start(
+            rtp_socket=_fake_rtp_socket(16384),
+            remote_rtp_ip="178.32.84.135",
+            remote_rtp_port=20000,
+            video_socket=_fake_rtp_socket(16386),
+            remote_video_rtp_ip="178.32.84.135",
+            remote_video_rtp_port=52982,
+            video_rtcp_socket=_fake_rtp_socket(16387),
+        )
+        assert url == bridge.rtsp_url
+        assert bridge.is_running
+        assert spawn.await_count == 1  # no respawn — prewarmed process reused
+        await bridge.stop()
+        assert bridge._video_sdp_path is None  # temp SDP cleaned up
+
+
+async def test_prewarm_discarded_when_server_rejects_video(fake_datagram_endpoint):
+    """If the 200 OK carries no video, the prewarmed video-SDP ffmpeg must be
+    killed and the lavfi-placeholder variant spawned instead."""
+    prewarm_proc = _make_fake_process()
+    call_proc = _make_fake_process()
+    sdp_paths: list[str] = []
+    orig_write_sdp = AudioBridge._write_video_sdp
+
+    def _capture_sdp(self, port):
+        path = orig_write_sdp(self, port)
+        sdp_paths.append(path)
+        return path
+
+    with (
+        _patch_spawn([prewarm_proc, call_proc]) as spawn,
+        _patch_video_port(),
+        patch.object(AudioBridge, "_write_video_sdp", _capture_sdp),
+    ):
+        bridge = AudioBridge()
+        bridge.prewarm(video=True)
+        await asyncio.sleep(0)
+
+        url = await bridge.start(
+            rtp_socket=_fake_rtp_socket(16384),
+            remote_rtp_ip="178.32.84.135",
+            remote_rtp_port=20000,
+        )
+        assert url == bridge.rtsp_url
+        assert spawn.await_count == 2
+        prewarm_proc.kill.assert_called_once()
+        second_args = " ".join(spawn.await_args_list[1].args[1:])
+        assert "-f lavfi" in second_args
+        assert "-f sdp" not in second_args
+        # The prewarm's temp SDP file must not leak.
+        assert sdp_paths and not os.path.exists(sdp_paths[0])
+        await bridge.stop()
+
+
+async def test_stop_discards_unused_prewarm():
+    """A call that dies before 200 OK never consumes the prewarm — stop()
+    must kill the process and clean the temp SDP file."""
+    proc = _make_fake_process()
+    sdp_paths: list[str] = []
+    orig_write_sdp = AudioBridge._write_video_sdp
+
+    def _capture_sdp(self, port):
+        path = orig_write_sdp(self, port)
+        sdp_paths.append(path)
+        return path
+
+    with (
+        _patch_spawn([proc]),
+        _patch_video_port(),
+        patch.object(AudioBridge, "_write_video_sdp", _capture_sdp),
+    ):
+        bridge = AudioBridge()
+        bridge.prewarm(video=True)
+        await asyncio.sleep(0)
+        await bridge.stop()
+
+    proc.kill.assert_called_once()
+    assert not bridge.is_running
+    assert bridge._prewarm_task is None
+    assert sdp_paths and not os.path.exists(sdp_paths[0])
+
+
+async def test_cancel_prewarm_kills_process_without_stop():
+    """`cancel_prewarm()` (sync, callable from SIP callbacks) must reap the
+    unadopted ffmpeg promptly instead of leaving it to idle until the 60 s
+    post-BYE grace teardown finally calls stop()."""
+    proc = _make_fake_process()
+    with _patch_spawn([proc]), _patch_video_port():
+        bridge = AudioBridge()
+        bridge.prewarm(video=True)
+        await asyncio.sleep(0)
+        bridge.cancel_prewarm()
+        for _ in range(10):
+            await asyncio.sleep(0)
+            if proc.kill.called:
+                break
+        proc.kill.assert_called_once()
+        assert bridge._prewarm_task is None
+        await bridge.stop()  # still safe afterwards
+
+
+async def test_prewarm_failure_falls_back_to_normal_spawn(fake_datagram_endpoint):
+    """A failed prewarm (ffmpeg missing, spawn error) must not break the call:
+    start() falls back to the on-demand spawn path."""
+    proc = _make_fake_process()
+    with (
+        _patch_spawn([FileNotFoundError("no ffmpeg"), proc]) as spawn,
+        _patch_video_port(),
+    ):
+        bridge = AudioBridge()
+        bridge.prewarm(video=True)
+        await asyncio.sleep(0)
+        url = await bridge.start(
+            rtp_socket=_fake_rtp_socket(16384),
+            remote_rtp_ip="178.32.84.135",
+            remote_rtp_port=20000,
+        )
+        assert url == bridge.rtsp_url
+        assert bridge.is_running
+        assert spawn.await_count == 2
+        await bridge.stop()
+
+
+async def test_prewarm_noop_when_bridge_already_running(
+    mock_subprocess, fake_datagram_endpoint
+):
+    bridge = AudioBridge()
+    await bridge.start(
+        rtp_socket=_fake_rtp_socket(16384),
+        remote_rtp_ip="178.32.84.135",
+        remote_rtp_port=20000,
+    )
+    bridge.prewarm(video=True)
+    assert bridge._prewarm_task is None
+    assert mock_subprocess.await_count == 1
+    await bridge.stop()
+
+
 # --- PLI helpers ---------------------------------------------------------
 
 
@@ -521,6 +713,8 @@ async def test_video_rtp_protocol_marks_keyframe_received():
     assert proto.keyframe_received is True
     assert proto.first_keyframe_at is not None
     assert proto.first_rtp_at is not None
+    assert proto.first_rtp_event.is_set()
+    assert proto.keyframe_event.is_set()
 
 
 async def test_video_rtp_protocol_keyframe_flag_sticks_after_interframe():
@@ -537,3 +731,148 @@ async def test_video_rtp_protocol_keyframe_flag_sticks_after_interframe():
         rtp_header + bytes([0x10, 0x01, 0x00, 0x00]), ("x", 1)
     )
     assert proto.keyframe_received is True
+
+
+_VP8_RTP_HEADER = struct.pack(">BBHII", 0b10000000, 96, 1, 0, 0xDEADBEEF)
+_VP8_KEYFRAME_PKT = _VP8_RTP_HEADER + bytes([0x10, 0x00, 0x00, 0x00])
+_VP8_INTERFRAME_PKT = _VP8_RTP_HEADER + bytes([0x10, 0x01, 0x00, 0x00])
+
+
+async def test_video_rtp_gate_drops_interframes_until_keyframe():
+    """Pre-keyframe P-frames must NOT reach ffmpeg (VP8 decoder would enter a
+    stuck error state); the keyframe itself and everything after must be
+    forwarded to the ffmpeg loopback target."""
+    proto = _VideoRtpProtocol(ffmpeg_target=("127.0.0.1", 12345))
+    transport = _FakeTransport()
+    proto.connection_made(transport)
+
+    proto.datagram_received(_VP8_INTERFRAME_PKT, ("x", 1))
+    assert proto.rtp_packets_forwarded == 0
+    assert transport.sent == []
+
+    proto.datagram_received(_VP8_KEYFRAME_PKT, ("x", 1))
+    proto.datagram_received(_VP8_INTERFRAME_PKT, ("x", 1))
+    assert proto.rtp_packets_forwarded == 2
+    assert [addr for _, addr in transport.sent] == [("127.0.0.1", 12345)] * 2
+
+
+# --- AudioBridge._pli_loop -------------------------------------------------
+
+
+def _bridge_with_video(on_video_failure=None):
+    """AudioBridge with real video RTP/RTCP protocols on fake transports —
+    just enough wiring for `_pli_loop` to run without sockets or ffmpeg."""
+    bridge = AudioBridge()
+    bridge._video_rtp = _VideoRtpProtocol(ffmpeg_target=("127.0.0.1", 12345))
+    bridge._video_rtp.connection_made(_FakeTransport())
+    bridge._video_rtcp = _VideoRtcpProtocol(remote_addr=("178.32.84.135", 52983))
+    rtcp_transport = _FakeTransport()
+    bridge._video_rtcp.connection_made(rtcp_transport)
+    bridge._on_video_failure = on_video_failure
+    return bridge, rtcp_transport
+
+
+async def _wait_until(cond, timeout_s: float = 1.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout_s
+    while not cond():
+        if asyncio.get_running_loop().time() > deadline:
+            raise AssertionError("condition not met in time")
+        await asyncio.sleep(0.001)
+
+
+async def test_pli_loop_sends_first_pli_immediately_on_first_rtp():
+    """The first PLI (keyframe request) must go out as soon as the first RTP
+    packet reveals the media SSRC — event-driven, no polling delay. A handful
+    of bare event-loop ticks (no wall-clock sleep) must be enough."""
+    bridge, rtcp_transport = _bridge_with_video()
+    task = asyncio.create_task(bridge._pli_loop())
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert rtcp_transport.sent == []  # no RTP yet → no PLI
+
+    bridge._video_rtp.datagram_received(_VP8_INTERFRAME_PKT, ("x", 1))
+    for _ in range(10):
+        await asyncio.sleep(0)
+        if rtcp_transport.sent:
+            break
+    assert len(rtcp_transport.sent) == 1
+    task.cancel()
+
+
+async def test_pli_loop_gives_up_without_rtp_and_sends_nothing():
+    """No VP8 RTP within the first-RTP window → loop exits without sending a
+    single PLI and without firing the video-failure callback."""
+    failure = MagicMock()
+    bridge, rtcp_transport = _bridge_with_video(on_video_failure=failure)
+    with patch(
+        "custom_components.intratone.audio_bridge._PLI_WAIT_FIRST_RTP_S", 0.01
+    ):
+        await asyncio.wait_for(bridge._pli_loop(), timeout=2)
+    assert rtcp_transport.sent == []
+    failure.assert_not_called()
+
+
+async def test_pli_loop_exhausts_burst_then_fires_video_failure():
+    """RTP flows but no keyframe ever arrives → the loop sends the full PLI
+    burst then asks CallManager for the audio-only re-INVITE."""
+    failure = MagicMock()
+    bridge, rtcp_transport = _bridge_with_video(on_video_failure=failure)
+    # First RTP already seen (interframe) so the SSRC is known.
+    bridge._video_rtp.datagram_received(_VP8_INTERFRAME_PKT, ("x", 1))
+    with patch("custom_components.intratone.audio_bridge._PLI_INTERVAL_S", 0.001):
+        await asyncio.wait_for(bridge._pli_loop(), timeout=2)
+    assert bridge._video_rtcp.pli_sent == 10  # _PLI_MAX_SENDS
+    # Every PLI targeted the gateway's RTCP address.
+    assert all(addr == ("178.32.84.135", 52983) for _, addr in rtcp_transport.sent)
+    failure.assert_called_once()
+
+
+async def test_pli_loop_stops_burst_when_keyframe_arrives():
+    """A keyframe mid-burst stops the PLI spam and the failure callback must
+    never fire; the loop then parks in the periodic phase."""
+    failure = MagicMock()
+    bridge, _ = _bridge_with_video(on_video_failure=failure)
+    bridge._video_rtp.datagram_received(_VP8_INTERFRAME_PKT, ("x", 1))
+    with patch("custom_components.intratone.audio_bridge._PLI_INTERVAL_S", 0.01):
+        task = asyncio.create_task(bridge._pli_loop())
+        await _wait_until(lambda: bridge._video_rtcp.pli_sent >= 1)
+        bridge._video_rtp.datagram_received(_VP8_KEYFRAME_PKT, ("x", 1))
+        # The burst must settle (no more PLIs) instead of running to 10.
+        await asyncio.sleep(0.05)
+        settled = bridge._video_rtcp.pli_sent
+        await asyncio.sleep(0.05)
+        assert bridge._video_rtcp.pli_sent == settled < 10
+        assert not task.done()  # periodic phase keeps running
+        task.cancel()
+    failure.assert_not_called()
+
+
+async def test_pli_loop_periodic_resets_gate_and_reopens_on_keyframe():
+    """Periodic PLI closes the forwarding gate; the fresh keyframe reopens it
+    and interframes flow to ffmpeg again."""
+    bridge, _ = _bridge_with_video()
+    video = bridge._video_rtp
+    video.datagram_received(_VP8_INTERFRAME_PKT, ("x", 1))
+    with (
+        patch("custom_components.intratone.audio_bridge._PLI_INTERVAL_S", 0.001),
+        patch(
+            "custom_components.intratone.audio_bridge._PLI_PERIODIC_INTERVAL_S",
+            0.01,
+        ),
+    ):
+        task = asyncio.create_task(bridge._pli_loop())
+        await _wait_until(lambda: bridge._video_rtcp.pli_sent >= 1)
+        video.datagram_received(_VP8_KEYFRAME_PKT, ("x", 1))
+        burst_plis = bridge._video_rtcp.pli_sent
+        # Wait for the periodic PLI — it must reset the keyframe gate.
+        await _wait_until(lambda: bridge._video_rtcp.pli_sent > burst_plis)
+        await _wait_until(lambda: video.keyframe_received is False)
+        forwarded_before = video.rtp_packets_forwarded
+        video.datagram_received(_VP8_INTERFRAME_PKT, ("x", 1))
+        assert video.rtp_packets_forwarded == forwarded_before  # gate closed
+        # Fresh keyframe reopens the gate.
+        video.datagram_received(_VP8_KEYFRAME_PKT, ("x", 1))
+        assert video.keyframe_received is True
+        video.datagram_received(_VP8_INTERFRAME_PKT, ("x", 1))
+        assert video.rtp_packets_forwarded == forwarded_before + 2
+        task.cancel()
