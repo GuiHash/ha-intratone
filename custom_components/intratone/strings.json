@@ -68,8 +68,6 @@
       "reauth_successful": "Re-pairing successful.",
       "reconfigure_successful": "Reconfiguration successful.",
       "mobipass_transfer_successful": "The CléMobil is now active on Home Assistant. Your doors should appear shortly.",
-      "mobipass_already_active": "The CléMobil is already active on Home Assistant — nothing to transfer.",
-      "mobipass_not_eligible": "Your account doesn’t use the CléMobil single-owner scheme, so there’s nothing to transfer.",
       "not_loaded": "The Intratone integration must be loaded before transferring the CléMobil."
     }
   },

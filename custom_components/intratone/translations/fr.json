@@ -68,8 +68,6 @@
       "reauth_successful": "Re-couplage réussi.",
       "reconfigure_successful": "Reconfiguration réussie.",
       "mobipass_transfer_successful": "La CléMobil est maintenant active sur Home Assistant. Vos portes devraient apparaître sous peu.",
-      "mobipass_already_active": "La CléMobil est déjà active sur Home Assistant — rien à transférer.",
-      "mobipass_not_eligible": "Votre compte n'utilise pas le système CléMobil mono-appareil, il n'y a donc rien à transférer.",
       "not_loaded": "L'intégration Intratone doit être chargée avant de transférer la CléMobil."
     }
   },

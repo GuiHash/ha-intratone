@@ -265,6 +265,12 @@ class IntratoneAPI:
             data = body.get("data") or {}
             if data.get("jwt"):
                 self.mobipass_state = _parse_mobipass_state(data)
+                # Logged so testers on affected accounts (issue #61) can report
+                # the real flag values — they aren't reliably set for our client
+                # (the app is fed them via FCM push), so we don't gate on them.
+                _LOGGER.debug(
+                    "auth/device mobipass flags: %s", self.mobipass_state
+                )
                 return data
 
         raise IntratoneAuthError(

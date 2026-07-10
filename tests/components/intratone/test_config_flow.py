@@ -204,24 +204,16 @@ async def test_reauth_silent_refresh_succeeds(
     assert mock_entry.runtime_data.store.jwt == "renewed.jwt"
 
 
-async def _setup_loaded_entry(hass, mock_entry, aiomock, *, needs_transfer=True) -> None:
+async def _setup_loaded_entry(hass, mock_entry, aiomock) -> None:
     """Load an entry so its runtime_data.api is available to the flow.
 
-    The auth/device flags decide whether the reconfigure precheck offers the
-    transfer (`needs_transfer` → compatible but key held elsewhere) or aborts.
+    auth/device carries no mobipass flags here (they default to 0/0) — this is
+    the real-world case of an eligible account whose flags aren't set for our
+    client (issue #61). Reconfigure must still offer the transfer regardless.
     """
-    mobipass = "0" if needs_transfer else "1"
     aiomock.post(
         f"{API_BASE}api/auth/device",
-        payload={
-            "state": "ok",
-            "data": {
-                "jwt": "j",
-                "id": "3844428",
-                "mobipass_compatible": "1",
-                "mobipass": mobipass,
-            },
-        },
+        payload={"state": "ok", "data": {"jwt": "j", "id": "3844428"}},
         repeat=True,
     )
     aiomock.get(
@@ -237,7 +229,11 @@ async def _setup_loaded_entry(hass, mock_entry, aiomock, *, needs_transfer=True)
 async def test_mobipass_transfer_happy_path(
     hass, mock_entry: MockConfigEntry, aiomock, mock_fcm_client, mock_call_manager
 ) -> None:
-    """Reconfigure → activate (SMS) → enter code → transfer succeeds and reloads."""
+    """Reconfigure → activate (SMS) → enter code → transfer succeeds and reloads.
+
+    The entry reports no mobipass flags (like the affected users in #61), so this
+    also guards against a false "nothing to transfer" abort.
+    """
     await _setup_loaded_entry(hass, mock_entry, aiomock)
     aiomock.post(
         f"{API_BASE}{PATH_MOBIPASS_ACTIVATE}", payload={"state": "ok", "error": 0}
@@ -288,17 +284,6 @@ async def test_mobipass_transfer_invalid_code_shows_error(
     )
     assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {"base": "mobipass_code_invalid"}
-
-
-async def test_mobipass_reconfigure_aborts_when_key_already_here(
-    hass, mock_entry: MockConfigEntry, aiomock, mock_fcm_client, mock_call_manager
-) -> None:
-    """Reconfigure short-circuits (no SMS) when the key is already on HA."""
-    await _setup_loaded_entry(hass, mock_entry, aiomock, needs_transfer=False)
-
-    result = await mock_entry.start_reconfigure_flow(hass)
-    assert result["type"] is FlowResultType.ABORT
-    assert result["reason"] == "mobipass_already_active"
 
 
 async def test_reauth_falls_back_to_form_when_silent_refresh_rejected(

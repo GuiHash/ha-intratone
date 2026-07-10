@@ -248,22 +248,11 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
         if api is None:
             return self.async_abort(reason="not_loaded")
 
-        # Only offer the transfer when it's actually needed. Refresh the flags
-        # first (best-effort — if the check fails, fall through and let the user
-        # try anyway rather than block on a transient error).
-        if user_input is None:
-            try:
-                await api.authenticate_device()
-            except Exception:  # noqa: BLE001
-                _LOGGER.debug("mobipass reconfigure precheck failed", exc_info=True)
-            state = api.mobipass_state
-            if state is not None and not state.needs_transfer:
-                return self.async_abort(
-                    reason="mobipass_already_active"
-                    if state.mobipass
-                    else "mobipass_not_eligible"
-                )
-
+        # No eligibility precheck: the `auth/device` mobipass flags proved
+        # unreliable for our client (the official app is fed them via FCM push,
+        # so an eligible account can still report mobipass_compatible=0 — see
+        # issue #61). We let the server be the authority instead: mobipass_activate
+        # returns MOBIPASS_NOT_AVAILABLE when the transfer genuinely doesn't apply.
         errors: dict[str, str] = {}
         if user_input is not None:
             try:
