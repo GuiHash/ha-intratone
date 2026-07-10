@@ -158,7 +158,7 @@ Body fields:
 | `manufacturer`         | any string                           |
 | `device_id`            | your stable client UUID              |
 | `description`          | any string                           |
-| `appversion`           | `4.6.3`                              |
+| `appversion`           | `4.6.4`                              |
 | `id_fcm`               | your FCM token                       |
 | `id_wonderpush`        | empty                                |
 | `pushkit_id`           | empty (iOS only)                     |
@@ -192,7 +192,7 @@ Body:
 | `app_token`   | (constant)                  |
 | `tel`         | phone from registercodes    |
 | `device_id`   | same as registration        |
-| `appversion`  | `4.6.3`                     |
+| `appversion`  | `4.6.4`                     |
 
 Response:
 ```json

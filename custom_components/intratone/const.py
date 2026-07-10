@@ -11,7 +11,11 @@ MODEL: Final = "Intratone Bridge (HA)"
 API_BASE: Final = "https://sip.intratone.info/"
 APP_ID: Final = "app_apisip_android"
 APP_TOKEN: Final = ">KompY95?oijeIKR8049?OLysIekjpceKejLAHhh"
-APP_VERSION: Final = "4.6.3"
+# Sent as `appversion` on every request. Bumped 4.6.3 → 4.6.4 to match the app
+# version that introduced Mobipass: the server returns MOBIPASS_NOT_AVAILABLE to
+# affected accounts on this client, and it may be gating the mobipass endpoints
+# on the reported app version (issue #61).
+APP_VERSION: Final = "4.6.4"
 DEVICE_BUNDLE_ID: Final = "com.cogelec.notificationpush"
 
 FCM_PROJECT_ID: Final = "android-ipvideo-studio"
