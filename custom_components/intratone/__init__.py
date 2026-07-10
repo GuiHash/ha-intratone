@@ -199,6 +199,13 @@ def _evaluate_mobipass_issue(
     api: IntratoneAPI = entry.runtime_data.api
     state = api.mobipass_state
     issue_id = _mobipass_issue_id(entry)
+    # Logged so a persistent/absent repair report (issue #61) can be correlated
+    # with the flags that drove the decision.
+    _LOGGER.debug(
+        "Mobipass repair check: state=%s → %s",
+        state,
+        "raising issue" if (state is not None and state.needs_transfer) else "clearing issue",
+    )
     if state is not None and state.needs_transfer:
         ir.async_create_issue(
             hass,
