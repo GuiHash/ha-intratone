@@ -218,8 +218,7 @@ Response:
 #### CléMobil / Mobipass flags (`data.*`, each a `"1"`/`"0"` string)
 
 Confirmed by decompiling the Android `AuthDevice` parser in v4.6.4
-(`AuthRepositoryImpl` reads them into four booleans). These are the cleanest
-signal for whether the remote-open key is usable on *this* device:
+(`AuthRepositoryImpl` reads them into four booleans):
 
 | field                 | meaning                                                                 |
 | --------------------- | ----------------------------------------------------------------------- |
@@ -229,10 +228,14 @@ signal for whether the remote-open key is usable on *this* device:
 | `mobipass`            | the Mobipass key is currently **active on this device**                 |
 
 Since ~June 2026 only one device per phone number may hold the key. The app
-treats the key as usable when `mobipass_compatible && mobipass`. So
-**`mobipass_compatible == "1"` and `mobipass == "0"`** means the number is
-eligible but the key lives on another device (typically the user's phone) — a
-transfer is required before `GET /api/access` returns anything (see §4.7).
+treats the key as usable when `mobipass_compatible && mobipass`.
+
+> **These flags are NOT a reliable eligibility signal for a third-party client.**
+> The official app is also fed `mobipassCompatible`/`mobipass` out-of-band via
+> FCM push (`AccessEvent.MobipassCompatible`), so an account that *is* eligible
+> can still report `mobipass_compatible == "0"` on `auth/device` for our client
+> (observed in issue #61). Don't gate the transfer on them — attempt the flow in
+> §4.7 and let the server answer (`MOBIPASS_NOT_AVAILABLE` when it truly can't).
 
 ### 4.3 — `POST /api/calls/{call_id}/answer`  (Open door)
 
