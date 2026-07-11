@@ -14,11 +14,13 @@ from custom_components.intratone.const import (
     CONF_INVITE_CODE,
     CONF_JWT,
     CONF_NUMERIC_ID,
+    CONF_REGISTER_METHOD,
     CONF_TEL,
     DOMAIN,
     PATH_ACCESS_LIST,
     PATH_MOBIPASS_ACTIVATE,
     PATH_MOBIPASS_VERIFY,
+    REGISTER_METHOD_SMS,
 )
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -228,16 +230,26 @@ async def test_reauth_silent_refresh_succeeds(
     assert mock_entry.runtime_data.store.jwt == "renewed.jwt"
 
 
-async def _setup_loaded_entry(hass, mock_entry, aiomock) -> None:
+async def _setup_loaded_entry(
+    hass, mock_entry, aiomock, *, compatible="1", mobipass="0"
+) -> None:
     """Load an entry so its runtime_data.api is available to the flow.
 
-    auth/device carries no mobipass flags here (they default to 0/0) — this is
-    the real-world case of an eligible account whose flags aren't set for our
-    client (issue #61). Reconfigure must still offer the transfer regardless.
+    The auth/device mobipass flags drive the reconfigure precheck:
+    `compatible="1", mobipass="0"` (default) → transfer needed → the flow
+    proceeds; other combinations make it abort (issue #61).
     """
     aiomock.post(
         f"{API_BASE}api/auth/device",
-        payload={"state": "ok", "data": {"jwt": "j", "id": "3844428"}},
+        payload={
+            "state": "ok",
+            "data": {
+                "jwt": "j",
+                "id": "3844428",
+                "mobipass_compatible": compatible,
+                "mobipass": mobipass,
+            },
+        },
         repeat=True,
     )
     aiomock.get(
@@ -255,8 +267,8 @@ async def test_mobipass_transfer_happy_path(
 ) -> None:
     """Reconfigure → activate (SMS) → enter code → transfer succeeds and reloads.
 
-    The entry reports no mobipass flags (like the affected users in #61), so this
-    also guards against a false "nothing to transfer" abort.
+    The invite-paired entry is eligible with the key held elsewhere
+    (compatible=1, mobipass=0), so the precheck lets the transfer proceed.
     """
     await _setup_loaded_entry(hass, mock_entry, aiomock)
     aiomock.post(
@@ -308,6 +320,63 @@ async def test_mobipass_transfer_invalid_code_shows_error(
     )
     assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {"base": "mobipass_code_invalid"}
+
+
+async def test_mobipass_reconfigure_aborts_when_key_already_here(
+    hass, mock_entry: MockConfigEntry, aiomock, mock_fcm_client, mock_call_manager
+) -> None:
+    """Reconfigure short-circuits (no SMS) when the key is already on HA."""
+    await _setup_loaded_entry(hass, mock_entry, aiomock, mobipass="1")
+
+    result = await mock_entry.start_reconfigure_flow(hass)
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "mobipass_already_active"
+
+
+async def test_mobipass_reconfigure_not_eligible_for_invite_account(
+    hass, mock_entry: MockConfigEntry, aiomock, mock_fcm_client, mock_call_manager
+) -> None:
+    """An invite-paired account the server reports as non-eligible aborts."""
+    await _setup_loaded_entry(hass, mock_entry, aiomock, compatible="0")
+
+    result = await mock_entry.start_reconfigure_flow(hass)
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "mobipass_not_eligible"
+
+
+async def test_mobipass_reconfigure_sms_paired_points_to_invite_code(
+    hass, mock_entry_data, aiomock, mock_fcm_client, mock_call_manager
+) -> None:
+    """An SMS-paired device can't get the CléMobil → steer to invitation code."""
+    sms_entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="3844428",
+        title="Intratone (SMS)",
+        data={**mock_entry_data, CONF_REGISTER_METHOD: REGISTER_METHOD_SMS},
+    )
+    await _setup_loaded_entry(hass, sms_entry, aiomock, compatible="0")
+
+    result = await sms_entry.start_reconfigure_flow(hass)
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "mobipass_use_invite_code"
+
+
+async def test_mobipass_reconfigure_legacy_entry_is_uncertain(
+    hass, mock_entry_data, aiomock, mock_fcm_client, mock_call_manager
+) -> None:
+    """A legacy entry with no recorded pairing method gets the uncertain hint."""
+    data = {k: v for k, v in mock_entry_data.items() if k != CONF_REGISTER_METHOD}
+    legacy_entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="3844428",
+        title="Intratone (legacy)",
+        data=data,
+    )
+    await _setup_loaded_entry(hass, legacy_entry, aiomock, compatible="0")
+
+    result = await legacy_entry.start_reconfigure_flow(hass)
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "mobipass_unknown_method"
 
 
 async def test_reauth_falls_back_to_form_when_silent_refresh_rejected(

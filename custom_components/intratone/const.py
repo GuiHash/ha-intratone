@@ -50,6 +50,15 @@ CONF_JWT: Final = "jwt"
 CONF_FCM_TOKEN: Final = "fcm_token"
 CONF_FCM_CREDS: Final = "fcm_creds"
 
+# How the entry was paired. CléMobil/Mobipass remote-open is only ever
+# provisioned for a device registered with an installer/app *invitation code*
+# (`registercodes`); an SMS-registered device (`register`) never becomes
+# eligible (issue #61). Stored so the CléMobil transfer flow can steer
+# SMS-paired users to re-pair with an invitation code instead of failing.
+CONF_REGISTER_METHOD: Final = "register_method"
+REGISTER_METHOD_SMS: Final = "sms"
+REGISTER_METHOD_INVITE: Final = "invite"
+
 DEFAULT_INDICATIF: Final = "33"
 
 JWT_REFRESH_INTERVAL_HOURS: Final = 12

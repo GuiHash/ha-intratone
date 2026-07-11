@@ -17,6 +17,7 @@ from .const import (
     CONF_GO2RTC_URL,
     CONF_INVITE_CODE,
     CONF_NUMERIC_ID,
+    CONF_REGISTER_METHOD,
     CONF_TEL,
     CONF_VIDEO_ENABLED,
     DEFAULT_GO2RTC_URL,
@@ -25,6 +26,8 @@ from .const import (
     MOBIPASS_CODE_BLOCKED,
     MOBIPASS_CODE_NOT_AVAILABLE,
     MOBIPASS_CODE_OTP_INVALID,
+    REGISTER_METHOD_INVITE,
+    REGISTER_METHOD_SMS,
 )
 from .fcm_listener import fcm_register_standalone
 from .rest_api import (
@@ -239,6 +242,7 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
                         CONF_DEVICE_ID: pending["device_id"],
                         CONF_NUMERIC_ID: numeric_id,
                         CONF_TEL: pending["phone"],
+                        CONF_REGISTER_METHOD: REGISTER_METHOD_SMS,
                     },
                 )
 
@@ -261,12 +265,31 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
         if api is None:
             return self.async_abort(reason="not_loaded")
 
-        # The manual reconfigure path is intentionally ungated. Auto-detection
-        # (the Repair) already keys off the `auth/device` mobipass flags
-        # (`mobipass_compatible && !mobipass`); this manual entry is the override
-        # for when that doesn't surface. We let the server be the authority:
-        # mobipass_activate returns MOBIPASS_NOT_AVAILABLE when the transfer
-        # genuinely doesn't apply, which we map to a clear message (issue #61).
+        # Only offer the transfer when the account is eligible and the key still
+        # lives elsewhere. Refresh the flags first (best-effort — a transient
+        # failure falls through to the form). CléMobil eligibility is only granted
+        # to invite-code registrations; an SMS-paired device is never provisioned
+        # for it (issue #61), so steer those users to re-pair with an invitation
+        # code rather than let the transfer fail with MOBIPASS_NOT_AVAILABLE.
+        if user_input is None:
+            try:
+                await api.authenticate_device()
+            except Exception:  # noqa: BLE001
+                _LOGGER.debug("mobipass reconfigure precheck failed", exc_info=True)
+            state = api.mobipass_state
+            if state is not None and not state.needs_transfer:
+                if state.mobipass:
+                    return self.async_abort(reason="mobipass_already_active")
+                method = entry.data.get(CONF_REGISTER_METHOD)
+                if method == REGISTER_METHOD_SMS:
+                    # We know it was paired by SMS → assert the cause + fix.
+                    return self.async_abort(reason="mobipass_use_invite_code")
+                if method == REGISTER_METHOD_INVITE:
+                    # Invite-paired yet not eligible → genuinely not available.
+                    return self.async_abort(reason="mobipass_not_eligible")
+                # Legacy entry: method wasn't recorded, so we can't be sure.
+                return self.async_abort(reason="mobipass_unknown_method")
+
         errors: dict[str, str] = {}
         if user_input is not None:
             try:
@@ -491,6 +514,7 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
             CONF_DEVICE_ID: device_id,
             CONF_NUMERIC_ID: numeric_id,
             CONF_TEL: tel,
+            CONF_REGISTER_METHOD: REGISTER_METHOD_INVITE,
         }
         creds = {
             "jwt": auth_data["jwt"],

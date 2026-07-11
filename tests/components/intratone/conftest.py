@@ -26,8 +26,10 @@ from custom_components.intratone.const import (
     CONF_FCM_TOKEN,
     CONF_JWT,
     CONF_NUMERIC_ID,
+    CONF_REGISTER_METHOD,
     CONF_TEL,
     DOMAIN,
+    REGISTER_METHOD_INVITE,
 )
 
 
@@ -40,6 +42,7 @@ def mock_entry_data() -> dict:
         CONF_JWT: "fake.jwt.token",
         CONF_FCM_TOKEN: "fake-fcm-token",
         CONF_FCM_CREDS: {"gcm": {"android_id": 1, "security_token": 2}},
+        CONF_REGISTER_METHOD: REGISTER_METHOD_INVITE,
     }
 
 

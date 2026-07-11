@@ -230,12 +230,16 @@ Confirmed by decompiling the Android `AuthDevice` parser in v4.6.4
 Since ~June 2026 only one device per phone number may hold the key. The app
 treats the key as usable when `mobipass_compatible && mobipass`.
 
-> **These flags are NOT a reliable eligibility signal for a third-party client.**
-> The official app is also fed `mobipassCompatible`/`mobipass` out-of-band via
-> FCM push (`AccessEvent.MobipassCompatible`), so an account that *is* eligible
-> can still report `mobipass_compatible == "0"` on `auth/device` for our client
-> (observed in issue #61). Don't gate the transfer on them — attempt the flow in
-> §4.7 and let the server answer (`MOBIPASS_NOT_AVAILABLE` when it truly can't).
+> **These flags track the registered device, not just the account (issue #61).**
+> They reflect reality for an **invitation-code** registration (`registercodes`):
+> an eligible account reports `mobipass_compatible == "1"`, and
+> `mobipass_compatible && !mobipass` means the key is held elsewhere and a
+> transfer is needed. An **SMS**-registered device (`register`) is never
+> provisioned for the CléMobil, so it always reports `mobipass_compatible == "0"`
+> and `activate` returns `MOBIPASS_NOT_AVAILABLE` — that's a real "not eligible on
+> this device", not a flag glitch. So the integration gates the transfer on
+> `mobipass_compatible && !mobipass` and steers SMS-paired users to re-pair with
+> an invitation code.
 
 ### 4.3 — `POST /api/calls/{call_id}/answer`  (Open door)
 
