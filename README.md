@@ -139,13 +139,17 @@ git clone https://github.com/GuiHash/ha-intratone.git intratone
 
 In Home Assistant: **Settings → Devices & Services → Add Integration → Intratone Doorbell**. Pick one of two paths.
 
-### Path A — SMS (recommended, no installer needed)
+> **Which path should I pick?** If you want ring-free **remote opening** (the *Clé mobile* / CléMobil, exposed as `lock.intratone_<ID>_<access>`), use **Path B (invitation code)**. SMS pairing only ever gets you the doorbell and opening a door *during a call* — an SMS-registered device is never provisioned for the *Clé mobile* (see [issue #61](https://github.com/GuiHash/ha-intratone/issues/61)).
+
+### Path A — SMS (doorbell only)
 
 You'll be asked for your **phone number** (the one tied to your Intratone account) and the **country code** (default `33`). Intratone texts you a 4-digit code; type it on the next screen. Same flow as the official mobile app's first-time login. Mirrors `POST /api/auth/register` → `POST /api/auth/validate` → `POST /api/auth/device`.
 
-### Path B — Installer invite code
+> ⚠️ SMS pairing **cannot** enable the remote-open *Clé mobile*. If you want it, use Path B instead (you can remove and re-add the integration to switch).
 
-If your account doesn't have a phone (some installer-managed setups), generate an invite code from the **official Intratone app → Mes infos → Ajouter un appareil** (format `448789-1206`) and paste it.
+### Path B — Invitation code (recommended for remote opening)
+
+Generate an invite code from the **official Intratone app → Mes infos → Ajouter un appareil** (format `448789-1206`) and paste it. This is the method that provisions the device for the *Clé mobile* / remote opening; it's also the path for installer-managed accounts without a phone.
 
 ### After pairing
 
@@ -156,6 +160,8 @@ If HA detects expired credentials it triggers a re-authentication flow that **si
 ### Transferring the *Clé mobile* to Home Assistant
 
 Since ~mid-2026 Intratone lets **only one device per phone number** hold the remote-open key (*Clé mobile* / **mobipass**). If the key currently lives on your phone (the usual case), the `lock.intratone_<ID>_<access>` entities won't appear — `GET /api/access` returns nothing until the key is moved to HA. See [issue #61](https://github.com/GuiHash/ha-intratone/issues/61).
+
+> **Requires invitation-code pairing (Path B).** Only a device registered with an invitation code is provisioned for the *Clé mobile*; if you paired via SMS, the reconfigure step below will tell you to remove and re-add the integration with an invitation code first (issue #61).
 
 To move it onto Home Assistant:
 

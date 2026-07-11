@@ -5,8 +5,8 @@
         "title": "Coupler votre appartement Intratone",
         "description": "Choisissez comment vous authentifier.",
         "menu_options": {
-          "phone": "Recevoir un code par SMS (utilise mon compte Intratone existant)",
-          "invite": "J'ai un code d'invitation installateur (`XXXXXX-XXXX`)"
+          "phone": "Code par SMS — interphone uniquement (l'ouverture à distance / CléMobil n'est PAS disponible ainsi)",
+          "invite": "Code d'invitation depuis l'appli — recommandé ; requis pour l'ouverture à distance (CléMobil)"
         }
       },
       "phone": {
@@ -68,6 +68,10 @@
       "reauth_successful": "Re-couplage réussi.",
       "reconfigure_successful": "Reconfiguration réussie.",
       "mobipass_transfer_successful": "La CléMobil est maintenant active sur Home Assistant. Vos portes devraient apparaître sous peu.",
+      "mobipass_already_active": "La CléMobil est déjà active sur Home Assistant — rien à transférer.",
+      "mobipass_not_eligible": "Votre compte n'est pas éligible au transfert CléMobil mono-appareil, il n'y a donc rien à déplacer ici.",
+      "mobipass_use_invite_code": "Vous avez couplé cette intégration par SMS, ce qui ne permet pas d'activer la CléMobil / l'ouverture à distance. Supprimez-la et ré-ajoutez-la avec un code d'invitation de l'appli officielle (« Mes infos » → « Ajouter un appareil »), puis lancez le transfert.",
+      "mobipass_unknown_method": "Cet appareil n'est pas activé pour la CléMobil / l'ouverture à distance. Elle n'est accordée qu'avec un couplage par code d'invitation — si vous avez couplé par SMS, supprimez et ré-ajoutez avec un code d'invitation (« Mes infos » → « Ajouter un appareil »). Si vous avez déjà utilisé un code d'invitation, votre compte ou votre résidence ne permet peut-être pas le transfert.",
       "not_loaded": "L'intégration Intratone doit être chargée avant de transférer la CléMobil."
     }
   },

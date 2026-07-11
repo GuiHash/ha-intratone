@@ -5,8 +5,8 @@
         "title": "Pair with your Intratone apartment",
         "description": "Pick how to authenticate.",
         "menu_options": {
-          "phone": "Send me an SMS code (uses my existing Intratone account)",
-          "invite": "I have an installer invitation code (`XXXXXX-XXXX`)"
+          "phone": "SMS code — doorbell only (remote door opening / CléMobil is NOT available this way)",
+          "invite": "Invitation code from the app — recommended; required for remote door opening (CléMobil)"
         }
       },
       "phone": {
@@ -68,6 +68,10 @@
       "reauth_successful": "Re-pairing successful.",
       "reconfigure_successful": "Reconfiguration successful.",
       "mobipass_transfer_successful": "The CléMobil is now active on Home Assistant. Your doors should appear shortly.",
+      "mobipass_already_active": "The CléMobil is already active on Home Assistant — nothing to transfer.",
+      "mobipass_not_eligible": "Your account isn’t eligible for the CléMobil single-owner transfer, so there’s nothing to move here.",
+      "mobipass_use_invite_code": "You paired this integration via SMS, which can’t provision the CléMobil / remote opening. Remove it and re-add it with an invitation code from the official app (Mes infos → Ajouter un appareil), then run the transfer.",
+      "mobipass_unknown_method": "This device isn’t provisioned for the CléMobil / remote opening. It’s only granted when the integration is paired with an invitation code — if you paired via SMS, remove and re-add it with an invitation code (Mes infos → Ajouter un appareil). If you already used an invitation code, your account or residence may not support the transfer.",
       "not_loaded": "The Intratone integration must be loaded before transferring the CléMobil."
     }
   },
