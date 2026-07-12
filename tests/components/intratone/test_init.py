@@ -247,6 +247,29 @@ async def test_legacy_creds_in_entry_data_migrate_to_store(
     assert runtime.store.fcm_creds == {"gcm": {"android_id": 1, "security_token": 2}}
 
 
+async def test_remove_entry_deletes_credentials_store(
+    hass, mock_entry, mock_fcm_client, mock_call_manager, aiomock, hass_storage
+) -> None:
+    """Removing the integration must also delete the per-account credentials
+    Store (`.storage/intratone.<key>.creds` holds a live JWT + FCM creds)."""
+    mock_entry.add_to_hass(hass)
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={"state": "ok", "data": {"jwt": "fake.jwt.token", "id": "3844428"}},
+        repeat=True,
+    )
+    assert await hass.config_entries.async_setup(mock_entry.entry_id)
+    await hass.async_block_till_done()
+
+    storage_key = f"intratone.{mock_entry.unique_id}.creds"
+    assert storage_key in hass_storage
+
+    await hass.config_entries.async_remove(mock_entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert storage_key not in hass_storage
+
+
 async def test_simulate_ring_service(
     hass, mock_entry, mock_fcm_client, mock_call_manager, aiomock
 ) -> None:

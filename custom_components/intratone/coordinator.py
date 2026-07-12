@@ -278,6 +278,19 @@ class IntratoneCoordinator(DataUpdateCoordinator[CallState | None]):
             )
         except Exception:  # noqa: BLE001
             _LOGGER.exception("Failed to initiate SIP call")
+            pending.started = False
+            return False
+        if self._active_sip_call_id is None:
+            # start_call returns None on TCP connect failure/timeout. Don't
+            # consume the pending invite (the next tap retries) and don't
+            # tell Intratone we picked up — that would stop the intercom
+            # ringing the user's real phone for nothing.
+            _LOGGER.warning(
+                "SIP INVITE not initiated for FCM call %s — will retry on "
+                "next user tap",
+                pending.fcm_call_id,
+            )
+            pending.started = False
             return False
 
         # Tell Intratone "user picked up" — matches the Cogelec app, which
@@ -327,7 +340,10 @@ class IntratoneCoordinator(DataUpdateCoordinator[CallState | None]):
         if url is None:
             self._active_sip_call_id = None
             if self._pending is not None:
-                self._pending.stream_ready.clear()
+                # set() (not clear()) so tasks already blocked in
+                # async_wait_for_stream wake now and read the final
+                # torn-down state instead of stalling until timeout.
+                self._pending.stream_ready.set()
                 self._pending = None
         else:
             if self._pending is not None:
@@ -353,8 +369,11 @@ class IntratoneCoordinator(DataUpdateCoordinator[CallState | None]):
         # Lazy: start the SIP call if the user is jumping straight to unlock.
         if self._pending is not None and not self._pending.started:
             await self.async_ensure_call_started()
-            # Wait for the bridge to be up before sending the MESSAGE — needs
-            # the dialog to be CONFIRMED (200 OK received + ACK sent).
+        # Wait for the bridge to be up before sending the MESSAGE — needs
+        # the dialog to be CONFIRMED (200 OK received + ACK sent). Also
+        # covers camera-tap-then-unlock: the INVITE is already in flight
+        # (started=True) but the dialog may still be INVITING.
+        if self._pending is not None and not self._pending.stream_ready.is_set():
             await self.async_wait_for_stream()
 
         door_opened = self._call_manager.send_open_door(self.data.door_code)
@@ -386,6 +405,9 @@ class IntratoneCoordinator(DataUpdateCoordinator[CallState | None]):
             return False
         if self._pending is not None and not self._pending.started:
             await self.async_ensure_call_started()
+        # Needs a CONFIRMED dialog — also covers camera-tap-then-backlight,
+        # where the INVITE is already in flight but not yet confirmed.
+        if self._pending is not None and not self._pending.stream_ready.is_set():
             await self.async_wait_for_stream()
         return self._call_manager.send_backlight()
 
@@ -394,12 +416,38 @@ class IntratoneCoordinator(DataUpdateCoordinator[CallState | None]):
         stale stream URL won't be served and the next FCM ring can start
         fresh without waiting on the BYE grace window."""
         canceled_id = payload.get("call_id") or payload.get("NOTIFICATION_UUID")
+        # Only match on an explicit `call_id`: a NOTIFICATION_UUID is a
+        # different namespace than the ring's call_id, so comparing it would
+        # wrongly ignore valid cancels — those keep the unconditional abort.
+        # Known limitation: a TYPE=24 ring stores its NOTIFICATION_UUID as
+        # `data.call_id`; if Cogelec ever cancels such a ring with an explicit
+        # server-side `call_id`, the ids won't match and the cancel is
+        # (wrongly) ignored — no push capture shows that shape today, and the
+        # 120 s max-duration teardown bounds the damage.
+        if (
+            payload.get("call_id")
+            and self.data is not None
+            and str(payload["call_id"]) != self.data.call_id
+        ):
+            # Out-of-order cancel for a previous ring — don't kill the new
+            # ring that just arrived. Cancels without an id keep the
+            # historical unconditional-abort behavior.
+            _LOGGER.info(
+                "callCancel for %s ignored — active ring is %s",
+                canceled_id,
+                self.data.call_id,
+            )
+            return
         _LOGGER.info("Received callCancel push for call %s", canceled_id)
         if (
             self._call_manager is not None
             and self._call_manager.active_call_id is not None
         ):
             await self._call_manager.abort_active_call()
+        if self._pending is not None:
+            # Wake any task blocked in async_wait_for_stream so it returns
+            # promptly instead of stalling until timeout.
+            self._pending.stream_ready.set()
         self._pending = None
 
 

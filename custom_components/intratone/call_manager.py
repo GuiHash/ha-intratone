@@ -2,22 +2,26 @@
 
 Owns one AudioBridge whose ffmpeg process cycles per call. The SIP transport
 is TCP per call — we open a fresh TCP connection to the Intratone server when
-a ring arrives and close it on BYE / hang_up. This matches the Cogelec app's
-behavior (liblinphone configured TCP-only).
+the INVITE fires and close it on BYE / hang_up. This matches the Cogelec
+app's behavior (liblinphone configured TCP-only).
 
-Flow per ring:
+Flow per ring (the INVITE is lazy — see coordinator.py's module docstring):
 
-    FCM push  → CallManager.start_call(target_uri, sip_server_ip, user, pass)
-              → open TCP connection → IntratoneSipClient.call() → INVITE → ...
+    FCM push   → coordinator stores the SIP creds; no SIP traffic yet
+    user tap   → coordinator.async_ensure_call_started()
+               → CallManager.start_call(target_uri, sip_server_ip, user, pass)
+               → open TCP connection → IntratoneSipClient.call() → INVITE → ...
     sip_client.on_call_established(rtp_endpoint)
-              → AudioBridge.start(local_rtp_port) → RTSP URL
-              → on_call_active(rtsp_url) callback (coordinator sets camera state)
+               → AudioBridge.start(local_rtp_port) → RTSP URL
+               → on_call_active(rtsp_url) callback (coordinator sets camera state)
     [audio flows; HomeKit pulls RTSP]
-    hang_up()  ← coordinator.async_open_door() (user accepted)
-       or
-    BYE        ← server (visitor or timeout)
-              → AudioBridge.stop()
-              → on_call_ended() callback
+    door open  → send_open_door() (in-dialog SIP MESSAGE; the call stays up)
+    BYE        ← server (visitor left or call window expired)
+               → AudioBridge.stop() after the post-BYE grace window
+               → on_call_ended() callback
+
+`hang_up()` ends the dialog from our side; it has no production caller today
+(the coordinator supersedes stale calls via `abort_active_call()` instead).
 """
 
 from __future__ import annotations
@@ -27,7 +31,7 @@ import logging
 import socket
 from typing import Callable
 
-from .audio_bridge import AudioBridge
+from .audio_bridge import AudioBridge, BridgeStoppedError
 from .sip_client import CallEstablished, IntratoneSipClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -145,6 +149,11 @@ class CallManager:
         self._pending_video_rtcp_socket: socket.socket | None = None
         self._max_duration_task: asyncio.Task | None = None
         self._grace_task: asyncio.Task | None = None
+        # The in-flight _spawn_bridge task for the current call. Kept both so
+        # the task can't be GC'd mid-flight (asyncio only holds a weak ref to
+        # running tasks) and so async_stop()/abort_active_call() can cancel a
+        # bridge startup that is still inside AudioBridge.start().
+        self._spawn_bridge_task: asyncio.Task | None = None
         self._started = False
 
     @property
@@ -162,6 +171,11 @@ class CallManager:
 
     async def async_stop(self) -> None:
         """Tear down audio bridge and any open SIP socket. Idempotent."""
+        # Must run before bridge.stop(): a pending _spawn_bridge would
+        # otherwise resume AFTER this stop() returned and spawn ffmpeg with
+        # nothing left to reap it (leaked process + callback into a dead
+        # coordinator on entry reload).
+        await self._cancel_spawn_bridge_task()
         await self._bridge.stop()
         if self._sip_transport is not None and not self._sip_transport.is_closing():
             self._sip_transport.close()
@@ -390,6 +404,12 @@ class CallManager:
         self._sip_transport = None
         self._sip_client = None
         self._close_pending_sockets()
+        # The old call's bridge may still be inside start() (not yet
+        # is_running, so bridge.stop() alone wouldn't touch it) — cancel it
+        # first or it would finish against the dead RTP endpoint and the new
+        # ring would be served that stale bridge (clean-looking call, zero
+        # audio, courtesy of start()'s idempotence guard).
+        await self._cancel_spawn_bridge_task()
         await self._bridge.stop()
         self._active_call_id = None
         self._on_call_ended(call_id)
@@ -400,7 +420,27 @@ class CallManager:
         if info.call_id != self._active_call_id:
             _LOGGER.debug("Ignoring stale call_established for %s", info.call_id)
             return
-        asyncio.create_task(self._spawn_bridge(info))
+        # Keep the reference: asyncio only holds a weak ref to running tasks,
+        # and async_stop()/abort_active_call() must be able to cancel this
+        # while it's still inside AudioBridge.start() (ffmpeg spawn takes
+        # 100-400 ms — plenty of room for a reload or a superseding ring).
+        self._spawn_bridge_task = asyncio.create_task(self._spawn_bridge(info))
+
+    async def _cancel_spawn_bridge_task(self) -> None:
+        """Cancel an in-flight _spawn_bridge and wait for it to unwind."""
+        task = self._spawn_bridge_task
+        self._spawn_bridge_task = None
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # noqa: BLE001 — teardown must never propagate
+            _LOGGER.debug(
+                "spawn-bridge task raised while being cancelled", exc_info=True
+            )
 
     def _handle_call_terminated(self, call_id: str) -> None:
         if call_id != self._active_call_id:
@@ -481,10 +521,31 @@ class CallManager:
                 video_rtcp_socket=video_rtcp_socket,
                 on_video_failure=self._handle_video_failure,
             )
+        except BridgeStoppedError:
+            # Benign race: bridge.stop() (reload, superseding ring) landed
+            # while start() was between awaits — start() already unwound.
+            _LOGGER.debug(
+                "Bridge start for call %s aborted by concurrent stop",
+                info.call_id,
+            )
+            return
         except Exception as err:  # noqa: BLE001
             _LOGGER.exception("Audio bridge failed to start: %s", err)
             if self._sip_client is not None:
                 self._sip_client.hang_up(info.call_id)
+            return
+        # Re-validate after start()'s awaits: the call may have been aborted
+        # or the manager stopped while ffmpeg was spawning. The just-started
+        # bridge points at THIS call's (now dead) RTP endpoint — publishing
+        # it would hand the next call a clean-looking stream with zero audio
+        # (start()'s idempotence guard would keep returning it).
+        if not self._started or self._active_call_id != info.call_id:
+            _LOGGER.info(
+                "Call %s superseded while its bridge was starting — "
+                "stopping the stale bridge",
+                info.call_id,
+            )
+            await self._bridge.stop()
             return
         _LOGGER.info(
             "Bridge up: %s (audio peer %s:%d%s)",

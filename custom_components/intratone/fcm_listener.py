@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -35,6 +36,16 @@ _LOGGER = logging.getLogger(__name__)
 
 BACKOFF_INITIAL_S = 5
 BACKOFF_MAX_S = 300
+# A run that survived at least this long was healthy: its crash starts a
+# fresh incident, so backoff restarts from BACKOFF_INITIAL_S instead of
+# compounding across weeks of unrelated daily disconnects.
+HEALTHY_RUN_S = 60
+# After start(), poll is_started() at this cadence (for at most the timeout)
+# so the connectivity flag flips on as soon as login completes — waiting for
+# the first healthcheck instead would show a false ~30s "disconnected" window
+# on every reconnect.
+STARTUP_POLL_INTERVAL_S = 0.5
+STARTUP_POLL_TIMEOUT_S = 10
 # How often the supervisor polls the underlying FcmPushClient run state.
 # The library shuts itself down after 3 sequential connection errors and
 # does NOT raise — we have to inspect run_state to notice and reconnect.
@@ -150,12 +161,15 @@ class FcmListener:
         """Restart the FCM client with exponential backoff on failure."""
         backoff = BACKOFF_INITIAL_S
         while not self._stopping:
+            run_started = time.monotonic()
             try:
                 await self._run_once()
                 return  # graceful stop
             except asyncio.CancelledError:
                 raise
             except Exception as err:  # noqa: BLE001
+                if time.monotonic() - run_started > HEALTHY_RUN_S:
+                    backoff = BACKOFF_INITIAL_S
                 _LOGGER.warning(
                     "FCM listener crashed: %s — reconnecting in %ds", err, backoff
                 )
@@ -186,7 +200,19 @@ class FcmListener:
         )
         token = await self._client.checkin_or_register()
         await self._client.start()
-        self._set_connected(True)
+        # start() only spawns the login tasks (STARTING_TASKS) — don't claim
+        # connectivity until the client actually reports STARTED. Login
+        # normally lands within a second, so poll briefly; with bad
+        # credentials the client never reaches STARTED and the flag stays
+        # off. The healthcheck loop below keeps it in sync from then on.
+        startup_deadline = time.monotonic() + STARTUP_POLL_TIMEOUT_S
+        while (
+            not self._stopping
+            and not self._client.is_started()
+            and time.monotonic() < startup_deadline
+        ):
+            await asyncio.sleep(STARTUP_POLL_INTERVAL_S)
+        self._set_connected(bool(self._client.is_started()))
         self._check_token_registration(token)
 
         # Poll the client's run_state. The library's _listen task swallows
@@ -206,6 +232,7 @@ class FcmListener:
                     raise RuntimeError(
                         f"FcmPushClient stopped itself (state={state})"
                     )
+                self._set_connected(bool(self._client.is_started()))
         finally:
             self._set_connected(False)
 

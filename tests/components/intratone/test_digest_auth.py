@@ -152,3 +152,20 @@ def test_build_authorization_rejects_unsupported_algorithm():
     challenge = DigestChallenge(realm="r", nonce="n", algorithm="SHA-256")
     with pytest.raises(ValueError, match="Unsupported algorithm"):
         build_authorization(challenge, "u", "p", "INVITE", "sip:x@h")
+
+
+def test_build_authorization_rejects_auth_int_only_qop():
+    """qop="auth-int" only: HA2 must hash the entity body (RFC 7616 §3.4.3)
+    which we don't implement — answering anyway guarantees a 407 loop, so
+    raise like the unsupported-algorithm case."""
+    challenge = DigestChallenge(realm="r", nonce="n", qop="auth-int")
+    with pytest.raises(ValueError, match="Unsupported qop"):
+        build_authorization(challenge, "u", "p", "INVITE", "sip:x@h")
+
+
+def test_build_authorization_qop_auth_and_auth_int_picks_auth():
+    """When the server offers both, we pick plain `auth` — unchanged path."""
+    challenge = DigestChallenge(realm="r", nonce="n", qop="auth,auth-int")
+    auth = build_authorization(challenge, "u", "p", "INVITE", "sip:x@h")
+    assert "qop=auth," in auth
+    assert "qop=auth-int" not in auth

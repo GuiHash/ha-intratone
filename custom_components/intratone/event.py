@@ -19,7 +19,7 @@ async def async_setup_entry(
 
 
 class IntratoneDoorbellEvent(IntratoneEntity, EventEntity):
-    """Fires `pressed` whenever the coordinator sees a new ring."""
+    """Fires `ring` whenever the coordinator sees a new ring."""
 
     _attr_translation_key = "doorbell"
     _attr_device_class = EventDeviceClass.DOORBELL
@@ -29,6 +29,19 @@ class IntratoneDoorbellEvent(IntratoneEntity, EventEntity):
         super().__init__(coordinator)
         self._attr_unique_id = f"{coordinator.entry.entry_id}_doorbell"
         self._last_seq = 0
+
+    async def async_added_to_hass(self) -> None:
+        """Seed the dedup counter before subscribing to coordinator updates.
+
+        A freshly (re-)enabled entity starts at `_last_seq = 0`; if the
+        coordinator still holds a past call, the next write (e.g. that call
+        finally ending) would otherwise fire a ghost ring for a visitor who
+        left minutes ago.
+        """
+        state = self.coordinator.data
+        if state is not None:
+            self._last_seq = state.ring_seq
+        await super().async_added_to_hass()
 
     @callback
     def _handle_coordinator_update(self) -> None:

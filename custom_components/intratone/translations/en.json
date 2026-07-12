@@ -52,6 +52,7 @@
     },
     "error": {
       "invalid_format": "Invalid format. Expected `XXXXXX-XXXX`.",
+      "invalid_phone": "Enter a valid phone number and country code.",
       "invalid_code": "The invitation code was rejected by Intratone. Generate a fresh one and try again.",
       "invalid_sms_code": "The SMS code was rejected. Check the number you entered and try again.",
       "sms_failed": "Intratone refused to send an SMS to this phone. Check the number and country code.",
@@ -65,6 +66,7 @@
     },
     "abort": {
       "already_configured": "This Intratone device is already configured.",
+      "unique_id_mismatch": "The invitation code belongs to a different Intratone account or apartment than the one being re-authenticated. Generate a code from the same account and try again.",
       "reauth_successful": "Re-pairing successful.",
       "reconfigure_successful": "Reconfiguration successful.",
       "mobipass_transfer_successful": "The CléMobil is now active on Home Assistant. Your doors should appear shortly.",
@@ -138,7 +140,7 @@
         },
         "data_description": {
           "video_enabled": "Negotiates VP8 video with the Intratone gateway and forwards it to go2rtc. Leave off for audio-only mode.",
-          "go2rtc_url": "RTSP URL where go2rtc listens. Default: rtsp://127.0.0.1:8554. HA OS users with the embedded go2rtc should use rtsp://127.0.0.1:18554."
+          "go2rtc_url": "RTSP URL where go2rtc listens. Default: rtsp://127.0.0.1:8554. HA's embedded go2rtc can't accept this stream — run a standalone go2rtc instance instead."
         }
       }
     }
@@ -159,6 +161,22 @@
         "entry_id": {
           "name": "Config entry ID",
           "description": "Target a specific Intratone entry."
+        },
+        "sip_server_ip": {
+          "name": "SIP server IP (mock)",
+          "description": "When set, the coordinator triggers a real SIP INVITE to this IP instead of skipping the SIP path. Use `127.0.0.1` with `dev/mock_asterisk.py`."
+        },
+        "sip_target_user": {
+          "name": "SIP target user (LOGIN_TO_CALL)",
+          "description": "User part of the INVITE Request-URI."
+        },
+        "sip_user": {
+          "name": "SIP Digest username",
+          "description": "Username for the optional Digest auth challenge."
+        },
+        "sip_pass": {
+          "name": "SIP Digest password",
+          "description": "Password for the optional Digest auth challenge."
         }
       }
     }

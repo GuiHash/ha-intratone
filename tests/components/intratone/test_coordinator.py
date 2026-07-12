@@ -163,6 +163,44 @@ async def test_ensure_call_started_returns_false_without_pending(
     cm.start_call.assert_not_awaited()
 
 
+async def test_ensure_call_started_retries_after_start_call_returns_none(
+    coordinator_with_cm,
+) -> None:
+    """CallManager.start_call returns None on TCP connect failure/timeout.
+    The pending invite must NOT be consumed: /answer stays unsent (so the
+    intercom keeps ringing the user's real phone) and a later tap during
+    the same ring retries the INVITE."""
+    coordinator, cm = coordinator_with_cm
+    cm.start_call.return_value = None
+    await coordinator.async_handle_push(_FULL_PUSH)
+
+    assert await coordinator.async_ensure_call_started() is False
+    coordinator.api.answer_call.assert_not_awaited()
+
+    # Transient failure — the next user tap must retry the INVITE.
+    cm.start_call.return_value = "sip-call-retry"
+    assert await coordinator.async_ensure_call_started() is True
+    assert cm.start_call.await_count == 2
+    coordinator.api.answer_call.assert_awaited_once_with("300705065")
+
+
+async def test_ensure_call_started_retries_after_start_call_raises(
+    coordinator_with_cm,
+) -> None:
+    coordinator, cm = coordinator_with_cm
+    cm.start_call.side_effect = OSError("tcp connect failed")
+    await coordinator.async_handle_push(_FULL_PUSH)
+
+    assert await coordinator.async_ensure_call_started() is False
+    coordinator.api.answer_call.assert_not_awaited()
+
+    cm.start_call.side_effect = None
+    cm.start_call.return_value = "sip-call-retry"
+    assert await coordinator.async_ensure_call_started() is True
+    assert cm.start_call.await_count == 2
+    coordinator.api.answer_call.assert_awaited_once_with("300705065")
+
+
 async def test_ensure_call_started_skipped_when_push_lacks_sip_creds(
     coordinator_with_cm,
 ) -> None:
@@ -239,6 +277,65 @@ async def test_open_door_lazy_starts_call_when_user_taps_unlock_first(
 
     cm.start_call.assert_awaited_once()
     cm.send_open_door.assert_called_once_with("*")
+
+
+async def test_open_door_waits_for_confirm_when_invite_already_in_flight(
+    coordinator_with_cm,
+) -> None:
+    """Camera-tap-then-unlock: the camera already started the INVITE
+    (pending.started=True) but the dialog is still INVITING when the user
+    taps Unlock ~1s later. open_door must wait for the dialog to confirm
+    instead of firing the MESSAGE into an unconfirmed dialog and failing."""
+    coordinator, cm = coordinator_with_cm
+    cm.start_call.return_value = "sip-call-cam-first"
+    await coordinator.async_handle_push(_FULL_PUSH)
+    # Camera tap: INVITE in flight, stream not ready yet.
+    await coordinator.async_ensure_call_started()
+
+    confirmed = False
+    # The real sip_client only accepts in-dialog MESSAGEs once CONFIRMED.
+    cm.send_open_door = MagicMock(side_effect=lambda code: confirmed)
+
+    async def confirm_after_delay() -> None:
+        nonlocal confirmed
+        await asyncio.sleep(0.01)
+        confirmed = True
+        coordinator.set_stream_url("sip-call-cam-first", "rtsp://x")
+
+    asyncio.create_task(confirm_after_delay())
+
+    assert await coordinator.async_open_door() is True
+    cm.start_call.assert_awaited_once()  # no duplicate INVITE
+    cm.send_open_door.assert_called_once_with("*")
+
+
+async def test_toggle_backlight_waits_for_confirm_when_invite_already_in_flight(
+    coordinator_with_cm,
+) -> None:
+    """Camera-tap-then-backlight: same race as unlock — the INVITE is already
+    in flight (pending.started=True) but the dialog is still INVITING when the
+    user toggles backlight. The MESSAGE must wait for the dialog to confirm."""
+    coordinator, cm = coordinator_with_cm
+    cm.start_call.return_value = "sip-call-cam-first"
+    await coordinator.async_handle_push(_FULL_PUSH)
+    # Camera tap: INVITE in flight, stream not ready yet.
+    await coordinator.async_ensure_call_started()
+
+    confirmed = False
+    # The real sip_client only accepts in-dialog MESSAGEs once CONFIRMED.
+    cm.send_backlight = MagicMock(side_effect=lambda: confirmed)
+
+    async def confirm_after_delay() -> None:
+        nonlocal confirmed
+        await asyncio.sleep(0.01)
+        confirmed = True
+        coordinator.set_stream_url("sip-call-cam-first", "rtsp://x")
+
+    asyncio.create_task(confirm_after_delay())
+
+    assert await coordinator.async_toggle_backlight() is True
+    cm.start_call.assert_awaited_once()  # no duplicate INVITE
+    cm.send_backlight.assert_called_once_with()
 
 
 async def test_open_door_sends_sip_message_with_payload_code(
@@ -322,10 +419,81 @@ async def test_call_cancel_via_cancel_extra(coordinator_with_cm) -> None:
     cm.active_call_id = "sip-call-going"
     await coordinator.async_handle_push(_FULL_PUSH)
 
-    await coordinator.async_handle_push({"cancel": "1", "call_id": "x"})
+    await coordinator.async_handle_push({"cancel": "1", "call_id": "300705065"})
 
     cm.abort_active_call.assert_awaited()
     assert coordinator._pending is None
+
+
+async def test_call_cancel_for_different_ring_is_ignored(
+    coordinator_with_cm,
+) -> None:
+    """An out-of-order cancel push for a PREVIOUS ring must not kill a new
+    ring that just arrived — only a cancel matching the active call_id (or
+    one carrying no id at all) tears the call down."""
+    coordinator, cm = coordinator_with_cm
+    await coordinator.async_handle_push(_FULL_PUSH)  # active ring 300705065
+    cm.active_call_id = "sip-call-new-ring"
+
+    await coordinator.async_handle_push(
+        {"notif_type": "callCancel", "call_id": "OLD-RING"}
+    )
+
+    cm.abort_active_call.assert_not_awaited()
+    assert coordinator._pending is not None
+
+
+async def test_call_cancel_without_id_still_aborts(coordinator_with_cm) -> None:
+    """A cancel push carrying no identifier keeps the historical
+    unconditional-abort behavior."""
+    coordinator, cm = coordinator_with_cm
+    await coordinator.async_handle_push(_FULL_PUSH)
+    cm.active_call_id = "sip-call-going"
+
+    await coordinator.async_handle_push({"notif_type": "callCancel"})
+
+    cm.abort_active_call.assert_awaited_once()
+    assert coordinator._pending is None
+
+
+async def test_call_cancel_wakes_blocked_stream_waiter(coordinator_with_cm) -> None:
+    """A camera task blocked in async_wait_for_stream must wake immediately
+    when the visitor cancels — not stall the full 20s timeout wedging
+    HomeKit's stream_source path."""
+    coordinator, cm = coordinator_with_cm
+    cm.start_call.return_value = "sip-call-cancel-wake"
+    await coordinator.async_handle_push(_FULL_PUSH)
+    await coordinator.async_ensure_call_started()
+    cm.active_call_id = "sip-call-cancel-wake"
+
+    waiter = asyncio.create_task(coordinator.async_wait_for_stream(timeout=5.0))
+    await asyncio.sleep(0)  # let the waiter block on stream_ready
+
+    await coordinator.async_handle_push(
+        {"notif_type": "callCancel", "call_id": "300705065"}
+    )
+
+    url = await asyncio.wait_for(waiter, timeout=0.1)
+    assert url is None
+
+
+async def test_stream_teardown_wakes_blocked_stream_waiter(
+    coordinator_with_cm,
+) -> None:
+    """Same wake-up guarantee on the BYE/teardown path (set_stream_url with
+    url=None): waiters must read the final None state promptly."""
+    coordinator, cm = coordinator_with_cm
+    cm.start_call.return_value = "sip-call-bye-wake"
+    await coordinator.async_handle_push(_FULL_PUSH)
+    await coordinator.async_ensure_call_started()
+
+    waiter = asyncio.create_task(coordinator.async_wait_for_stream(timeout=5.0))
+    await asyncio.sleep(0)  # let the waiter block on stream_ready
+
+    coordinator.set_stream_url("sip-call-bye-wake", None)
+
+    url = await asyncio.wait_for(waiter, timeout=0.1)
+    assert url is None
 
 
 async def test_unregister_push_triggers_reauth(coordinator_with_cm) -> None:

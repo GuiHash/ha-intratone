@@ -7,7 +7,6 @@ write-only trigger. We report `locked` at rest, briefly flip to `unlocked` on
 
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from homeassistant.components.lock import LockEntity
@@ -16,7 +15,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import IntratoneConfigEntry
-from .entity import IntratoneEntity
+from .entity import IntratoneEntity, MomentaryRevertMixin
 from .rest_api import IntratoneAccess, IntratoneApiError, IntratoneAuthError
 
 _LOGGER = logging.getLogger(__name__)
@@ -61,7 +60,7 @@ async def async_setup_entry(
     )
 
 
-class IntratoneDoorLock(IntratoneEntity, LockEntity):
+class IntratoneDoorLock(MomentaryRevertMixin, IntratoneEntity, LockEntity):
     """Door-relay trigger exposed as a HomeKit Lock."""
 
     _attr_translation_key = "door"
@@ -71,7 +70,6 @@ class IntratoneDoorLock(IntratoneEntity, LockEntity):
         super().__init__(coordinator)
         self._attr_unique_id = f"{coordinator.entry.entry_id}_door_lock"
         self._attr_is_locked = True
-        self._revert_task: asyncio.Task | None = None
 
     async def async_unlock(self, **_kwargs) -> None:
         ok = await self.coordinator.async_open_door()
@@ -82,30 +80,22 @@ class IntratoneDoorLock(IntratoneEntity, LockEntity):
 
         self._attr_is_locked = False
         self.async_write_ha_state()
-
-        if self._revert_task is not None and not self._revert_task.done():
-            self._revert_task.cancel()
-        self._revert_task = self.hass.async_create_task(self._revert_to_locked())
+        self._schedule_revert()
 
     async def async_lock(self, **_kwargs) -> None:
         # No-op: the relay self-closes; we just flip the visible state.
         self._attr_is_locked = True
         self.async_write_ha_state()
 
-    async def _revert_to_locked(self) -> None:
-        try:
-            await asyncio.sleep(UNLOCK_VISIBLE_S)
-        except asyncio.CancelledError:
-            return
+    @property
+    def _revert_delay_s(self) -> float:
+        return UNLOCK_VISIBLE_S
+
+    def _revert_state(self) -> None:
         self._attr_is_locked = True
-        self.async_write_ha_state()
-
-    async def async_will_remove_from_hass(self) -> None:
-        if self._revert_task is not None and not self._revert_task.done():
-            self._revert_task.cancel()
 
 
-class IntratoneAccessLock(IntratoneEntity, LockEntity):
+class IntratoneAccessLock(MomentaryRevertMixin, IntratoneEntity, LockEntity):
     """Remote-open access ("Clé mobile" / mobipass) exposed as a Lock.
 
     Unlike `IntratoneDoorLock`, this opens a door/gate on demand via the REST
@@ -122,7 +112,6 @@ class IntratoneAccessLock(IntratoneEntity, LockEntity):
         label = " — ".join(p for p in (access.residence, access.name) if p)
         self._attr_name = label or "Accès"
         self._attr_is_locked = True
-        self._revert_task: asyncio.Task | None = None
 
     async def async_unlock(self, **_kwargs) -> None:
         try:
@@ -134,24 +123,16 @@ class IntratoneAccessLock(IntratoneEntity, LockEntity):
 
         self._attr_is_locked = False
         self.async_write_ha_state()
-
-        if self._revert_task is not None and not self._revert_task.done():
-            self._revert_task.cancel()
-        self._revert_task = self.hass.async_create_task(self._revert_to_locked())
+        self._schedule_revert()
 
     async def async_lock(self, **_kwargs) -> None:
         # No-op: the relay self-closes; we just flip the visible state.
         self._attr_is_locked = True
         self.async_write_ha_state()
 
-    async def _revert_to_locked(self) -> None:
-        try:
-            await asyncio.sleep(UNLOCK_VISIBLE_S)
-        except asyncio.CancelledError:
-            return
-        self._attr_is_locked = True
-        self.async_write_ha_state()
+    @property
+    def _revert_delay_s(self) -> float:
+        return UNLOCK_VISIBLE_S
 
-    async def async_will_remove_from_hass(self) -> None:
-        if self._revert_task is not None and not self._revert_task.done():
-            self._revert_task.cancel()
+    def _revert_state(self) -> None:
+        self._attr_is_locked = True

@@ -152,10 +152,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: IntratoneConfigEntry) ->
         go2rtc_url=entry.options.get(CONF_GO2RTC_URL, DEFAULT_GO2RTC_URL),
     )
     await call_manager.async_start()
+    # Register teardown via async_on_unload right after each component starts:
+    # HA runs these both on unload AND when async_setup_entry raises later on,
+    # so a failed setup can't leak a running SIP endpoint or FCM supervisor
+    # (a setup retry would otherwise start a duplicate). Each stop is
+    # idempotent.
+    entry.async_on_unload(call_manager.async_stop)
     coordinator.attach_call_manager(call_manager)
 
     fcm = FcmListener(hass, entry, coordinator, store)
     await fcm.async_start()
+    entry.async_on_unload(fcm.async_stop)
 
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 
@@ -170,6 +177,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: IntratoneConfigEntry) ->
     api.async_start_jwt_refresh(
         on_refresh=lambda: _evaluate_mobipass_issue(hass, entry)
     )
+    entry.async_on_unload(api.async_stop)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
@@ -279,7 +287,15 @@ async def _async_options_updated(
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: IntratoneConfigEntry) -> bool:
-    """Unload a config entry."""
+    """Unload a config entry.
+
+    Stops run here in strict order (push source first, then the SIP/audio
+    stack, then the API timer) — HA runs coroutine `async_on_unload` hooks as
+    CONCURRENT tasks, which would let an FCM push race the call teardown. The
+    hooks registered in `async_setup_entry` stay as the safety net for a
+    setup that fails after a component started; every stop is idempotent, so
+    their second run here-after is a no-op.
+    """
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         runtime: IntratoneRuntime = entry.runtime_data
@@ -290,6 +306,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: IntratoneConfigEntry) -
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: IntratoneConfigEntry) -> None:
-    """Clean up per-entry repairs when the entry is removed."""
+    """Clean up per-entry repairs and stored credentials on entry removal."""
     ir.async_delete_issue(hass, DOMAIN, _mobipass_issue_id(entry))
     ir.async_delete_issue(hass, DOMAIN, f"{FCM_TOKEN_ISSUE_PREFIX}{entry.entry_id}")
+    # Drop `.storage/intratone.<key>.creds` (live JWT + Google FCM
+    # credentials) — same key construction as async_setup_entry.
+    store = IntratoneCredentialsStore(hass, entry.unique_id or entry.entry_id)
+    await store.async_remove()

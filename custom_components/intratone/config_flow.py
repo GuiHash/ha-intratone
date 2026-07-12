@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import re
 import uuid
 from typing import Any
 
@@ -15,6 +14,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .const import (
     CONF_DEVICE_ID,
     CONF_GO2RTC_URL,
+    CONF_INDICATIF,
     CONF_INVITE_CODE,
     CONF_NUMERIC_ID,
     CONF_REGISTER_METHOD,
@@ -23,9 +23,8 @@ from .const import (
     DEFAULT_GO2RTC_URL,
     DEFAULT_INDICATIF,
     DOMAIN,
-    MOBIPASS_CODE_BLOCKED,
-    MOBIPASS_CODE_NOT_AVAILABLE,
-    MOBIPASS_CODE_OTP_INVALID,
+    INVITE_RE,
+    MOBIPASS_ERRORS,
     REGISTER_METHOD_INVITE,
     REGISTER_METHOD_SMS,
 )
@@ -44,8 +43,7 @@ from .store import IntratoneCredentialsStore
 
 _LOGGER = logging.getLogger(__name__)
 
-INVITE_RE = re.compile(r"^\s*(\d{4,8})\s*[-\s]\s*(\d{3,6})\s*$")
-
+# Shared with repairs.py (FCM re-pair flow).
 USER_SCHEMA = vol.Schema({vol.Required(CONF_INVITE_CODE): str})
 
 PHONE_SCHEMA = vol.Schema(
@@ -55,14 +53,8 @@ PHONE_SCHEMA = vol.Schema(
     }
 )
 SMS_SCHEMA = vol.Schema({vol.Required("code"): str})
+# Shared with repairs.py (CléMobil transfer repair flow).
 MOBIPASS_OTP_SCHEMA = vol.Schema({vol.Required("code"): str})
-
-# Server `code` → config-flow error key for the CléMobil transfer.
-_MOBIPASS_ERRORS = {
-    MOBIPASS_CODE_OTP_INVALID: "mobipass_code_invalid",
-    MOBIPASS_CODE_BLOCKED: "mobipass_code_blocked",
-    MOBIPASS_CODE_NOT_AVAILABLE: "mobipass_not_available",
-}
 
 
 def _normalize_phone(raw: str, indicatif: str) -> str:
@@ -70,6 +62,8 @@ def _normalize_phone(raw: str, indicatif: str) -> str:
     s = raw.strip().replace(" ", "").replace("-", "").replace(".", "")
     if s.startswith("+"):
         s = s[1:]
+    elif s.startswith("00"):
+        s = s[2:]
     if s.startswith(indicatif):
         s = s[len(indicatif):]
     if s.startswith("0"):
@@ -138,10 +132,13 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
         """SMS flow — step 1: phone + indicatif, triggers an SMS."""
         errors: dict[str, str] = {}
         if user_input is not None:
-            phone = _normalize_phone(user_input["phone"], user_input["indicatif"])
+            # Normalize the indicatif FIRST: a raw "+33" would never match
+            # inside _normalize_phone (the phone's own "+" is stripped there),
+            # leaving the country prefix glued to the stored number.
             indicatif = user_input["indicatif"].strip().lstrip("+")
+            phone = _normalize_phone(user_input["phone"], indicatif)
             if not phone or not indicatif:
-                errors["phone"] = "invalid_format"
+                errors["phone"] = "invalid_phone"
             else:
                 # 16-char hex mimics Android's Settings.Secure.ANDROID_ID; some
                 # Intratone residences gate CléMobil/Mobipass eligibility on this
@@ -212,6 +209,7 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
                     session,
                     tel=pending["phone"],
                     device_id=pending["device_id"],
+                    indicatif=pending["indicatif"],
                 )
             except IntratoneAuthError as err:
                 _LOGGER.warning("validate/auth rejected: %s", err)
@@ -242,6 +240,7 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
                         CONF_DEVICE_ID: pending["device_id"],
                         CONF_NUMERIC_ID: numeric_id,
                         CONF_TEL: pending["phone"],
+                        CONF_INDICATIF: pending["indicatif"],
                         CONF_REGISTER_METHOD: REGISTER_METHOD_SMS,
                     },
                 )
@@ -296,7 +295,7 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
                 await api.mobipass_activate()
             except IntratoneMobipassError as err:
                 _LOGGER.warning("mobipass activate refused: %s", err)
-                errors["base"] = _MOBIPASS_ERRORS.get(err.code, "mobipass_failed")
+                errors["base"] = MOBIPASS_ERRORS.get(err.code, "mobipass_failed")
             except (IntratoneAuthError, IntratoneApiError) as err:
                 _LOGGER.warning("mobipass activate failed: %s", err)
                 errors["base"] = "mobipass_failed"
@@ -325,7 +324,7 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
                 await api.mobipass_verify(user_input["code"].strip())
             except IntratoneMobipassError as err:
                 _LOGGER.warning("mobipass verify refused: %s", err)
-                errors["base"] = _MOBIPASS_ERRORS.get(err.code, "mobipass_failed")
+                errors["base"] = MOBIPASS_ERRORS.get(err.code, "mobipass_failed")
             except (IntratoneAuthError, IntratoneApiError) as err:
                 _LOGGER.warning("mobipass verify failed: %s", err)
                 errors["base"] = "mobipass_failed"
@@ -379,7 +378,10 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
         try:
             session = async_get_clientsession(self.hass)
             data = await authenticate_for_invite(
-                session, tel=tel, device_id=device_id
+                session,
+                tel=tel,
+                device_id=device_id,
+                indicatif=entry.data.get(CONF_INDICATIF, DEFAULT_INDICATIF),
             )
         except (IntratoneAuthError, IntratoneApiError) as err:
             _LOGGER.info(
@@ -439,6 +441,15 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
                 else:
                     await self.async_set_unique_id(entry_data[CONF_NUMERIC_ID])
 
+                    # Abort BEFORE touching the Store: `_pair()` already
+                    # registered server-side, but overwriting the Store of a
+                    # running account would desync its FcmListener (checked in
+                    # with the old fcm_token) from the stored credentials.
+                    if self._reauth_entry is not None:
+                        self._abort_if_unique_id_mismatch()
+                    else:
+                        self._abort_if_unique_id_configured()
+
                     # Pre-write rotated credentials to the per-account Store
                     # so they never touch entry.data. The Store key uses the
                     # numeric_id (= unique_id) which we just set.
@@ -449,12 +460,10 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
                     await store.async_update(**creds)
 
                     if self._reauth_entry is not None:
-                        self._abort_if_unique_id_mismatch()
                         return self.async_update_reload_and_abort(
                             self._reauth_entry, data=entry_data
                         )
 
-                    self._abort_if_unique_id_configured()
                     return self.async_create_entry(
                         title=f"Intratone ({entry_data[CONF_TEL]})",
                         data=entry_data,

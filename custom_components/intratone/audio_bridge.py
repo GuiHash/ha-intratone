@@ -82,6 +82,13 @@ _PLI_WAIT_FIRST_RTP_S = 3.0
 _PLI_PERIODIC_INTERVAL_S = 30.0
 
 
+class BridgeStoppedError(RuntimeError):
+    """Raised by `AudioBridge.start()` when a concurrent `stop()` (entry
+    reload, call abort) landed between its awaits. The start() invocation has
+    already unwound everything it created; callers must treat the bridge as
+    stopped and must not publish its RTSP URL."""
+
+
 def _build_pli_packet(sender_ssrc: int, media_ssrc: int) -> bytes:
     """RFC 4585 PLI feedback message (12 bytes). `media_ssrc` is the SSRC of the
     VP8 stream we want a keyframe from; `sender_ssrc` identifies us (any unique
@@ -337,16 +344,23 @@ class _RtpProtocol(asyncio.DatagramProtocol):
         elapsed = (time.monotonic() - self._start_time) if self._start_time else 0.0
         _LOGGER.info(
             "AUDIO_RX_SUMMARY: %d packets / %d bytes over %.1fs (avg %.0f B/s) "
-            "from %d source(s); STUN=%d nonRTP=%d seq_gaps=%d",
+            "from %d source(s); PTs=%s STUN=%d nonRTP=%d seq_gaps=%d",
             self.packets_received, self.bytes_received_total, elapsed,
             (self.bytes_received_total / elapsed) if elapsed > 0 else 0,
-            len(self.unique_sources), self.stun_count, self.non_rtp_count,
+            len(self.unique_sources),
+            # PT counts on the INFO line: README's troubleshooting flow relies
+            # on it to tell real audio (PT=0 PCMU) from comfort-noise (PT=13).
+            {pt: st["count"] for pt, st in sorted(self.pt_stats.items())},
+            self.stun_count, self.non_rtp_count,
             self.seq_gaps,
         )
+        # Per-source / per-PT / per-SSRC detail stays at DEBUG (README:
+        # diagnostics at debug level) — the aggregate line above is the one
+        # INFO marker the troubleshooting docs grep for.
         for src in self.unique_sources:
-            _LOGGER.info("AUDIO_RX_SUMMARY: source %s:%d", src[0], src[1])
+            _LOGGER.debug("AUDIO_RX_SUMMARY: source %s:%d", src[0], src[1])
         for pt, st in sorted(self.pt_stats.items()):
-            _LOGGER.info(
+            _LOGGER.debug(
                 "AUDIO_RX_SUMMARY: PT=%d count=%d sizes=%s ssrcs=%s (first at packet #%d)",
                 pt, st["count"],
                 sorted(st["sizes"]),
@@ -354,7 +368,7 @@ class _RtpProtocol(asyncio.DatagramProtocol):
                 st["first_seen_packet"],
             )
         for ssrc, ss in self.ssrc_stats.items():
-            _LOGGER.info(
+            _LOGGER.debug(
                 "AUDIO_RX_SUMMARY: ssrc=0x%08x count=%d pts=%s",
                 ssrc, ss["count"], sorted(ss["pts"]),
             )
@@ -566,10 +580,12 @@ class _VideoRtpProtocol(asyncio.DatagramProtocol):
             self.stun_requests, self.rtp_packets_forwarded, self.non_rtp_count,
             elapsed, len(self.unique_sources),
         )
+        # Detail lines at DEBUG — mirrors dump_summary: one INFO marker line
+        # per category, the rest only when debug logging is on.
         for src in self.unique_sources:
-            _LOGGER.info("VIDEO_RX_SUMMARY: source %s:%d", src[0], src[1])
+            _LOGGER.debug("VIDEO_RX_SUMMARY: source %s:%d", src[0], src[1])
         for pt, st in sorted(self.pt_stats.items()):
-            _LOGGER.info(
+            _LOGGER.debug(
                 "VIDEO_RX_SUMMARY: PT=%d count=%d sizes=%s ssrcs=%s",
                 pt, st["count"], sorted(st["sizes"]),
                 [f"0x{s:08x}" for s in st["ssrcs"]],
@@ -591,7 +607,8 @@ class _VideoRtcpProtocol(asyncio.DatagramProtocol):
     def __init__(
         self, remote_addr: tuple[str, int], local_ssrc: int = 0xDEAD1234
     ) -> None:
-        self._remote_addr = remote_addr
+        # Public: the bridge's PLI loop logs the PLI destination.
+        self.remote_addr = remote_addr
         self._local_ssrc = local_ssrc
         self._transport: asyncio.DatagramTransport | None = None
         self.pli_sent = 0
@@ -613,7 +630,7 @@ class _VideoRtcpProtocol(asyncio.DatagramProtocol):
             return
         pkt = _build_pli_packet(self._local_ssrc, media_ssrc)
         try:
-            self._transport.sendto(pkt, self._remote_addr)
+            self._transport.sendto(pkt, self.remote_addr)
             self.pli_sent += 1
         except OSError:
             _LOGGER.debug("VIDEO_RTCP_TX: PLI sendto failed", exc_info=True)
@@ -700,6 +717,11 @@ class AudioBridge:
         # `start()`, discarded by `stop()` / `cancel_prewarm()`.
         self._prewarm_task: asyncio.Task[_PrewarmedFfmpeg] | None = None
         self._prewarm_cleanup_task: asyncio.Task | None = None
+        # Bumped by every stop(). start() snapshots it on entry and re-checks
+        # after each of its awaits: a mismatch means stop() ran while start()
+        # was suspended, so resuming normally would resurrect transports /
+        # tasks / ffmpeg that stop() never saw. See _unwind_partial_start.
+        self._generation = 0
 
     @property
     def rtsp_url(self) -> str:
@@ -768,7 +790,19 @@ class AudioBridge:
         if task is None:
             return None
         try:
-            return await task
+            # Shield: cancelling the *caller* (an in-flight start() — see
+            # _cancel_spawn_bridge_task) must not ripple into the spawn task
+            # (awaiting a task makes it the canceller's _fut_waiter), or
+            # ffmpeg could be abandoned mid-create_subprocess_exec. Let the
+            # spawn finish on its own timeline instead and reap it later.
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # The caller was cancelled; the shield kept the prewarm running
+            # with a (soon-)live ffmpeg. Re-attach it so the follow-up
+            # stop()/_abort_prewarm() can still reap it.
+            if not task.cancelled():
+                self._prewarm_task = task
+            raise
         except Exception:  # noqa: BLE001
             _LOGGER.warning(
                 "FFMPEG_PREWARM: spawn failed — falling back to on-demand spawn",
@@ -845,8 +879,50 @@ class AudioBridge:
 
         Idempotent: if already running, returns the URL without restarting.
         """
+        try:
+            return await self._do_start(
+                rtp_socket=rtp_socket,
+                remote_rtp_ip=remote_rtp_ip,
+                remote_rtp_port=remote_rtp_port,
+                video_socket=video_socket,
+                remote_video_rtp_ip=remote_video_rtp_ip,
+                remote_video_rtp_port=remote_video_rtp_port,
+                video_rtcp_socket=video_rtcp_socket,
+                on_video_failure=on_video_failure,
+            )
+        except asyncio.CancelledError:
+            # CallManager cancels an in-flight bridge startup when the call
+            # is superseded or the entry unloads (_cancel_spawn_bridge_task).
+            # The generation checkpoints only cover a concurrent stop(); a
+            # raw cancel lands at any await while the not-yet-wrapped sockets
+            # live only in _do_start()'s locals — close everything created so
+            # far before propagating. Sockets already wrapped are closed via
+            # their transport in the sweep first, so the raw re-close below
+            # is a harmless no-op.
+            await self._unwind_partial_start(
+                rtp_socket, video_socket, video_rtcp_socket
+            )
+            raise
+
+    async def _do_start(
+        self,
+        rtp_socket,
+        remote_rtp_ip: str,
+        remote_rtp_port: int,
+        video_socket=None,
+        remote_video_rtp_ip: str | None = None,
+        remote_video_rtp_port: int | None = None,
+        video_rtcp_socket=None,
+        on_video_failure=None,
+    ) -> str:
         if self.is_running:
             return self.rtsp_url
+
+        # Snapshot for the stop()-race checkpoints below: a concurrent stop()
+        # bumps `_generation`, and every await in this method is followed by
+        # a re-check so we never resume against torn-down state (see
+        # _unwind_partial_start for the cleanup contract).
+        generation = self._generation
 
         # CallManager hands us this so the PLI loop can ask for an audio-only
         # re-INVITE when VP8 keyframes never arrive — mirrors the iOS app's
@@ -896,6 +972,14 @@ class AudioBridge:
             self._stderr_task = asyncio.create_task(
                 self._drain_stderr(self._process, self._ffmpeg_push_ready)
             )
+        # Checkpoint: stop() may have run while we consumed the prewarm or
+        # spawned ffmpeg — it nulled `_ffmpeg_push_ready` (the wait below
+        # would AttributeError) and never saw the process we just assigned.
+        if generation != self._generation:
+            await self._unwind_partial_start(
+                rtp_socket, video_socket, video_rtcp_socket
+            )
+            raise BridgeStoppedError("stopped during ffmpeg spawn")
         assert self._process.stdin is not None
         ffmpeg_stdin = self._process.stdin
 
@@ -915,64 +999,68 @@ class AudioBridge:
             except (BrokenPipeError, ConnectionResetError):
                 pass
 
-        self._rtp = _RtpProtocol(
+        # The endpoint factories close over locals, not `self._…` — a
+        # concurrent stop() nulls those attributes and the factory would
+        # hand asyncio None mid-wrap.
+        rtp_proto = _RtpProtocol(
             remote_addr=(remote_rtp_ip, remote_rtp_port),
             on_ulaw=_forward_ulaw,
         )
+        self._rtp = rtp_proto
         loop = asyncio.get_running_loop()
         try:
             self._rtp_transport, _ = await loop.create_datagram_endpoint(
-                lambda: self._rtp,  # type: ignore[return-value]
+                lambda: rtp_proto,
                 sock=rtp_socket,
             )
         except OSError:
             _LOGGER.exception("RTP wrap failed — killing ffmpeg + closing socket")
-            await self._kill_ffmpeg_now()
-            self._rtp = None
-            try:
-                rtp_socket.close()
-            except OSError:
-                pass
-            for sock in (video_socket, video_rtcp_socket):
-                if sock is not None:
-                    try:
-                        sock.close()
-                    except OSError:
-                        pass
-            self._cleanup_video_sdp()
+            await self._unwind_partial_start(
+                rtp_socket, video_socket, video_rtcp_socket
+            )
             raise
+        # Checkpoint: stop() during the audio endpoint wrap.
+        if generation != self._generation:
+            await self._unwind_partial_start(video_socket, video_rtcp_socket)
+            raise BridgeStoppedError("stopped during audio RTP wrap")
 
         if video_enabled:
-            self._video_rtp = _VideoRtpProtocol(
+            video_proto = _VideoRtpProtocol(
                 ffmpeg_target=("127.0.0.1", ffmpeg_video_port),
             )
+            self._video_rtp = video_proto
             try:
                 self._video_rtp_transport, _ = await loop.create_datagram_endpoint(
-                    lambda: self._video_rtp,  # type: ignore[return-value]
+                    lambda: video_proto,
                     sock=video_socket,
                 )
             except OSError:
+                # Fatal, not degradable to audio-only: ffmpeg was spawned
+                # with `-f sdp -i <path>` + `-map 1:v`, so with no video
+                # packets ever arriving the RTSP muxer never initializes —
+                # the push-ready wait below would burn its full 15 s and NO
+                # media (audio included) would reach go2rtc. Tear down like
+                # the audio wrap failure so CallManager hangs up instead of
+                # publishing a dead stream.
                 _LOGGER.exception(
-                    "Video RTP wrap failed — continuing audio-only"
+                    "Video RTP wrap failed — ffmpeg's SDP video input can "
+                    "never start, aborting bridge start"
                 )
-                self._video_rtp = None
-                try:
-                    video_socket.close()
-                except OSError:
-                    pass
-                self._cleanup_video_sdp()
+                await self._unwind_partial_start(video_socket, video_rtcp_socket)
+                raise
 
             # RTCP for video — RFC 3550 convention puts it on `rtp_port + 1`
             # for the remote side. Used to send PLI to the gateway.
             if self._video_rtp is not None and video_rtcp_socket is not None:
                 remote_rtcp_addr = (remote_video_rtp_ip, remote_video_rtp_port + 1)
-                self._video_rtcp = _VideoRtcpProtocol(remote_addr=remote_rtcp_addr)
+                rtcp_proto = _VideoRtcpProtocol(remote_addr=remote_rtcp_addr)
+                self._video_rtcp = rtcp_proto
                 try:
                     (
                         self._video_rtcp_transport,
                         _,
                     ) = await loop.create_datagram_endpoint(
-                        lambda: self._video_rtcp,  # type: ignore[return-value]
+                        lambda: rtcp_proto,
                         sock=video_rtcp_socket,
                     )
                     self._pli_task = asyncio.create_task(self._pli_loop())
@@ -986,11 +1074,19 @@ class AudioBridge:
                     except OSError:
                         pass
             elif video_rtcp_socket is not None:
-                # Video RTP wrap failed above — close the now-unusable RTCP sock.
+                # `_video_rtp` can only be None here if a concurrent stop()
+                # nulled it during the wrap — close the now-unusable RTCP
+                # socket; the checkpoint below unwinds the rest.
                 try:
                     video_rtcp_socket.close()
                 except OSError:
                     pass
+            # Checkpoint: stop() during the video wraps — the transports and
+            # PLI task just created would outlive the call otherwise (a PLI
+            # loop pinging the old gateway every 30 s, forever).
+            if generation != self._generation:
+                await self._unwind_partial_start()
+                raise BridgeStoppedError("stopped during video endpoint wrap")
 
         local_port = rtp_socket.getsockname()[1]
         _LOGGER.info(
@@ -1006,34 +1102,47 @@ class AudioBridge:
             ),
         )
         # Wait until our ffmpeg has actually pushed to go2rtc — otherwise
-        # HomeKit's pull races us and fails 404, then never retries.
+        # HomeKit's pull races us and fails 404, then never retries. Local
+        # ref: stop() nulls the attribute AND sets the event, so this wait
+        # wakes immediately (the checkpoint below turns the wake-up into a
+        # clean abort instead of a 15 s zombie wait).
+        push_ready = self._ffmpeg_push_ready
         t0 = time.monotonic()
         try:
             await asyncio.wait_for(
-                self._ffmpeg_push_ready.wait(),
+                push_ready.wait(),
                 timeout=_FFMPEG_PUSH_READY_TIMEOUT_S,
             )
+            timed_out = False
+        except asyncio.TimeoutError:
+            timed_out = True
+        # Checkpoint: stop() while we waited for the push — everything else
+        # was already visible to (and closed by) stop(); just don't create
+        # the stats task or report a stopped bridge as consumable.
+        if generation != self._generation:
+            await self._unwind_partial_start()
+            raise BridgeStoppedError("stopped while waiting for ffmpeg push")
+        if not timed_out:
             elapsed_ms = (time.monotonic() - t0) * 1000
             _LOGGER.info(
                 "FFMPEG_PUSH_READY: %s consumable (waited %.0fms after spawn)",
                 self.rtsp_url,
                 elapsed_ms,
             )
-        except asyncio.TimeoutError:
-            # If the process died, surface that — much more actionable than a
+        elif self._process is not None and self._process.returncode is not None:
+            # The process died — surface that, much more actionable than a
             # generic timeout warning.
-            if self._process is not None and self._process.returncode is not None:
-                _LOGGER.error(
-                    "FFMPEG_PUSH_READY: ffmpeg exited before push (rc=%s) — "
-                    "check stderr lines above for the cause",
-                    self._process.returncode,
-                )
-            else:
-                _LOGGER.warning(
-                    "FFMPEG_PUSH_READY: timeout after %ss — process still alive but "
-                    "never emitted 'Output #0, rtsp'",
-                    _FFMPEG_PUSH_READY_TIMEOUT_S,
-                )
+            _LOGGER.error(
+                "FFMPEG_PUSH_READY: ffmpeg exited before push (rc=%s) — "
+                "check stderr lines above for the cause",
+                self._process.returncode,
+            )
+        else:
+            _LOGGER.warning(
+                "FFMPEG_PUSH_READY: timeout after %ss — process still alive but "
+                "never emitted 'Output #0, rtsp'",
+                _FFMPEG_PUSH_READY_TIMEOUT_S,
+            )
         self._stats_task = asyncio.create_task(self._log_stats_loop())
         return self.rtsp_url
 
@@ -1091,7 +1200,7 @@ class AudioBridge:
                 if i == 0:
                     _LOGGER.info(
                         "PLI_LOOP: first PLI sent to %s for media_ssrc=0x%08x",
-                        self._video_rtcp._remote_addr, media_ssrc,
+                        self._video_rtcp.remote_addr, media_ssrc,
                     )
                 # Wake up as soon as the keyframe lands instead of sleeping
                 # the full interval — the next iteration logs it and breaks.
@@ -1204,6 +1313,9 @@ class AudioBridge:
 
     async def stop(self) -> None:
         """Tear down ffmpeg + RTP socket(s) + keepalive. Always safe."""
+        # Invalidate any in-flight start(): its next generation checkpoint
+        # unwinds whatever it created after this snapshot (see start()).
+        self._generation += 1
         # A prewarmed ffmpeg that start() never adopted (call died before the
         # 200 OK) must not outlive the call.
         await self._abort_prewarm()
@@ -1224,6 +1336,7 @@ class AudioBridge:
         stderr_task = self._stderr_task
         stats_task = self._stats_task
         pli_task = self._pli_task
+        push_ready = self._ffmpeg_push_ready
         if video_rtcp is not None:
             _LOGGER.info(
                 "VIDEO_RTCP_SUMMARY: %d PLI sent, %d incoming RTCP received",
@@ -1241,6 +1354,11 @@ class AudioBridge:
         self._pli_task = None
         self._ffmpeg_push_ready = None
         self._bytes_written_to_ffmpeg = 0
+        if push_ready is not None:
+            # Wake an in-flight start() parked on the push-ready wait — the
+            # generation bump above turns the wake-up into an immediate
+            # clean abort instead of a 15 s zombie wait.
+            push_ready.set()
 
         if stats_task is not None and not stats_task.done():
             stats_task.cancel()
@@ -1272,17 +1390,68 @@ class AudioBridge:
                 await asyncio.wait_for(
                     process.wait(), timeout=_FFMPEG_TERMINATE_TIMEOUT
                 )
+            except ProcessLookupError:
+                pass  # already reaped — the child watcher won the race
             except asyncio.TimeoutError:
                 _LOGGER.warning("ffmpeg did not exit on SIGTERM; killing")
-                process.kill()
-                await process.wait()
+                try:
+                    process.kill()
+                    await process.wait()
+                except ProcessLookupError:
+                    pass
 
         if stderr_task is not None and not stderr_task.done():
             stderr_task.cancel()
             try:
                 await stderr_task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            except asyncio.CancelledError:
+                # Distinguish the drainer acknowledging our cancel() from
+                # stop() itself being cancelled — the latter must propagate,
+                # or a cancelled stop() would report normal completion.
+                task = asyncio.current_task()
+                if task is not None and task.cancelling():
+                    raise
+            except Exception:  # noqa: BLE001
                 pass
+
+    async def _unwind_partial_start(self, *pending_sockets) -> None:
+        """Close everything a partially-completed start() created.
+
+        Used when start() loses the race against a concurrent stop() (the
+        generation checkpoints) or hits a fatal endpoint-wrap failure.
+        stop() nulls every attribute it closes, and start() re-assigns them
+        as it goes — so whatever is non-None on `self` here belongs to the
+        current start() invocation and was never seen by stop().
+        `pending_sockets` are the raw socket params handed to start(); they
+        are closed AFTER the transport sweep so that a socket that did get
+        wrapped is closed via its transport first (yanking the fd out from
+        under a live transport would leave its cached fd dangling) and the
+        raw re-close is just an idempotent no-op."""
+        if self._pli_task is not None and not self._pli_task.done():
+            self._pli_task.cancel()
+        self._pli_task = None
+        for proto_attr, transport_attr in (
+            ("_rtp", "_rtp_transport"),
+            ("_video_rtp", "_video_rtp_transport"),
+            ("_video_rtcp", "_video_rtcp_transport"),
+        ):
+            proto = getattr(self, proto_attr)
+            if proto is not None:
+                proto.close()
+            setattr(self, proto_attr, None)
+            transport = getattr(self, transport_attr)
+            if transport is not None and not transport.is_closing():
+                transport.close()
+            setattr(self, transport_attr, None)
+        for sock in pending_sockets:
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+        await self._kill_ffmpeg_now()
+        self._cleanup_video_sdp()
+        self._ffmpeg_push_ready = None
 
     async def _kill_ffmpeg_now(self) -> None:
         """Cleanup path for partial start failures — no SIGTERM grace."""
@@ -1433,6 +1602,11 @@ class AudioBridge:
                 await asyncio.sleep(_STATS_INTERVAL_S)
                 if self._rtp is None:
                     return
+                # The ticker fires every 5 s for the whole call — DEBUG only
+                # (README promises diagnostics at debug level); skip the
+                # string assembly entirely when nobody is listening.
+                if not _LOGGER.isEnabledFor(logging.DEBUG):
+                    continue
                 rtp = self._rtp
                 ff_alive = (
                     self._process is not None
@@ -1453,7 +1627,7 @@ class AudioBridge:
                         f"; video_stun={self._video_rtp.stun_requests}"
                         f" vp8={self._video_rtp.rtp_packets_forwarded}"
                     )
-                _LOGGER.info(
+                _LOGGER.debug(
                     "STATS: audio_rx=%d (bytes=%d, PT={%s}, ssrcs=%d, stun=%d, nonRTP=%d, "
                     "seq_gaps=%d) "
                     "audio_tx_keepalive=%d ffmpeg_stdin_wrote=%d (%.0f B/s over %.1fs) "

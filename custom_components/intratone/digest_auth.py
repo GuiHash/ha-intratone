@@ -88,7 +88,12 @@ def build_authorization(
     ]
 
     if challenge.qop:
-        qop_value = "auth" if "auth" in challenge.qop.split(",") else challenge.qop
+        if "auth" not in [q.strip() for q in challenge.qop.split(",")]:
+            # qop="auth-int" only: HA2 must include the entity-body hash
+            # (RFC 7616 §3.4.3) which we don't implement — answering anyway
+            # would just loop on 407s with a wrong response.
+            raise ValueError(f"Unsupported qop {challenge.qop!r}")
+        qop_value = "auth"
         cnonce = cnonce or secrets.token_hex(8)
         nc_str = f"{nc:08x}"
         response = _md5(f"{ha1}:{challenge.nonce}:{nc_str}:{cnonce}:{qop_value}:{ha2}")

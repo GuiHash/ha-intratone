@@ -57,9 +57,11 @@ async def test_diagnostics_redacts_credentials_and_dumps_state(
     for key in ("jwt", "fcm_token", "fcm_creds"):
         assert store[key] == "**REDACTED**", key
 
-    # Coordinator state is exposed, but caller_login (PII-ish) is scrubbed.
+    # Coordinator state is exposed, but caller_login (PII-ish) and door_code
+    # (sent as `opendoor:<code>` to trigger the relay) are scrubbed.
     last_call = diag["coordinator"]["last_call"]
     assert last_call["call_id"] == "300705065"
     assert last_call["door_name"] == "PORTE RUE"
     assert last_call["caller_login"] == "**REDACTED**"
+    assert last_call["door_code"] == "**REDACTED**"
     assert last_call["ring_seq"] == 1
