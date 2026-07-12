@@ -53,7 +53,11 @@
         "title": "Live video",
         "description": "Enable VP8 video to watch the visitor during a call. Requires a **standalone go2rtc instance** (HA's embedded go2rtc can't accept the stream). When off, the camera and backlight entities are not created — doorbell rings, audio-free door opening and events keep working. You can change this later in the integration options.",
         "data": {
-          "video_enabled": "Enable video (VP8)"
+          "video_enabled": "Enable video (VP8)",
+          "go2rtc_url": "go2rtc RTSP relay URL"
+        },
+        "data_description": {
+          "go2rtc_url": "RTSP URL where go2rtc listens. Checked when video is enabled — go2rtc must already be running."
         }
       }
     },
@@ -69,7 +73,9 @@
       "mobipass_code_blocked": "Too many attempts — the transfer code is temporarily blocked. Try again later.",
       "mobipass_not_available": "Intratone won’t transfer the CléMobil to this account from Home Assistant — its servers don’t report your account as eligible, and it can’t be forced from here. Opening a door during an active call is unaffected.",
       "mobipass_failed": "The CléMobil transfer failed. Check the logs and try again.",
-      "unknown": "Unexpected error. Check the logs."
+      "unknown": "Unexpected error. Check the logs.",
+      "invalid_url": "Enter a valid RTSP URL (rtsp://host:port).",
+      "go2rtc_unreachable": "No RTSP server answered at this URL. Check that your standalone go2rtc instance is running and the address is correct."
     },
     "abort": {
       "already_configured": "This Intratone device is already configured.",
@@ -135,6 +141,10 @@
           "not_loaded": "The Intratone integration must be loaded before re-pairing."
         }
       }
+    },
+    "go2rtc_unreachable": {
+      "title": "go2rtc relay unreachable",
+      "description": "The Intratone stream could not be published to go2rtc at `{url}`. HomeKit will show an endless loading spinner on the camera until this is fixed.\n\nCheck that your standalone go2rtc instance is running and that the *go2rtc RTSP relay URL* in the integration options is correct, then use the *Test go2rtc relay* button (or answer the next call) to re-check."
     }
   },
   "options": {
@@ -150,6 +160,10 @@
           "go2rtc_url": "RTSP URL where go2rtc listens. Default: rtsp://127.0.0.1:8554. HA's embedded go2rtc can't accept this stream — run a standalone go2rtc instance instead."
         }
       }
+    },
+    "error": {
+      "invalid_url": "Enter a valid RTSP URL (rtsp://host:port).",
+      "go2rtc_unreachable": "No RTSP server answered at this URL. Check that your standalone go2rtc instance is running and the address is correct."
     }
   },
   "services": {
@@ -213,6 +227,19 @@
       "backlight": {
         "name": "Backlight"
       }
+    },
+    "button": {
+      "go2rtc_test": {
+        "name": "Test go2rtc relay"
+      }
+    }
+  },
+  "exceptions": {
+    "go2rtc_selftest_busy": {
+      "message": "A call is in progress — the relay is already being exercised by the live stream."
+    },
+    "go2rtc_selftest_failed": {
+      "message": "go2rtc self-test failed for {url} ({reason}). Check that your standalone go2rtc instance is running and the URL in the integration options is correct."
     }
   }
 }

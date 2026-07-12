@@ -12,6 +12,7 @@ from homeassistant.data_entry_flow import FlowResultType
 from custom_components.intratone.config_flow import _normalize_phone
 from custom_components.intratone.const import (
     API_BASE,
+    CONF_GO2RTC_URL,
     CONF_INDICATIF,
     CONF_INVITE_CODE,
     CONF_JWT,
@@ -19,6 +20,7 @@ from custom_components.intratone.const import (
     CONF_REGISTER_METHOD,
     CONF_TEL,
     CONF_VIDEO_ENABLED,
+    DEFAULT_GO2RTC_URL,
     DOMAIN,
     PATH_ACCESS_LIST,
     PATH_MOBIPASS_ACTIVATE,
@@ -39,6 +41,16 @@ def patched_fcm_register():
     with patch(
         "custom_components.intratone.config_flow.fcm_register_standalone",
         new=AsyncMock(return_value=("fake-fcm-token", {"gcm": {"android_id": 1}})),
+    ) as p:
+        yield p
+
+
+@pytest.fixture
+def patched_probe():
+    """go2rtc RTSP probe answering healthy — pytest-socket blocks the real one."""
+    with patch(
+        "custom_components.intratone.config_flow.async_probe_go2rtc",
+        new=AsyncMock(return_value=None),
     ) as p:
         yield p
 
@@ -75,7 +87,7 @@ async def test_invalid_format_shows_error(hass) -> None:
 
 
 async def test_happy_path_creates_entry(
-    hass, aiomock, patched_fcm_register
+    hass, aiomock, patched_fcm_register, patched_probe
 ) -> None:
     aiomock.post(
         f"{API_BASE}api/auth/registercodes",
@@ -103,6 +115,9 @@ async def test_happy_path_creates_entry(
     assert result["data"][CONF_TEL] == "0671124546"
     assert result["data"][CONF_NUMERIC_ID] == "3844428"
     assert result["options"][CONF_VIDEO_ENABLED] is True
+    # Enabling video probes the (default) go2rtc URL and persists it.
+    assert result["options"][CONF_GO2RTC_URL] == DEFAULT_GO2RTC_URL
+    patched_probe.assert_awaited_once_with(DEFAULT_GO2RTC_URL)
     # JWT lives in the per-account credentials Store, not in entry.data.
     assert CONF_JWT not in result["data"]
     patched_fcm_register.assert_awaited_once()
@@ -113,6 +128,85 @@ async def test_happy_path_creates_entry(
     await store.async_load()
     assert store.jwt == "fresh.jwt"
     assert store.fcm_token == "fake-fcm-token"
+
+
+async def test_video_step_rejects_unreachable_go2rtc_then_recovers(
+    hass, aiomock, patched_fcm_register, patched_probe
+) -> None:
+    """Enabling video with a dead relay keeps the user on the video form
+    with a field error; fixing the situation lets the entry go through."""
+    aiomock.post(
+        f"{API_BASE}api/auth/registercodes",
+        payload={"state": "ok", "data": {"id": "3844428", "tel": "0671124546"}},
+    )
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={"state": "ok", "data": {"jwt": "fresh.jwt", "id": "3844428"}},
+    )
+
+    result = await _pick_invite_step(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_INVITE_CODE: "448789-1206"}
+    )
+    assert result["step_id"] == "video"
+
+    patched_probe.return_value = "go2rtc_unreachable"
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {CONF_VIDEO_ENABLED: True, CONF_GO2RTC_URL: "rtsp://10.0.0.9:8554"},
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "video"
+    assert result["errors"] == {CONF_GO2RTC_URL: "go2rtc_unreachable"}
+
+    patched_probe.return_value = None
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {CONF_VIDEO_ENABLED: True, CONF_GO2RTC_URL: "rtsp://10.0.0.9:8554"},
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["options"][CONF_GO2RTC_URL] == "rtsp://10.0.0.9:8554"
+
+
+async def test_options_flow_probes_go2rtc_when_video_enabled(
+    hass, mock_entry: MockConfigEntry, patched_probe
+) -> None:
+    """The options form re-validates the relay URL: error shown while the
+    relay is unreachable, saved once it answers."""
+    mock_entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(mock_entry.entry_id)
+    assert result["step_id"] == "init"
+
+    patched_probe.return_value = "go2rtc_unreachable"
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {CONF_VIDEO_ENABLED: True, CONF_GO2RTC_URL: DEFAULT_GO2RTC_URL},
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {CONF_GO2RTC_URL: "go2rtc_unreachable"}
+
+    patched_probe.return_value = None
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {CONF_VIDEO_ENABLED: True, CONF_GO2RTC_URL: DEFAULT_GO2RTC_URL},
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert mock_entry.options[CONF_VIDEO_ENABLED] is True
+
+
+async def test_options_flow_skips_probe_when_video_disabled(
+    hass, mock_entry: MockConfigEntry, patched_probe
+) -> None:
+    """With video off the relay URL is unused — saving must not require a
+    running go2rtc."""
+    mock_entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(mock_entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {CONF_VIDEO_ENABLED: False, CONF_GO2RTC_URL: DEFAULT_GO2RTC_URL},
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    patched_probe.assert_not_awaited()
 
 
 async def test_rejected_invite_shows_error(
@@ -177,7 +271,7 @@ async def test_phone_invalid_shows_invalid_phone_error(hass) -> None:
 
 
 async def test_sms_happy_path_creates_entry(
-    hass, aiomock, patched_fcm_register
+    hass, aiomock, patched_fcm_register, patched_probe
 ) -> None:
     aiomock.post(
         f"{API_BASE}api/auth/verify",
@@ -223,6 +317,8 @@ async def test_sms_happy_path_creates_entry(
     # The collected indicatif is persisted for downstream auth calls.
     assert result["data"][CONF_INDICATIF] == "33"
     assert result["options"][CONF_VIDEO_ENABLED] is False
+    # Video off → the go2rtc URL is unused, so it is not probed.
+    patched_probe.assert_not_awaited()
     assert CONF_JWT not in result["data"]
 
     from custom_components.intratone.store import IntratoneCredentialsStore

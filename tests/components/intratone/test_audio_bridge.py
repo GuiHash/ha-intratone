@@ -277,6 +277,46 @@ async def test_start_is_idempotent(mock_subprocess, fake_datagram_endpoint):
     await bridge.stop()
 
 
+async def test_relay_status_reported_true_on_push_success(
+    mock_subprocess, fake_datagram_endpoint
+):
+    """A successful ANNOUNCE to go2rtc fires on_relay_status(True) so the
+    integration can clear a previously raised relay repair issue."""
+    statuses: list[bool] = []
+    bridge = AudioBridge(on_relay_status=statuses.append)
+    await bridge.start(
+        rtp_socket=_fake_rtp_socket(16384),
+        remote_rtp_ip="178.32.84.135",
+        remote_rtp_port=20000,
+    )
+    assert statuses == [True]
+    await bridge.stop()
+
+
+async def test_relay_status_reported_false_when_ffmpeg_dies_before_push(
+    mock_subprocess, fake_process, fake_datagram_endpoint
+):
+    """go2rtc down → ffmpeg exits before emitting the push marker →
+    on_relay_status(False) so a repair issue can be raised."""
+    from custom_components.intratone import audio_bridge as bridge_mod
+
+    # stderr EOFs immediately (no `Output #0, rtsp` marker) and the process
+    # is already dead by the time start() checks it.
+    fake_process.stderr.readline = AsyncMock(return_value=b"")
+    fake_process.returncode = 1
+
+    statuses: list[bool] = []
+    bridge = AudioBridge(on_relay_status=statuses.append)
+    with patch.object(bridge_mod, "_FFMPEG_PUSH_READY_TIMEOUT_S", 0.05):
+        await bridge.start(
+            rtp_socket=_fake_rtp_socket(16384),
+            remote_rtp_ip="178.32.84.135",
+            remote_rtp_port=20000,
+        )
+    assert statuses == [False]
+    await bridge.stop()
+
+
 async def test_received_rtp_forwards_ulaw_to_ffmpeg_stdin(
     mock_subprocess, fake_process, fake_datagram_endpoint
 ):
