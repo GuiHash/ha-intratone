@@ -386,9 +386,9 @@ Failures come back as `error != 0` with a `code`:
 | `code`                 | meaning                                              |
 | ---------------------- | ---------------------------------------------------- |
 | `MOBIPASS_OTP_INVALID` | wrong/expired code (verify step)                     |
-| `MOBIPASS_CODE_BLOCKED`| too many attempts — temporarily blocked              |
+| `MOBIPASS_BLOCKED`     | too many attempts — temporarily blocked              |
 | `MOBIPASS_NOT_AVAILABLE`| Mobipass not available for this account             |
-| `MOBIPASS_CODE_SMS_SENT`| a code was already sent (activate step)             |
+| `MOBIPASS_SMS_SENT`    | a code was already sent (activate step)              |
 
 ---
 

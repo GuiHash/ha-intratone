@@ -9,7 +9,7 @@ RTP packets it receives (which is what NAT comedia would normally trigger).
 Usage:
     python3 dev/mock_asterisk.py [--sip-port 5060] [--rtp-port 16500] [--digest]
 
-Then in HA dev: trigger `intratone.simulate_real_call` with `sip_server_ip:
+Then in HA dev: trigger `intratone.simulate_ring` with `sip_server_ip:
 127.0.0.1` and the mock server takes over.
 
 Limitations:
@@ -192,7 +192,7 @@ class MockAsterisk(asyncio.DatagramProtocol):
         sdp_body = _CRLF.join(
             [
                 "v=0",
-                f"o=mock 1 1 IN IP4 127.0.0.1",
+                "o=mock 1 1 IN IP4 127.0.0.1",
                 "s=Mock Asterisk",
                 "c=IN IP4 127.0.0.1",
                 "t=0 0",
