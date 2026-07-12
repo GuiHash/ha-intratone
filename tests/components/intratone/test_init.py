@@ -176,7 +176,10 @@ async def test_full_setup_push_open_door(
     camera_eid = registry.async_get_entity_id(
         "camera", DOMAIN, f"{mock_entry.entry_id}_camera"
     )
-    assert event_eid and lock_eid and camera_eid
+    button_eid = registry.async_get_entity_id(
+        "button", DOMAIN, f"{mock_entry.entry_id}_go2rtc_test"
+    )
+    assert event_eid and lock_eid and camera_eid and button_eid
 
     # Inject a fake FCM push by calling the coordinator directly.
     runtime = mock_entry.runtime_data
@@ -307,12 +310,46 @@ async def test_simulate_ring_service(
     assert state.door_name == "PORTE COUR"
 
 
+async def test_go2rtc_repair_issue_raised_and_cleared(
+    hass, mock_entry, mock_fcm_client, mock_call_manager, aiomock
+) -> None:
+    """A failed push to go2rtc raises the non-fixable relay repair with the
+    configured URL; the next success clears it."""
+    from custom_components.intratone import report_relay_status
+    from custom_components.intratone.const import CONF_GO2RTC_URL
+
+    mock_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        mock_entry,
+        options={CONF_VIDEO_ENABLED: True, CONF_GO2RTC_URL: "rtsp://10.0.0.9:8554"},
+    )
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={"state": "ok", "data": {"jwt": "fake.jwt.token", "id": "3844428"}},
+        repeat=True,
+    )
+    assert await hass.config_entries.async_setup(mock_entry.entry_id)
+    await hass.async_block_till_done()
+
+    issue_id = f"go2rtc_unreachable_{mock_entry.entry_id}"
+
+    report_relay_status(hass, mock_entry, False)
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, issue_id)
+    assert issue is not None
+    assert not issue.is_fixable
+    assert issue.translation_placeholders == {"url": "rtsp://10.0.0.9:8554"}
+
+    report_relay_status(hass, mock_entry, True)
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is None
+
+
 async def test_camera_and_backlight_absent_without_video_option(
     hass, mock_entry, mock_fcm_client, mock_call_manager, aiomock
 ) -> None:
-    """With video off (the default), the camera and backlight entities are
-    not created, and stale registry entries left over from a previous
-    video-enabled run are removed. The other entities are unaffected."""
+    """With video off (the default), the camera, backlight and go2rtc-test
+    entities are not created, and stale registry entries left over from a
+    previous video-enabled run are removed. The other entities are
+    unaffected."""
     mock_entry.add_to_hass(hass)
     registry = er.async_get(hass)
     registry.async_get_or_create(
@@ -320,6 +357,12 @@ async def test_camera_and_backlight_absent_without_video_option(
     )
     registry.async_get_or_create(
         "switch", DOMAIN, f"{mock_entry.entry_id}_backlight", config_entry=mock_entry
+    )
+    registry.async_get_or_create(
+        "button",
+        DOMAIN,
+        f"{mock_entry.entry_id}_go2rtc_test",
+        config_entry=mock_entry,
     )
     aiomock.post(
         f"{API_BASE}api/auth/device",
@@ -339,6 +382,12 @@ async def test_camera_and_backlight_absent_without_video_option(
     assert (
         registry.async_get_entity_id(
             "switch", DOMAIN, f"{mock_entry.entry_id}_backlight"
+        )
+        is None
+    )
+    assert (
+        registry.async_get_entity_id(
+            "button", DOMAIN, f"{mock_entry.entry_id}_go2rtc_test"
         )
         is None
     )

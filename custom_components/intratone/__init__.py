@@ -37,6 +37,7 @@ _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [
     Platform.BINARY_SENSOR,
+    Platform.BUTTON,
     Platform.CAMERA,
     Platform.EVENT,
     Platform.LOCK,
@@ -48,6 +49,33 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 # Repair issue surfaced when the CléMobil/Mobipass key must be transferred to
 # this device (issue #61). One per config entry.
 MOBIPASS_ISSUE_PREFIX = "mobipass_transfer_"
+
+# Repair issue surfaced when ffmpeg can't publish the call stream to go2rtc
+# (relay down, wrong URL). Raised on a live-call push failure and by the
+# diagnostic test button; cleared on the next successful push/self-test.
+GO2RTC_ISSUE_PREFIX = "go2rtc_unreachable_"
+
+
+@callback
+def report_relay_status(
+    hass: HomeAssistant, entry: IntratoneConfigEntry, ok: bool
+) -> None:
+    """Raise or clear the go2rtc-unreachable repair for this entry."""
+    issue_id = f"{GO2RTC_ISSUE_PREFIX}{entry.entry_id}"
+    if ok:
+        ir.async_delete_issue(hass, DOMAIN, issue_id)
+        return
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        issue_id,
+        is_fixable=False,
+        severity=ir.IssueSeverity.ERROR,
+        translation_key="go2rtc_unreachable",
+        translation_placeholders={
+            "url": entry.options.get(CONF_GO2RTC_URL, DEFAULT_GO2RTC_URL)
+        },
+    )
 
 SERVICE_SIMULATE_RING = "simulate_ring"
 SIMULATE_RING_SCHEMA = vol.Schema(
@@ -150,6 +178,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: IntratoneConfigEntry) ->
         on_call_ended=lambda call_id: coordinator.set_stream_url(call_id, None),
         video_enabled=entry.options.get(CONF_VIDEO_ENABLED, False),
         go2rtc_url=entry.options.get(CONF_GO2RTC_URL, DEFAULT_GO2RTC_URL),
+        on_relay_status=lambda ok: report_relay_status(hass, entry, ok),
     )
     await call_manager.async_start()
     # Register teardown via async_on_unload right after each component starts:

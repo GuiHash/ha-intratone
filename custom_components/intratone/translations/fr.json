@@ -53,7 +53,11 @@
         "title": "Vidéo en direct",
         "description": "Activez la vidéo VP8 pour voir le visiteur pendant un appel. Nécessite une **instance go2rtc autonome** (le go2rtc intégré à HA ne peut pas accepter le flux). Désactivée, les entités caméra et rétroéclairage ne sont pas créées — la sonnette, l'ouverture de porte et les événements continuent de fonctionner. Modifiable plus tard dans les options de l'intégration.",
         "data": {
-          "video_enabled": "Activer la vidéo (VP8)"
+          "video_enabled": "Activer la vidéo (VP8)",
+          "go2rtc_url": "URL RTSP du relais go2rtc"
+        },
+        "data_description": {
+          "go2rtc_url": "URL RTSP sur laquelle go2rtc écoute. Vérifiée quand la vidéo est activée — go2rtc doit déjà tourner."
         }
       }
     },
@@ -69,7 +73,9 @@
       "mobipass_code_blocked": "Trop de tentatives — le code de transfert est temporairement bloqué. Réessayez plus tard.",
       "mobipass_not_available": "Intratone n'autorise pas le transfert de la CléMobil vers ce compte depuis Home Assistant — ses serveurs ne considèrent pas votre compte comme éligible, et cela ne peut pas être forcé ici. L'ouverture d'une porte pendant un appel reste possible.",
       "mobipass_failed": "Le transfert de la CléMobil a échoué. Consultez les logs et réessayez.",
-      "unknown": "Erreur inattendue. Consultez les logs."
+      "unknown": "Erreur inattendue. Consultez les logs.",
+      "invalid_url": "Saisissez une URL RTSP valide (rtsp://hôte:port).",
+      "go2rtc_unreachable": "Aucun serveur RTSP ne répond à cette URL. Vérifiez que votre instance go2rtc autonome tourne et que l'adresse est correcte."
     },
     "abort": {
       "already_configured": "Cet appareil Intratone est déjà configuré.",
@@ -135,6 +141,10 @@
           "not_loaded": "L'intégration Intratone doit être chargée avant le re-couplage."
         }
       }
+    },
+    "go2rtc_unreachable": {
+      "title": "Relais go2rtc injoignable",
+      "description": "Le flux Intratone n'a pas pu être publié vers go2rtc à `{url}`. HomeKit affichera un chargement infini sur la caméra tant que ce n'est pas corrigé.\n\nVérifiez que votre instance go2rtc autonome tourne et que l'*URL RTSP du relais go2rtc* dans les options de l'intégration est correcte, puis utilisez le bouton *Tester le relais go2rtc* (ou répondez au prochain appel) pour revérifier."
     }
   },
   "options": {
@@ -150,6 +160,10 @@
           "go2rtc_url": "URL RTSP sur laquelle go2rtc écoute. Par défaut : rtsp://127.0.0.1:8554. Le go2rtc intégré à HA ne peut pas accepter ce flux — utilisez plutôt une instance go2rtc autonome."
         }
       }
+    },
+    "error": {
+      "invalid_url": "Saisissez une URL RTSP valide (rtsp://hôte:port).",
+      "go2rtc_unreachable": "Aucun serveur RTSP ne répond à cette URL. Vérifiez que votre instance go2rtc autonome tourne et que l'adresse est correcte."
     }
   },
   "services": {
@@ -213,6 +227,19 @@
       "backlight": {
         "name": "Rétroéclairage"
       }
+    },
+    "button": {
+      "go2rtc_test": {
+        "name": "Tester le relais go2rtc"
+      }
+    }
+  },
+  "exceptions": {
+    "go2rtc_selftest_busy": {
+      "message": "Un appel est en cours — le relais est déjà utilisé par le flux en direct."
+    },
+    "go2rtc_selftest_failed": {
+      "message": "Le test go2rtc a échoué pour {url} ({reason}). Vérifiez que votre instance go2rtc autonome tourne et que l'URL dans les options de l'intégration est correcte."
     }
   }
 }

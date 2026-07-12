@@ -135,12 +135,16 @@ class CallManager:
         video_enabled: bool = False,
         go2rtc_url: str = "rtsp://127.0.0.1:8554",
         audio_bridge: AudioBridge | None = None,
+        on_relay_status: Callable[[bool], None] | None = None,
     ) -> None:
         self._local_host = local_host
         self._on_call_active = on_call_active
         self._on_call_ended = on_call_ended
         self._video_enabled = video_enabled
-        self._bridge = audio_bridge or AudioBridge(rtsp_relay_url=go2rtc_url.rstrip("/"))
+        self._bridge = audio_bridge or AudioBridge(
+            rtsp_relay_url=go2rtc_url.rstrip("/"),
+            on_relay_status=on_relay_status,
+        )
         self._sip_client: IntratoneSipClient | None = None
         self._sip_transport: asyncio.Transport | None = None
         self._active_call_id: str | None = None
@@ -163,6 +167,11 @@ class CallManager:
     @property
     def active_call_id(self) -> str | None:
         return self._active_call_id
+
+    @property
+    def relay_rtsp_url(self) -> str:
+        """Full RTSP URL the bridge publishes to (relay + stream path)."""
+        return self._bridge.rtsp_url
 
     async def async_start(self) -> None:
         """Mark the manager as started. SIP TCP connections are per-call now;

@@ -679,9 +679,14 @@ class AudioBridge:
         ffmpeg_binary: str = "ffmpeg",
         rtsp_path: str = "intratone",
         rtsp_relay_url: str = "rtsp://127.0.0.1:8554",
+        on_relay_status: Callable[[bool], None] | None = None,
     ) -> None:
         self._ffmpeg_binary = ffmpeg_binary
         self._rtsp_path = rtsp_path
+        # Sync callback fired once per start() with the outcome of the push
+        # to go2rtc — __init__.py wires it to a repair issue so a dead relay
+        # is surfaced in the UI instead of only as a log line.
+        self._on_relay_status = on_relay_status
         # External RTSP server (go2rtc by default) we PUSH to. HomeKit pulls
         # from the same URL. ffmpeg's `-rtsp_flags listen` mode is broken in
         # recent builds (tries to connect instead of listen), so we relay
@@ -1143,6 +1148,8 @@ class AudioBridge:
                 "never emitted 'Output #0, rtsp'",
                 _FFMPEG_PUSH_READY_TIMEOUT_S,
             )
+        if self._on_relay_status is not None:
+            self._on_relay_status(not timed_out)
         self._stats_task = asyncio.create_task(self._log_stats_loop())
         return self.rtsp_url
 

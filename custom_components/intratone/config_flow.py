@@ -29,6 +29,7 @@ from .const import (
     REGISTER_METHOD_SMS,
 )
 from .fcm_listener import fcm_register_standalone
+from .go2rtc import async_probe_go2rtc
 from .rest_api import (
     IntratoneApiError,
     IntratoneAuthError,
@@ -55,7 +56,29 @@ PHONE_SCHEMA = vol.Schema(
 SMS_SCHEMA = vol.Schema({vol.Required("code"): str})
 # Shared with repairs.py (CléMobil transfer repair flow).
 MOBIPASS_OTP_SCHEMA = vol.Schema({vol.Required("code"): str})
-VIDEO_SCHEMA = vol.Schema({vol.Required(CONF_VIDEO_ENABLED, default=False): bool})
+VIDEO_SCHEMA = vol.Schema(
+    {
+        vol.Required(CONF_VIDEO_ENABLED, default=False): bool,
+        vol.Optional(CONF_GO2RTC_URL, default=DEFAULT_GO2RTC_URL): str,
+    }
+)
+
+
+async def _async_validate_video_options(
+    user_input: dict[str, Any],
+) -> dict[str, str]:
+    """Probe the go2rtc URL when video is enabled.
+
+    Returns form errors keyed on the URL field, empty when acceptable.
+    With video off the URL is unused, so an unreachable relay is fine.
+    """
+    if not user_input.get(CONF_VIDEO_ENABLED):
+        return {}
+    url = user_input.get(CONF_GO2RTC_URL, DEFAULT_GO2RTC_URL)
+    err = await async_probe_go2rtc(url)
+    if err is not None:
+        return {CONF_GO2RTC_URL: err}
+    return {}
 
 
 def _normalize_phone(raw: str, indicatif: str) -> str:
@@ -78,10 +101,14 @@ class IntratoneOptionsFlowHandler(OptionsFlow):
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
         if user_input is not None:
-            return self.async_create_entry(data=user_input)
+            errors = await _async_validate_video_options(user_input)
+            if not errors:
+                return self.async_create_entry(data=user_input)
 
-        current = self.config_entry.options
+        # On error, re-fill the form with what the user just typed.
+        current = user_input or self.config_entry.options
         schema = vol.Schema(
             {
                 vol.Required(
@@ -94,7 +121,9 @@ class IntratoneOptionsFlowHandler(OptionsFlow):
                 ): str,
             }
         )
-        return self.async_show_form(step_id="init", data_schema=schema)
+        return self.async_show_form(
+            step_id="init", data_schema=schema, errors=errors
+        )
 
 
 class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -262,15 +291,31 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
         Video needs a standalone go2rtc instance, so it defaults to off.
         Without it the camera and backlight entities are not created (audio
         and door opening keep working). Changeable later via the options.
+        When enabled, the go2rtc URL is probed (RTSP OPTIONS) so a dead
+        relay is caught here rather than at the first doorbell ring.
         """
+        errors: dict[str, str] = {}
         if user_input is not None:
-            pending = self._pending_entry
-            return self.async_create_entry(
-                title=pending["title"],
-                data=pending["data"],
-                options={CONF_VIDEO_ENABLED: user_input[CONF_VIDEO_ENABLED]},
-            )
-        return self.async_show_form(step_id="video", data_schema=VIDEO_SCHEMA)
+            errors = await _async_validate_video_options(user_input)
+            if not errors:
+                pending = self._pending_entry
+                return self.async_create_entry(
+                    title=pending["title"],
+                    data=pending["data"],
+                    options={
+                        CONF_VIDEO_ENABLED: user_input[CONF_VIDEO_ENABLED],
+                        CONF_GO2RTC_URL: user_input.get(
+                            CONF_GO2RTC_URL, DEFAULT_GO2RTC_URL
+                        ),
+                    },
+                )
+        return self.async_show_form(
+            step_id="video",
+            data_schema=self.add_suggested_values_to_schema(
+                VIDEO_SCHEMA, user_input
+            ),
+            errors=errors,
+        )
 
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
