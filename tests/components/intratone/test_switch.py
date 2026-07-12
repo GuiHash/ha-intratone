@@ -6,6 +6,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from homeassistant.exceptions import HomeAssistantError
 
 from custom_components.intratone.switch import IntratoneBacklightSwitch
 
@@ -40,15 +41,17 @@ async def test_turn_on_invokes_coordinator_and_flips_state(hass, fake_coordinato
     assert switch.is_on is False
 
 
-async def test_turn_on_skipped_when_no_call(hass, fake_coordinator):
-    """If the coordinator can't send the signal (no active SIP), the
-    switch stays off — no fake UI feedback."""
+async def test_turn_on_raises_when_no_call(hass, fake_coordinator):
+    """If the coordinator can't send the signal (no active SIP), the switch
+    raises so HA surfaces an error toast — mirrors the door lock — and stays
+    off (no fake UI feedback)."""
     fake_coordinator.async_toggle_backlight = AsyncMock(return_value=False)
     switch = IntratoneBacklightSwitch(fake_coordinator)
     switch.hass = hass
     switch.async_write_ha_state = MagicMock()
 
-    await switch.async_turn_on()
+    with pytest.raises(HomeAssistantError):
+        await switch.async_turn_on()
 
     assert switch.is_on is False
 

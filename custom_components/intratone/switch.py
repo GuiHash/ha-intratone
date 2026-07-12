@@ -14,6 +14,7 @@ import logging
 
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import IntratoneConfigEntry
@@ -54,11 +55,9 @@ class IntratoneBacklightSwitch(MomentaryRevertMixin, IntratoneEntity, SwitchEnti
     async def async_turn_on(self, **_kwargs) -> None:
         sent = await self.coordinator.async_toggle_backlight()
         if not sent:
-            _LOGGER.warning(
-                "Backlight requested but no active call — server only acts on "
-                "the signal during a confirmed SIP dialog"
+            raise HomeAssistantError(
+                "Backlight failed — no active call or API error (see logs)"
             )
-            return
 
         self._attr_is_on = True
         self.async_write_ha_state()
