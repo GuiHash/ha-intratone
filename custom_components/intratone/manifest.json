@@ -19,5 +19,5 @@
     "firebase-messaging>=0.4.5",
     "voip-utils>=0.4.0"
   ],
-  "version": "0.8.0"
+  "version": "0.9.0"
 }
