@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.0](https://github.com/GuiHash/ha-intratone/compare/v0.8.0...v0.9.0) (2026-07-12)
+
+
+### Features
+
+* **intratone:** gate camera/backlight on video option, ask video at pairing ([88fc40a](https://github.com/GuiHash/ha-intratone/commit/88fc40a949081695a1fc07e84322530e3c23ff43))
+* **intratone:** validate go2rtc relay and surface push failures ([bf0bab8](https://github.com/GuiHash/ha-intratone/commit/bf0bab8798ec39f3c4c578aed742c890ac514697))
+
 ## [0.8.0](https://github.com/GuiHash/ha-intratone/compare/v0.7.1...v0.8.0) (2026-07-12)
 
 
