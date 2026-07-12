@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/GuiHash/ha-intratone/compare/v0.9.0...v0.9.1) (2026-07-12)
+
+
+### Bug Fixes
+
+* **intratone:** pace go2rtc self-test ffmpeg with -re ([#89](https://github.com/GuiHash/ha-intratone/issues/89)) ([710ac42](https://github.com/GuiHash/ha-intratone/commit/710ac428c4d5d2ac90c9d8ea3e645b36b3ef1d75))
+
 ## [0.9.0](https://github.com/GuiHash/ha-intratone/compare/v0.8.0...v0.9.0) (2026-07-12)
 
 
