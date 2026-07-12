@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.0](https://github.com/GuiHash/ha-intratone/compare/v0.7.1...v0.8.0) (2026-07-12)
+
+
+### Features
+
+* **mobipass:** steer SMS-paired users to invite code for CléMobil ([#61](https://github.com/GuiHash/ha-intratone/issues/61)) ([eceeb52](https://github.com/GuiHash/ha-intratone/commit/eceeb520f55340b821e595d3c36bf4c1670c54ff))
+
+
+### Bug Fixes
+
+* **intratone:** quality-audit hardening across SIP, API, FCM and flows ([1642e0e](https://github.com/GuiHash/ha-intratone/commit/1642e0e26bdeea41eb5c76c2486bc31d23ae00ad))
+
 ## [0.7.1](https://github.com/GuiHash/ha-intratone/compare/v0.7.0...v0.7.1) (2026-07-10)
 
 
