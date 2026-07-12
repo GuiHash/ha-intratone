@@ -36,16 +36,10 @@ class IntratoneCredentialsStore:
             hass, STORAGE_VERSION, _STORAGE_KEY_TPL.format(key=key)
         )
         self._cache: CredsData = {}
-        self._loaded = False
 
     async def async_load(self) -> None:
         loaded = await self._store.async_load()
         self._cache = dict(loaded) if loaded else {}
-        self._loaded = True
-
-    @property
-    def loaded(self) -> bool:
-        return self._loaded
 
     @property
     def jwt(self) -> str | None:

@@ -9,6 +9,7 @@ HomeKit falls back to the still-image placeholder.
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 
 from homeassistant.components.camera import Camera, CameraEntityFeature
@@ -44,11 +45,10 @@ class IntratoneCamera(IntratoneEntity, Camera):
         self._cached_image: bytes | None = None
 
     async def stream_source(self) -> str | None:
-        import time
         t0 = time.monotonic()
-        _LOGGER.info("HOMEKIT_PULL: stream_source() called by HomeKit")
+        _LOGGER.debug("HOMEKIT_PULL: stream_source() called by HomeKit")
         if self.coordinator.data is None:
-            _LOGGER.warning("HOMEKIT_PULL: coordinator has no data — refusing")
+            _LOGGER.debug("HOMEKIT_PULL: coordinator has no data — refusing")
             return None
         # Lazy SIP: HomeKit asking for the stream IS the "user picked up"
         # signal. Trigger the INVITE now (if not already), then wait for
@@ -62,7 +62,7 @@ class IntratoneCamera(IntratoneEntity, Camera):
                 elapsed_ms,
             )
             return None
-        _LOGGER.info(
+        _LOGGER.debug(
             "HOMEKIT_PULL: handing URL %s to HomeKit (waited %.0fms for bridge)",
             url,
             elapsed_ms,

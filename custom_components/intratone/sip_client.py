@@ -255,27 +255,39 @@ class IntratoneSipClient(asyncio.Protocol):
 
         SIP-over-TCP framing (RFC 3261 §18.3): each message is a start-line +
         headers + CRLF + optional body of Content-Length bytes. Multiple
-        messages may arrive in one TCP read.
+        messages may arrive in one TCP read. Returns None only when the buffer
+        is incomplete — a complete-but-unparseable message (e.g. an RFC 5626
+        CRLF keep-alive) is dropped and the next buffered message is tried, so
+        a valid message behind it is never stuck.
         """
-        header_end = self._rx_buf.find(b"\r\n\r\n")
-        if header_end == -1:
-            return None
-        header_bytes = bytes(self._rx_buf[: header_end + 4])
-        # Content-Length is mandatory in SIP/TCP per RFC 3261 §18.3, but defend
-        # against absent header (treat as 0) since some intermediaries strip it.
-        cl_match = _CONTENT_LENGTH_RE.search(header_bytes.decode(errors="replace"))
-        body_len = int(cl_match.group(1)) if cl_match else 0
-        total = header_end + 4 + body_len
-        if len(self._rx_buf) < total:
-            return None
-        raw = bytes(self._rx_buf[:total])
-        del self._rx_buf[:total]
-        try:
-            parsed = SipMessage.parse_sip(raw.decode("utf-8", errors="replace"))
-        except Exception:  # noqa: BLE001 — malformed input must not crash
-            _LOGGER.exception("Failed to parse SIP message")
-            return None
-        return raw, parsed
+        while True:
+            header_end = self._rx_buf.find(b"\r\n\r\n")
+            if header_end == -1:
+                return None
+            header_bytes = bytes(self._rx_buf[: header_end + 4])
+            # Content-Length is mandatory in SIP/TCP per RFC 3261 §18.3, but defend
+            # against absent header (treat as 0) since some intermediaries strip it.
+            cl_match = _CONTENT_LENGTH_RE.search(header_bytes.decode(errors="replace"))
+            body_len = int(cl_match.group(1)) if cl_match else 0
+            total = header_end + 4 + body_len
+            if len(self._rx_buf) < total:
+                return None
+            raw = bytes(self._rx_buf[:total])
+            del self._rx_buf[:total]
+            try:
+                parsed = SipMessage.parse_sip(raw.decode("utf-8", errors="replace"))
+            except Exception:  # noqa: BLE001 — malformed input must not crash
+                if raw.strip(b"\r\n"):
+                    # A real message we couldn't parse — surface it, this is
+                    # the only default-level trace when a call hangs on it.
+                    _LOGGER.warning(
+                        "Dropping unparseable SIP message: %r", raw, exc_info=True
+                    )
+                else:
+                    # RFC 5626 CRLF keep-alive — routine, not worth a warning.
+                    _LOGGER.debug("Dropping SIP CRLF keep-alive")
+                continue
+            return raw, parsed
 
     def _dispatch(self, msg: SipMessage, raw: bytes) -> None:
         call = self._call
@@ -299,6 +311,10 @@ class IntratoneSipClient(asyncio.Protocol):
             # Server-originated in-dialog MESSAGE — just 200 OK it so the
             # server doesn't retransmit. We never act on the body.
             self._handle_server_message(call, msg, raw)
+        elif msg.method.lower() == "ack":
+            # ACK to our 200 OK on the session-timer re-INVITE — completes
+            # the server's INVITE transaction, nothing to send back.
+            _LOGGER.debug("Call %s: in-dialog ACK", call.call_id)
         else:
             _LOGGER.warning(
                 "Call %s: unhandled in-dialog %s — ignoring",
@@ -514,6 +530,18 @@ class IntratoneSipClient(asyncio.Protocol):
                     self._send(
                         self._build_ack(call, msg, request_uri=request_uri)
                     )
+            return
+
+        # Non-2xx final to a non-INVITE request (MESSAGE for opendoor/
+        # MUTE_OFF/contrast): ACK is INVITE-transaction-only (RFC 3261
+        # §17.1.1.3) and a failed MESSAGE leaves the established dialog
+        # intact — log it and keep the call alive.
+        cseq_parts = msg.headers.get("cseq", "").split()
+        if len(cseq_parts) == 2 and cseq_parts[1].upper() != "INVITE":
+            _LOGGER.warning(
+                "Call %s: %s %s for in-dialog %s — ignoring",
+                call.call_id, code, msg.reason, cseq_parts[1],
+            )
             return
 
         # Non-2xx final on an in-dialog re-INVITE we sent ourselves: gateway

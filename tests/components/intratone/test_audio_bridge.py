@@ -22,6 +22,7 @@ from custom_components.intratone.audio_bridge import (
     _SAMPLES_PER_PACKET,
     _ULAW_SILENCE_BYTE,
     AudioBridge,
+    BridgeStoppedError,
     _RtpProtocol,
     _VideoRtcpProtocol,
     _VideoRtpProtocol,
@@ -419,6 +420,330 @@ async def test_stderr_is_drained_to_logger(
     assert any("Stream mapping" in m for m in drained)
     assert any("Output #0" in m for m in drained)
     await bridge.stop()
+
+
+# --- start()/stop() races ---------------------------------------------------
+
+
+async def test_stop_during_push_ready_wait_aborts_start_cleanly(
+    mock_subprocess, fake_process, fake_datagram_endpoint
+):
+    """stop() while start() is parked on the ffmpeg push-ready wait: the old
+    code nulled `_ffmpeg_push_ready` under the waiter and let start() resume
+    against torn-down state (creating a stats task after stop() returned).
+    start() must wake immediately and abort instead of reporting a stopped
+    bridge as consumable."""
+    emitted = False
+
+    async def readline():
+        nonlocal emitted
+        if not emitted:
+            emitted = True
+            return b"Stream mapping:\n"  # never the `Output #0, rtsp` marker
+        await asyncio.Event().wait()  # park forever (cancelled by stop)
+
+    fake_process.stderr.readline = readline
+    bridge = AudioBridge()
+    start_task = asyncio.create_task(
+        bridge.start(
+            rtp_socket=_fake_rtp_socket(16384),
+            remote_rtp_ip="178.32.84.135",
+            remote_rtp_port=20000,
+        )
+    )
+    # Let start() progress to the push-ready wait (RTP endpoint wrapped).
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if bridge._rtp_transport is not None:
+            break
+    assert not start_task.done()
+
+    await bridge.stop()
+
+    with pytest.raises(BridgeStoppedError):
+        await asyncio.wait_for(start_task, timeout=1)
+    assert bridge._stats_task is None
+    assert not bridge.is_running
+
+
+async def test_stop_between_endpoint_wraps_leaves_no_orphans(
+    mock_subprocess, fake_process
+):
+    """stop() while start() is suspended wrapping the video endpoint: the
+    resumed start() used to assign fresh video transports and spawn the PLI
+    task AFTER stop() had snapshotted-and-closed everything — leaking UDP
+    transports plus a PLI loop pinging the old gateway every 30 s forever."""
+    transports: list[_FakeTransport] = []
+    gate = asyncio.Event()
+    wrap_calls = 0
+
+    async def _create(protocol_factory, **_kwargs):
+        nonlocal wrap_calls
+        wrap_calls += 1
+        if wrap_calls == 2:  # video RTP wrap — stop() lands here
+            await gate.wait()
+        proto = protocol_factory()
+        transport = _FakeTransport()
+        transports.append(transport)
+        proto.connection_made(transport)
+        return transport, proto
+
+    loop = asyncio.get_event_loop()
+    bridge = AudioBridge()
+    with (
+        patch.object(loop, "create_datagram_endpoint", side_effect=_create),
+        _patch_video_port(),
+    ):
+        start_task = asyncio.create_task(
+            bridge.start(
+                rtp_socket=_fake_rtp_socket(16384),
+                remote_rtp_ip="178.32.84.135",
+                remote_rtp_port=20000,
+                video_socket=_fake_rtp_socket(16386),
+                remote_video_rtp_ip="178.32.84.135",
+                remote_video_rtp_port=52982,
+                video_rtcp_socket=_fake_rtp_socket(16387),
+            )
+        )
+        for _ in range(50):
+            await asyncio.sleep(0)
+            if wrap_calls == 2:
+                break
+        assert wrap_calls == 2
+
+        await bridge.stop()
+        gate.set()
+        with pytest.raises(BridgeStoppedError):
+            await asyncio.wait_for(start_task, timeout=1)
+
+    assert all(t.closed for t in transports)
+    assert bridge._pli_task is None
+    assert bridge._video_rtp_transport is None
+    assert bridge._video_rtcp_transport is None
+    assert not bridge.is_running
+
+
+async def test_stop_survives_sigterm_process_lookup_error(
+    mock_subprocess, fake_process, fake_datagram_endpoint
+):
+    """SIGTERM can race the child watcher's reap (ProcessLookupError). stop()
+    must swallow it like _discard_prewarm does — otherwise _teardown_bridge
+    aborts before on_call_ended fires and the coordinator/camera stay stuck
+    'active'."""
+    bridge = AudioBridge()
+    await bridge.start(
+        rtp_socket=_fake_rtp_socket(16384),
+        remote_rtp_ip="178.32.84.135",
+        remote_rtp_port=20000,
+    )
+    fake_process.send_signal = MagicMock(side_effect=ProcessLookupError)
+
+    await bridge.stop()  # must not raise
+
+    assert not bridge.is_running
+
+
+async def test_stop_kill_fallback_survives_process_lookup_error(
+    mock_subprocess, fake_process, fake_datagram_endpoint
+):
+    """Same reap race on the kill() fallback after the SIGTERM grace expires."""
+    bridge = AudioBridge()
+    await bridge.start(
+        rtp_socket=_fake_rtp_socket(16384),
+        remote_rtp_ip="178.32.84.135",
+        remote_rtp_port=20000,
+    )
+    hang = asyncio.get_running_loop().create_future()
+    call_count = 0
+
+    async def wait_impl():
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return await hang  # SIGTERM grace: process never exits
+        return 0
+
+    fake_process.wait = wait_impl
+    fake_process.kill = MagicMock(side_effect=ProcessLookupError)
+    with patch(
+        "custom_components.intratone.audio_bridge._FFMPEG_TERMINATE_TIMEOUT", 0.01
+    ):
+        await bridge.stop()  # must not raise
+
+    fake_process.kill.assert_called_once()
+
+
+async def test_video_rtp_wrap_failure_is_fatal(mock_subprocess, fake_process):
+    """A failed video RTP wrap cannot degrade to audio-only: ffmpeg was
+    spawned with `-f sdp -i <path>` + `-map 1:v`, so without VP8 packets the
+    RTSP muxer never initializes and NO media (audio included) reaches
+    go2rtc. start() must clean up and raise so CallManager hangs up instead
+    of publishing a dead stream after the 15 s push-ready timeout."""
+    wrap_calls = 0
+
+    async def _create(protocol_factory, **_kwargs):
+        nonlocal wrap_calls
+        wrap_calls += 1
+        if wrap_calls == 2:  # video RTP wrap
+            raise OSError("Address already in use")
+        proto = protocol_factory()
+        transport = _FakeTransport()
+        proto.connection_made(transport)
+        return transport, proto
+
+    loop = asyncio.get_event_loop()
+    video_sock = _fake_rtp_socket(16386)
+    rtcp_sock = _fake_rtp_socket(16387)
+    bridge = AudioBridge()
+    with (
+        patch.object(loop, "create_datagram_endpoint", side_effect=_create),
+        _patch_video_port(),
+    ):
+        with pytest.raises(OSError):
+            await bridge.start(
+                rtp_socket=_fake_rtp_socket(16384),
+                remote_rtp_ip="178.32.84.135",
+                remote_rtp_port=20000,
+                video_socket=video_sock,
+                remote_video_rtp_ip="178.32.84.135",
+                remote_video_rtp_port=52982,
+                video_rtcp_socket=rtcp_sock,
+            )
+
+    fake_process.kill.assert_called_once()
+    video_sock.close.assert_called_once()
+    rtcp_sock.close.assert_called_once()
+    assert bridge._video_sdp_path is None  # temp SDP cleaned up
+    assert not bridge.is_running
+
+
+async def test_cancel_start_during_prewarm_consume_reattaches_prewarm():
+    """CallManager cancels an in-flight start() when the call is superseded.
+    If the cancel lands while start() awaits the still-spawning prewarm task,
+    `_consume_prewarm` has already popped `_prewarm_task` to None — the
+    prewarm must be re-attached on the way out, or its live ffmpeg keeps
+    running unreferenced and the follow-up stop() finds nothing to reap."""
+    proc = _make_fake_process()
+    spawn_gate = asyncio.Event()
+
+    async def slow_spawn(*_args, **_kwargs):
+        await spawn_gate.wait()
+        return proc
+
+    with (
+        patch(
+            "custom_components.intratone.audio_bridge.asyncio.create_subprocess_exec",
+            new=AsyncMock(side_effect=slow_spawn),
+        ),
+        _patch_video_port(),
+    ):
+        bridge = AudioBridge()
+        bridge.prewarm(video=True)
+        await asyncio.sleep(0)  # prewarm task now parked inside _spawn_ffmpeg
+
+        start_task = asyncio.create_task(
+            bridge.start(
+                rtp_socket=_fake_rtp_socket(16384),
+                remote_rtp_ip="178.32.84.135",
+                remote_rtp_port=20000,
+            )
+        )
+        await asyncio.sleep(0)  # start() now awaiting _consume_prewarm
+
+        start_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await start_task
+
+        # Let the (still running) prewarm spawn finish...
+        spawn_gate.set()
+        await asyncio.sleep(0)
+        # ...it must still be tracked so stop() can reap its ffmpeg.
+        assert bridge._prewarm_task is not None
+        await bridge.stop()
+    proc.kill.assert_called_once()
+
+
+async def test_cancel_start_during_push_ready_wait_closes_sockets(
+    mock_subprocess, fake_process, fake_datagram_endpoint
+):
+    """A raw cancel of start() (call superseded / entry unload) is not a
+    stop() race, so the generation checkpoints never fire — start() must
+    still close the sockets that live only in its locals, reap ffmpeg, and
+    leave no stats/PLI task behind before letting the cancel propagate."""
+    emitted = False
+
+    async def readline():
+        nonlocal emitted
+        if not emitted:
+            emitted = True
+            return b"Stream mapping:\n"  # never the `Output #0, rtsp` marker
+        await asyncio.Event().wait()  # park forever (cancelled by the unwind)
+
+    fake_process.stderr.readline = readline
+    rtp_sock = _fake_rtp_socket(16384)
+    bridge = AudioBridge()
+    start_task = asyncio.create_task(
+        bridge.start(
+            rtp_socket=rtp_sock,
+            remote_rtp_ip="178.32.84.135",
+            remote_rtp_port=20000,
+        )
+    )
+    # Let start() progress to the push-ready wait (RTP endpoint wrapped).
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if bridge._rtp_transport is not None:
+            break
+    assert not start_task.done()
+
+    start_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start_task
+
+    rtp_sock.close.assert_called()
+    fake_process.kill.assert_called_once()
+    assert bridge._stats_task is None
+    assert bridge._pli_task is None
+    assert bridge._process is None
+    assert not bridge.is_running
+
+
+async def test_cancelled_stop_propagates_cancellation(
+    mock_subprocess, fake_process, fake_datagram_endpoint
+):
+    """A stop() that is itself cancelled while awaiting the stderr drainer
+    must not report normal completion — CancelledError has to propagate so
+    the caller knows teardown didn't finish."""
+    release = asyncio.Event()
+    drainer_cancelled = asyncio.Event()
+
+    async def readline():
+        try:
+            await asyncio.Event().wait()  # no output → push-ready times out
+        except asyncio.CancelledError:
+            drainer_cancelled.set()
+            await release.wait()  # drainer slow to unwind
+            raise
+
+    fake_process.stderr.readline = readline
+    bridge = AudioBridge()
+    with patch(
+        "custom_components.intratone.audio_bridge._FFMPEG_PUSH_READY_TIMEOUT_S",
+        0.01,
+    ):
+        await bridge.start(
+            rtp_socket=_fake_rtp_socket(16384),
+            remote_rtp_ip="178.32.84.135",
+            remote_rtp_port=20000,
+        )
+
+    stop_task = asyncio.create_task(bridge.stop())
+    # stop() cancels the drainer then awaits it — cancel stop() at that point.
+    await asyncio.wait_for(drainer_cancelled.wait(), timeout=1)
+    stop_task.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await stop_task
 
 
 # --- AudioBridge.prewarm ---------------------------------------------------
@@ -876,3 +1201,52 @@ async def test_pli_loop_periodic_resets_gate_and_reopens_on_keyframe():
         video.datagram_received(_VP8_INTERFRAME_PKT, ("x", 1))
         assert video.rtp_packets_forwarded == forwarded_before + 2
         task.cancel()
+
+
+# --- diagnostics log levels -------------------------------------------------
+
+
+async def test_audio_rx_summary_detail_lines_are_debug(caplog):
+    """README promises diagnostics at debug level. Keep ONE `AUDIO_RX_SUMMARY`
+    aggregate line at INFO (troubleshooting docs grep for the marker) and
+    demote the per-source / per-PT / per-SSRC detail loops to DEBUG."""
+    import logging
+
+    proto = _RtpProtocol(
+        remote_addr=("178.32.84.135", 12345),
+        on_ulaw=lambda _: None,
+        send_keepalives=False,
+    )
+    proto.connection_made(_FakeTransport())
+    payload = _ULAW_SILENCE_BYTE * _SAMPLES_PER_PACKET
+    pkt = _build_rtp_packet(seq=1, timestamp=160, ssrc=42, payload=payload)
+    proto.datagram_received(pkt, ("178.32.84.135", 12345))
+
+    with caplog.at_level(
+        logging.DEBUG, logger="custom_components.intratone.audio_bridge"
+    ):
+        proto.dump_summary()
+    proto.close()
+
+    summary = [r for r in caplog.records if "AUDIO_RX_SUMMARY" in r.message]
+    assert len([r for r in summary if r.levelno == logging.INFO]) == 1
+    assert [r for r in summary if r.levelno == logging.DEBUG]
+
+
+async def test_video_rx_summary_detail_lines_are_debug(caplog):
+    """Same contract for the video side: one `VIDEO_RX_SUMMARY` marker line
+    at INFO, per-source / per-PT detail at DEBUG."""
+    import logging
+
+    proto = _VideoRtpProtocol(ffmpeg_target=("127.0.0.1", 12345))
+    proto.connection_made(_FakeTransport())
+    proto.datagram_received(_VP8_KEYFRAME_PKT, ("178.32.84.135", 52982))
+
+    with caplog.at_level(
+        logging.DEBUG, logger="custom_components.intratone.audio_bridge"
+    ):
+        proto.close()
+
+    summary = [r for r in caplog.records if "VIDEO_RX_SUMMARY" in r.message]
+    assert len([r for r in summary if r.levelno == logging.INFO]) == 1
+    assert [r for r in summary if r.levelno == logging.DEBUG]

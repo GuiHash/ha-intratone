@@ -19,13 +19,15 @@ from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .config_flow import (
-    _MOBIPASS_ERRORS,
+from .config_flow import MOBIPASS_OTP_SCHEMA, USER_SCHEMA
+from .const import (
+    CONF_DEVICE_ID,
+    CONF_INVITE_CODE,
+    DOMAIN,
+    FCM_TOKEN_ISSUE_PREFIX,
     INVITE_RE,
-    MOBIPASS_OTP_SCHEMA,
-    USER_SCHEMA,
+    MOBIPASS_ERRORS,
 )
-from .const import CONF_DEVICE_ID, CONF_INVITE_CODE, DOMAIN, FCM_TOKEN_ISSUE_PREFIX
 from .fcm_listener import fcm_register_standalone
 from .rest_api import (
     IntratoneApiError,
@@ -72,7 +74,7 @@ class MobipassTransferRepairFlow(RepairsFlow):
                 await api.mobipass_activate()
             except IntratoneMobipassError as err:
                 _LOGGER.warning("mobipass activate refused: %s", err)
-                errors["base"] = _MOBIPASS_ERRORS.get(err.code, "mobipass_failed")
+                errors["base"] = MOBIPASS_ERRORS.get(err.code, "mobipass_failed")
             except (IntratoneAuthError, IntratoneApiError) as err:
                 _LOGGER.warning("mobipass activate failed: %s", err)
                 errors["base"] = "mobipass_failed"
@@ -100,7 +102,7 @@ class MobipassTransferRepairFlow(RepairsFlow):
                 await api.mobipass_verify(user_input["code"].strip())
             except IntratoneMobipassError as err:
                 _LOGGER.warning("mobipass verify refused: %s", err)
-                errors["base"] = _MOBIPASS_ERRORS.get(err.code, "mobipass_failed")
+                errors["base"] = MOBIPASS_ERRORS.get(err.code, "mobipass_failed")
             except (IntratoneAuthError, IntratoneApiError) as err:
                 _LOGGER.warning("mobipass verify failed: %s", err)
                 errors["base"] = "mobipass_failed"

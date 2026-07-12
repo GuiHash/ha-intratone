@@ -13,6 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
+from urllib.parse import quote
 
 import aiohttp
 from homeassistant.config_entries import ConfigEntry
@@ -26,9 +27,11 @@ from .const import (
     APP_USER_AGENT,
     APP_VERSION,
     CONF_DEVICE_ID,
+    CONF_INDICATIF,
     CONF_NUMERIC_ID,
     CONF_TEL,
     API_OPENABLE_MODES,
+    DEFAULT_INDICATIF,
     DEVICE_BUNDLE_ID,
     DEVICE_DESCRIPTION,
     DEVICE_MANUFACTURER,
@@ -67,6 +70,17 @@ class IntratoneApiError(Exception):
         super().__init__(message)
         self.status = status
         self.body = body
+
+
+class IntratoneConnectionError(IntratoneApiError):
+    """Transport-level failure (connection error, timeout) — the server was
+    never reached or never answered.
+
+    Kept distinct from `IntratoneApiError` so callers don't misread an
+    outage as a server decision: retry-after-JWT-refresh paths skip the
+    pointless (rate-limited, issue #39) auth round-trip, and the periodic
+    refresh doesn't escalate a WiFi blip into a reauth flow.
+    """
 
 
 class IntratoneMobipassError(IntratoneApiError):
@@ -166,6 +180,71 @@ def _mobipass_error(body: dict[str, Any], status: int | None) -> IntratoneMobipa
     )
 
 
+def _error_flag_ok(value: Any) -> bool:
+    """True when an envelope `error` flag equals 0 (sent as int OR string, §4.2).
+
+    `value in (0, "0")` also accepts a JSON `false` (bool == 0 in Python),
+    preserving the pre-helper `== 0` behavior.
+    """
+    return value in (0, "0")
+
+
+def _tel_candidates(tel: str, indicatif: str) -> list[str]:
+    """Phone-number forms to try against auth/device.
+
+    Some accounts are keyed on the bare national number, others on the
+    indicatif-prefixed form — try stored form first, then the variants.
+    """
+    candidates = [tel]
+    stripped = tel.lstrip("0")
+    if stripped and stripped != tel:
+        candidates.append(f"{indicatif}{stripped}")
+        candidates.append(stripped)
+    return candidates
+
+
+async def _parse_json_response(
+    resp: aiohttp.ClientResponse, path: str
+) -> dict[str, Any]:
+    """Parse and validate a JSON envelope response.
+
+    Raises `IntratoneApiError` on a non-JSON body, a non-dict shape, a
+    `state: error` envelope, or an HTTP error status without one.
+    """
+    status = resp.status
+    try:
+        body = await resp.json(content_type=None)
+    except ValueError as err:
+        # With `content_type=None` aiohttp skips its content-type check, so a
+        # non-JSON body (e.g. an HTML error page from a proxy) surfaces as
+        # json.JSONDecodeError, a ValueError. Don't embed the raw body in the
+        # message — it may carry credentials.
+        raise IntratoneApiError(
+            f"Non-JSON response from {path} (HTTP {status})",
+            status=status,
+        ) from err
+
+    if not isinstance(body, dict):
+        raise IntratoneApiError(
+            f"Unexpected response shape from {path} (HTTP {status}): {body!r}",
+            status=status,
+            body=body,
+        )
+
+    if body.get("state") == "error" or status >= 400:
+        msg = body.get("message") or body.get("code") or "unknown"
+        # Full body + status at debug so a beta-tester's logs show
+        # exactly what the server returned (rate-limit, gate offline…).
+        _LOGGER.debug("API error from %s (HTTP %s): %s", path, status, body)
+        raise IntratoneApiError(
+            f"API error from {path} (HTTP {status}): {msg}",
+            status=status,
+            body=body,
+        )
+
+    return body
+
+
 class IntratoneAPI:
     """Async client for the Intratone REST API."""
 
@@ -181,6 +260,8 @@ class IntratoneAPI:
         self._entry = entry
         self._store = store
         self._refresh_unsub = None
+        # In-flight JWT refresh, shared by concurrent callers (see refresh_jwt).
+        self._refresh_task: asyncio.Task | None = None
         # Latest CléMobil/Mobipass flags, refreshed on every `authenticate_device`
         # (i.e. on setup's first refresh and every periodic JWT refresh). `None`
         # until the first successful auth. See `MobipassState.needs_transfer`.
@@ -217,39 +298,14 @@ class IntratoneAPI:
         if jwt:
             headers["Authorization"] = f"Bearer {jwt}"
 
-        async with self._session.post(
-            API_BASE + path, data=form, headers=headers, timeout=REQUEST_TIMEOUT
-        ) as resp:
-            status = resp.status
-            try:
-                body = await resp.json(content_type=None)
-            except aiohttp.ContentTypeError as err:
-                raise IntratoneApiError(
-                    f"Non-JSON response from {path} (HTTP {status}): {err}",
-                    status=status,
-                ) from err
-
-            if not isinstance(body, dict):
-                raise IntratoneApiError(
-                    f"Unexpected response shape from {path} (HTTP {status}): {body!r}",
-                    status=status,
-                    body=body,
-                )
-
-            if body.get("state") == "error":
-                msg = body.get("message") or body.get("code") or "unknown"
-                # Full body + status at debug so a beta-tester's logs show
-                # exactly what the server returned (rate-limit, gate offline…).
-                _LOGGER.debug(
-                    "API error from %s (HTTP %s): %s", path, status, body
-                )
-                raise IntratoneApiError(
-                    f"API error from {path} (HTTP {status}): {msg}",
-                    status=status,
-                    body=body,
-                )
-
-            return body
+        try:
+            async with self._session.post(
+                API_BASE + path, data=form, headers=headers, timeout=REQUEST_TIMEOUT
+            ) as resp:
+                return await _parse_json_response(resp, path)
+        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+            # Wrap transport errors so callers' typed retry logic triggers.
+            raise IntratoneConnectionError(f"Network error calling {path}: {err}") from err
 
     async def authenticate_device(self) -> dict[str, Any]:
         """POST /api/auth/device — also serves as JWT refresh.
@@ -260,11 +316,8 @@ class IntratoneAPI:
         if not self.tel or not self.device_id:
             raise IntratoneAuthError("Cannot authenticate without tel and device_id")
 
-        candidates = [self.tel]
-        stripped = self.tel.lstrip("0")
-        if stripped and stripped != self.tel:
-            candidates.append(f"33{stripped}")
-            candidates.append(stripped)
+        indicatif = self._entry.data.get(CONF_INDICATIF) or DEFAULT_INDICATIF
+        candidates = _tel_candidates(self.tel, indicatif)
 
         last_error: Exception | None = None
         for tel in candidates:
@@ -279,6 +332,11 @@ class IntratoneAPI:
                         "appversion": APP_VERSION,
                     },
                 )
+            except IntratoneConnectionError:
+                # Not candidate-specific — the server is unreachable. Propagate
+                # as-is so the refresh tick treats it as transient instead of
+                # wrapping it into a "credentials revoked" IntratoneAuthError.
+                raise
             except IntratoneApiError as err:
                 last_error = err
                 continue
@@ -298,9 +356,23 @@ class IntratoneAPI:
                 )
                 return data
 
-        raise IntratoneAuthError(
-            f"Authentication failed for tel={self.tel}: {last_error}"
+        # A 5xx or non-JSON failure (body is None) is a server outage, not a
+        # credential verdict — re-raise it as IntratoneApiError so the refresh
+        # tick keeps its warn-and-retry path instead of starting a reauth.
+        if isinstance(last_error, IntratoneApiError) and (
+            last_error.status is None
+            or last_error.status >= 500
+            or last_error.body is None
+        ):
+            raise last_error
+
+        # Don't put the phone number in the message — it ends up in WARNING logs.
+        detail = (
+            str(last_error)
+            if last_error is not None
+            else "no JWT in any auth/device response"
         )
+        raise IntratoneAuthError(f"Authentication failed: {detail}")
 
     async def answer_call(self, call_id: str) -> bool:
         """POST /api/calls/{call_id}/answer — opens the door."""
@@ -309,22 +381,26 @@ class IntratoneAPI:
         if not self.numeric_id:
             raise IntratoneAuthError("No numeric_id available")
 
+        # call_id comes from an FCM push / service call — quote it.
+        path = f"api/calls/{quote(call_id, safe='')}/answer"
         try:
             body = await self._post_form(
-                f"api/calls/{call_id}/answer",
+                path,
                 {"smartphone_id": self.numeric_id},
                 jwt=self.jwt,
             )
+        except IntratoneConnectionError:
+            raise  # transport failure — a JWT refresh can't help
         except IntratoneApiError:
             # Try a JWT refresh once on failure (likely 401).
             await self.refresh_jwt()
             body = await self._post_form(
-                f"api/calls/{call_id}/answer",
+                path,
                 {"smartphone_id": self.numeric_id},
                 jwt=self.jwt,
             )
 
-        return body.get("error") == 0
+        return _error_flag_ok(body.get("error"))
 
     async def _get_json(self, path: str) -> dict[str, Any]:
         """Authenticated GET returning the parsed JSON body.
@@ -341,37 +417,20 @@ class IntratoneAPI:
                 "Authorization": f"Bearer {self.jwt}",
                 "User-Agent": APP_USER_AGENT,
             }
-            async with self._session.get(
-                API_BASE + path, headers=headers, timeout=REQUEST_TIMEOUT
-            ) as resp:
-                status = resp.status
-                try:
-                    body = await resp.json(content_type=None)
-                except aiohttp.ContentTypeError as err:
-                    raise IntratoneApiError(
-                        f"Non-JSON response from {path} (HTTP {status}): {err}",
-                        status=status,
-                    ) from err
-            if not isinstance(body, dict):
-                raise IntratoneApiError(
-                    f"Unexpected response shape from {path} (HTTP {status}): {body!r}",
-                    status=status,
-                    body=body,
-                )
-            if body.get("state") == "error":
-                msg = body.get("message") or body.get("code") or "unknown"
-                _LOGGER.debug(
-                    "API error from %s (HTTP %s): %s", path, status, body
-                )
-                raise IntratoneApiError(
-                    f"API error from {path} (HTTP {status}): {msg}",
-                    status=status,
-                    body=body,
-                )
-            return body
+            try:
+                async with self._session.get(
+                    API_BASE + path, headers=headers, timeout=REQUEST_TIMEOUT
+                ) as resp:
+                    return await _parse_json_response(resp, path)
+            except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+                raise IntratoneConnectionError(
+                    f"Network error calling {path}: {err}"
+                ) from err
 
         try:
             return await _do()
+        except IntratoneConnectionError:
+            raise  # transport failure — a JWT refresh can't help
         except IntratoneApiError:
             await self.refresh_jwt()
             return await _do()
@@ -412,6 +471,8 @@ class IntratoneAPI:
         )
         try:
             body = await self._post_form(PATH_ACCESS_OPEN, form, jwt=self.jwt)
+        except IntratoneConnectionError:
+            raise  # transport failure — a JWT refresh can't help
         except IntratoneApiError as first_err:
             # A first failure is usually just an expired JWT (401): refresh once
             # and retry. If the retry also fails, the server is genuinely
@@ -436,7 +497,7 @@ class IntratoneAPI:
                 )
                 raise
 
-        ok = body.get("error") == 0
+        ok = _error_flag_ok(body.get("error"))
         if ok:
             _LOGGER.debug("Access id=%s opened", access.access_id)
         else:
@@ -496,7 +557,8 @@ class IntratoneAPI:
             # a `state:error` envelope, so without this the "it worked" path
             # (SMS sent / transfer completed) is invisible in a tester's log.
             _LOGGER.debug("Mobipass %s response: %s", path, body)
-            if body.get("error") not in (0, None):
+            err_flag = body.get("error")
+            if err_flag is not None and not _error_flag_ok(err_flag):
                 if str(body.get("code") or "") == MOBIPASS_CODE_SMS_SENT:
                     _LOGGER.debug("Mobipass %s: transfer code already sent", path)
                     return
@@ -504,7 +566,7 @@ class IntratoneAPI:
 
         try:
             await _attempt()
-        except IntratoneMobipassError:
+        except (IntratoneMobipassError, IntratoneConnectionError):
             raise
         except IntratoneApiError as first_err:
             _LOGGER.debug(
@@ -516,7 +578,19 @@ class IntratoneAPI:
             await _attempt()
 
     async def refresh_jwt(self) -> None:
-        """Refresh the JWT and persist it via the credentials Store."""
+        """Refresh the JWT and persist it via the credentials Store.
+
+        Concurrent callers (e.g. several locks hitting a 401 at once) share a
+        single in-flight refresh instead of each re-running `auth/device` —
+        the server rate-limits parallel auth storms (issue #39).
+        """
+        if self._refresh_task is None or self._refresh_task.done():
+            self._refresh_task = asyncio.get_running_loop().create_task(
+                self._refresh_jwt_once()
+            )
+        await asyncio.shield(self._refresh_task)
+
+    async def _refresh_jwt_once(self) -> None:
         data = await self.authenticate_device()
         new_jwt = data.get("jwt")
         if not new_jwt:
@@ -545,7 +619,18 @@ class IntratoneAPI:
         async def _tick(_now) -> None:
             try:
                 await self.refresh_jwt()
+            except IntratoneAuthError as err:
+                # Definitive: the server rejected every candidate — the
+                # credentials are revoked. Ask the user to re-pair instead of
+                # silently retrying forever (the FCM `unregister` push, the
+                # only other reauth trigger, may be dead too).
+                _LOGGER.warning(
+                    "JWT refresh rejected by server, starting reauth: %s", err
+                )
+                self._entry.async_start_reauth(self._hass)
+                return
             except Exception as err:  # noqa: BLE001
+                # Transient (network, HTTP 5xx…): warn and retry next tick.
                 _LOGGER.warning("JWT refresh failed: %s", err)
                 return
             if on_refresh is not None:
@@ -559,10 +644,15 @@ class IntratoneAPI:
         )
 
     def async_stop(self) -> None:
-        """Cancel scheduled refresh."""
+        """Cancel scheduled refresh and any in-flight JWT refresh."""
         if self._refresh_unsub is not None:
             self._refresh_unsub()
             self._refresh_unsub = None
+        if self._refresh_task is not None and not self._refresh_task.done():
+            # An orphaned refresh would otherwise finish against the
+            # torn-down entry (Store write / async_update_entry mid-unload).
+            self._refresh_task.cancel()
+        self._refresh_task = None
 
 
 def _parse_accesses(body: dict[str, Any]) -> list[IntratoneAccess]:
@@ -679,16 +769,21 @@ async def register_with_invite(
         "Accept": "application/json",
         "User-Agent": APP_USER_AGENT,
     }
-    async with session.post(
-        API_BASE + "api/auth/registercodes",
-        data=form,
-        headers=headers,
-        timeout=REQUEST_TIMEOUT,
-    ) as resp:
-        try:
-            body = await resp.json(content_type=None)
-        except aiohttp.ContentTypeError as err:
-            raise IntratoneApiError(f"Non-JSON response: {err}") from err
+    try:
+        async with session.post(
+            API_BASE + "api/auth/registercodes",
+            data=form,
+            headers=headers,
+            timeout=REQUEST_TIMEOUT,
+        ) as resp:
+            try:
+                body = await resp.json(content_type=None)
+            except ValueError as err:
+                raise IntratoneApiError(f"Non-JSON response: {err}") from err
+    except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+        raise IntratoneConnectionError(
+            f"Network error calling registercodes: {err}"
+        ) from err
 
     if not isinstance(body, dict) or body.get("state") == "error":
         msg = body.get("message") or body.get("code") if isinstance(body, dict) else body
@@ -696,7 +791,11 @@ async def register_with_invite(
 
     data = body.get("data") or {}
     if not data.get("id") or not data.get("tel"):
-        raise IntratoneAuthError(f"registercodes incomplete response: {body}")
+        # Redact before this lands in a WARNING log — a partial body can
+        # still carry the tel / device credentials.
+        raise IntratoneAuthError(
+            f"registercodes incomplete response: {_redact_auth_data(data)}"
+        )
     return data
 
 
@@ -772,16 +871,19 @@ async def register_phone_for_sms(
         "Accept": "application/json",
         "User-Agent": APP_USER_AGENT,
     }
-    async with session.post(
-        API_BASE + "api/auth/register",
-        data=form,
-        headers=headers,
-        timeout=REQUEST_TIMEOUT,
-    ) as resp:
-        try:
-            body = await resp.json(content_type=None)
-        except aiohttp.ContentTypeError as err:
-            raise IntratoneApiError(f"Non-JSON response: {err}") from err
+    try:
+        async with session.post(
+            API_BASE + "api/auth/register",
+            data=form,
+            headers=headers,
+            timeout=REQUEST_TIMEOUT,
+        ) as resp:
+            try:
+                body = await resp.json(content_type=None)
+            except ValueError as err:
+                raise IntratoneApiError(f"Non-JSON response: {err}") from err
+    except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+        raise IntratoneConnectionError(f"Network error calling register: {err}") from err
 
     if not isinstance(body, dict) or body.get("state") == "error":
         msg = (
@@ -819,16 +921,19 @@ async def validate_sms_code(
         "Accept": "application/json",
         "User-Agent": APP_USER_AGENT,
     }
-    async with session.post(
-        API_BASE + "api/auth/validate",
-        data=form,
-        headers=headers,
-        timeout=REQUEST_TIMEOUT,
-    ) as resp:
-        try:
-            body = await resp.json(content_type=None)
-        except aiohttp.ContentTypeError as err:
-            raise IntratoneApiError(f"Non-JSON response: {err}") from err
+    try:
+        async with session.post(
+            API_BASE + "api/auth/validate",
+            data=form,
+            headers=headers,
+            timeout=REQUEST_TIMEOUT,
+        ) as resp:
+            try:
+                body = await resp.json(content_type=None)
+            except ValueError as err:
+                raise IntratoneApiError(f"Non-JSON response: {err}") from err
+    except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+        raise IntratoneConnectionError(f"Network error calling validate: {err}") from err
 
     if not isinstance(body, dict) or body.get("state") == "error":
         msg = (
@@ -844,13 +949,10 @@ async def authenticate_for_invite(
     *,
     tel: str,
     device_id: str,
+    indicatif: str = DEFAULT_INDICATIF,
 ) -> dict[str, Any]:
     """One-shot auth used by config_flow (no entry yet)."""
-    candidates = [tel]
-    stripped = tel.lstrip("0")
-    if stripped and stripped != tel:
-        candidates.append(f"33{stripped}")
-        candidates.append(stripped)
+    candidates = _tel_candidates(tel, indicatif)
 
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -858,27 +960,38 @@ async def authenticate_for_invite(
         "User-Agent": APP_USER_AGENT,
     }
     last: dict[str, Any] = {}
+    last_error: Exception | None = None
     for candidate in candidates:
-        async with session.post(
-            API_BASE + "api/auth/device",
-            data={
-                "app_id": APP_ID,
-                "app_token": APP_TOKEN,
-                "tel": candidate,
-                "device_id": device_id,
-                "appversion": APP_VERSION,
-            },
-            headers=headers,
-            timeout=REQUEST_TIMEOUT,
-        ) as resp:
-            try:
+        try:
+            async with session.post(
+                API_BASE + "api/auth/device",
+                data={
+                    "app_id": APP_ID,
+                    "app_token": APP_TOKEN,
+                    "tel": candidate,
+                    "device_id": device_id,
+                    "appversion": APP_VERSION,
+                },
+                headers=headers,
+                timeout=REQUEST_TIMEOUT,
+            ) as resp:
                 last = await resp.json(content_type=None)
-            except aiohttp.ContentTypeError:
-                continue
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
+            # Transport failure or non-JSON body — try the next candidate.
+            last_error = err
+            continue
 
         data = (last.get("data") or {}) if isinstance(last, dict) else {}
         if data.get("jwt"):
             return data
         await asyncio.sleep(0)
 
-    raise IntratoneAuthError(f"auth/device returned no JWT: {last}")
+    if not last and last_error is not None:
+        raise IntratoneApiError(f"auth/device failed: {last_error}") from last_error
+
+    # Mask the `data` block before it lands in a WARNING log: an
+    # ok-without-jwt body still carries the tel and device_id.
+    redacted = dict(last) if isinstance(last, dict) else {"body": last}
+    if isinstance(redacted.get("data"), dict):
+        redacted["data"] = _redact_auth_data(redacted["data"])
+    raise IntratoneAuthError(f"auth/device returned no JWT: {redacted}")

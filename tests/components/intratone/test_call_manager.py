@@ -342,7 +342,7 @@ async def test_call_terminated_fires_ended_after_grace(
 async def test_hang_up_stops_bridge(manager, fake_bridge):
     from custom_components.intratone.sip_client import CallState
 
-    call_id = await manager.start_call(TARGET_URI, SERVER_IP, SIP_USER, SIP_PASS)
+    await manager.start_call(TARGET_URI, SERVER_IP, SIP_USER, SIP_PASS)
     sip_client = manager._sip_client
 
     # Promote the call to CONFIRMED so hang_up actually sends BYE.
@@ -408,12 +408,109 @@ async def test_abort_active_call_is_noop_when_no_active_call(
     assert ended_calls == []
 
 
+# --- in-flight _spawn_bridge races -----------------------------------------
+
+
+def _slow_bridge_start(fake_bridge):
+    """Make fake_bridge.start controllable: `started` fires once the spawn
+    task is inside bridge.start() (mid-ffmpeg-spawn in production, which
+    takes 100-400 ms); `release` lets it run to completion."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _start(**_kwargs):
+        started.set()
+        await release.wait()
+        return "rtsp://127.0.0.1:8556/intratone"
+
+    fake_bridge.start = AsyncMock(side_effect=_start)
+    return started, release
+
+
+def _establish(manager, call_id) -> None:
+    manager._sip_client._on_call_established(
+        CallEstablished(
+            call_id=call_id,
+            remote_rtp_ip="178.32.84.99",
+            remote_rtp_port=20002,
+            local_rtp_port=16400,
+        )
+    )
+
+
+async def test_async_stop_cancels_inflight_spawn_bridge(
+    manager, fake_bridge, active_calls
+):
+    """Reload mid-establishment: the 200 OK schedules _spawn_bridge; if
+    async_stop() doesn't cancel it, the pending task resumes AFTER unload,
+    spawns ffmpeg with nothing left to stop it, and calls back into a dead
+    coordinator."""
+    call_id = await manager.start_call(TARGET_URI, SERVER_IP, SIP_USER, SIP_PASS)
+    started, release = _slow_bridge_start(fake_bridge)
+    _establish(manager, call_id)
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    await manager.async_stop()
+
+    release.set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    # The spawn task must have been cancelled before it could mark the call
+    # active against a torn-down manager.
+    assert active_calls == []
+
+
+async def test_abort_active_call_cancels_inflight_spawn_bridge(
+    manager, fake_bridge, active_calls, ended_calls
+):
+    """New ring while call A's bridge is still starting: abort_active_call
+    runs while _spawn_bridge is inside bridge.start() (bridge not yet
+    is_running, so bridge.stop() alone is a no-op for it) — the in-flight
+    task must be cancelled, or A's start() would complete against A's dead
+    RTP endpoint and call B would then be served that stale bridge."""
+    call_id = await manager.start_call(TARGET_URI, SERVER_IP, SIP_USER, SIP_PASS)
+    started, release = _slow_bridge_start(fake_bridge)
+    _establish(manager, call_id)
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    await manager.abort_active_call()
+
+    release.set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert ended_calls == [call_id]
+    assert active_calls == []
+
+
+async def test_spawn_bridge_discards_bridge_when_call_superseded_during_start(
+    manager, fake_bridge, active_calls
+):
+    """bridge.start() has several awaits (ffmpeg spawn, endpoint wraps): if
+    the active call changed meanwhile, the just-started bridge belongs to the
+    OLD call's RTP endpoint — publishing it would give a clean-looking call
+    with zero audio. _spawn_bridge must re-check the active call after
+    start() returns, stop the stale bridge, and NOT fire on_call_active."""
+    call_id = await manager.start_call(TARGET_URI, SERVER_IP, SIP_USER, SIP_PASS)
+    started, release = _slow_bridge_start(fake_bridge)
+    _establish(manager, call_id)
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    # A fresh ring superseded this call while ffmpeg was starting.
+    manager._active_call_id = "new-call-id"
+
+    release.set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert active_calls == []
+    fake_bridge.stop.assert_awaited()
+
+
 async def test_send_backlight_delegates_to_sip_client(manager):
     """During an active call, send_backlight forwards to the SIP client
     which serializes the in-dialog MESSAGE body=`contrast`."""
     from custom_components.intratone.sip_client import CallState
 
-    call_id = await manager.start_call(TARGET_URI, SERVER_IP, SIP_USER, SIP_PASS)
+    await manager.start_call(TARGET_URI, SERVER_IP, SIP_USER, SIP_PASS)
     sip_client = manager._sip_client
     sip_client._call.state = CallState.CONFIRMED  # type: ignore[union-attr]
     sip_client._call.remote_to_header = f"<{TARGET_URI}>;tag=srv"  # type: ignore[union-attr]

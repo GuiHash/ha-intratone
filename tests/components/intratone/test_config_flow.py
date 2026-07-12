@@ -9,8 +9,10 @@ from aioresponses import aioresponses
 from homeassistant import config_entries
 from homeassistant.data_entry_flow import FlowResultType
 
+from custom_components.intratone.config_flow import _normalize_phone
 from custom_components.intratone.const import (
     API_BASE,
+    CONF_INDICATIF,
     CONF_INVITE_CODE,
     CONF_JWT,
     CONF_NUMERIC_ID,
@@ -120,6 +122,52 @@ async def test_rejected_invite_shows_error(
     assert result["errors"] == {"base": "invalid_code"}
 
 
+async def test_duplicate_invite_aborts_without_store_write(
+    hass, hass_storage, mock_entry: MockConfigEntry, aiomock, patched_fcm_register
+) -> None:
+    """Re-entering a valid invite code for a configured account aborts BEFORE
+    the credentials Store is overwritten — otherwise the running FcmListener
+    would be desynced from the newly stored fcm_token."""
+    mock_entry.add_to_hass(hass)
+    aiomock.post(
+        f"{API_BASE}api/auth/registercodes",
+        payload={"state": "ok", "data": {"id": "3844428", "tel": "0671124546"}},
+    )
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={"state": "ok", "data": {"jwt": "new.jwt", "id": "3844428"}},
+    )
+
+    result = await _pick_invite_step(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_INVITE_CODE: "448789-1206"}
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+    # The Store file was never written.
+    assert "intratone.3844428.creds" not in hass_storage
+
+
+def test_normalize_phone_handles_00_prefix() -> None:
+    """`00` international prefix is stripped like `+` before the indicatif."""
+    assert _normalize_phone("0033671124546", "33") == "671124546"
+    assert _normalize_phone("00 33 6 71 12 45 46", "33") == "671124546"
+    assert _normalize_phone("+33671124546", "33") == "671124546"
+    assert _normalize_phone("0671124546", "33") == "671124546"
+    assert _normalize_phone("0041791234567", "41") == "791234567"
+
+
+async def test_phone_invalid_shows_invalid_phone_error(hass) -> None:
+    """An unusable phone number gets its own error key, not the invite-code
+    `invalid_format` wording."""
+    result = await _pick_phone_step(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"phone": "0", "indicatif": "33"}
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"phone": "invalid_phone"}
+
+
 async def test_sms_happy_path_creates_entry(
     hass, aiomock, patched_fcm_register
 ) -> None:
@@ -160,6 +208,8 @@ async def test_sms_happy_path_creates_entry(
     assert result["data"][CONF_NUMERIC_ID] == "3844428"
     # The phone stored is the normalized national number (no leading 0).
     assert result["data"][CONF_TEL] == "671124546"
+    # The collected indicatif is persisted for downstream auth calls.
+    assert result["data"][CONF_INDICATIF] == "33"
     assert CONF_JWT not in result["data"]
 
     from custom_components.intratone.store import IntratoneCredentialsStore
@@ -401,3 +451,45 @@ async def test_reauth_falls_back_to_form_when_silent_refresh_rejected(
 
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "reauth_confirm"
+
+
+async def test_reauth_with_other_accounts_invite_aborts_without_store_write(
+    hass,
+    hass_storage,
+    mock_entry: MockConfigEntry,
+    aiomock,
+    patched_fcm_register,
+) -> None:
+    """A reauth invite code that resolves to ANOTHER account aborts with
+    `unique_id_mismatch` BEFORE that account's credentials Store is clobbered."""
+    mock_entry.add_to_hass(hass)
+
+    # Silent reauth tries api/auth/device first — reject it so the flow
+    # falls through to the invite-code form. authenticate_for_invite tries
+    # up to 3 tel candidates, so register one rejection per candidate.
+    for _ in range(3):
+        aiomock.post(
+            f"{API_BASE}api/auth/device",
+            payload={"state": "error", "message": "device unknown"},
+        )
+    # The invite code belongs to a different account (id 9999999).
+    aiomock.post(
+        f"{API_BASE}api/auth/registercodes",
+        payload={"state": "ok", "data": {"id": "9999999", "tel": "0699999999"}},
+    )
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={"state": "ok", "data": {"jwt": "other.jwt", "id": "9999999"}},
+    )
+
+    result = await mock_entry.start_reauth_flow(hass)
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "reauth_confirm"
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_INVITE_CODE: "448789-1206"}
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "unique_id_mismatch"
+    # The other account's Store file was never written.
+    assert "intratone.9999999.creds" not in hass_storage

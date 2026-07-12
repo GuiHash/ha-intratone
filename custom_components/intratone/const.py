@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Final
 
 DOMAIN: Final = "intratone"
@@ -43,6 +44,9 @@ FCM_API_KEY: Final = "AIzaSyB7RtCyt6LZWMruWKj7Z_9Ii7_VAIVdSKU"
 FCM_SENDER_ID: Final = "676502914290"
 
 CONF_INVITE_CODE: Final = "invite_code"
+# Installer invitation code shape (`XXXXXX-XXXX`), shared by the config flow
+# and the FCM re-pair repair flow.
+INVITE_RE: Final = re.compile(r"^\s*(\d{4,8})\s*[-\s]\s*(\d{3,6})\s*$")
 CONF_DEVICE_ID: Final = "device_id"
 CONF_NUMERIC_ID: Final = "numeric_id"
 CONF_TEL: Final = "tel"
@@ -60,6 +64,9 @@ REGISTER_METHOD_SMS: Final = "sms"
 REGISTER_METHOD_INVITE: Final = "invite"
 
 DEFAULT_INDICATIF: Final = "33"
+# Country calling code collected during SMS pairing (e.g. "33", "32"). Older
+# entries predate this key — fall back to DEFAULT_INDICATIF when absent.
+CONF_INDICATIF: Final = "indicatif"
 
 JWT_REFRESH_INTERVAL_HOURS: Final = 12
 
@@ -103,6 +110,14 @@ MOBIPASS_CODE_NOT_AVAILABLE: Final = "MOBIPASS_NOT_AVAILABLE"
 # The app treats this as "proceed to code entry" (CodeSentingException shows no
 # error), so we do too.
 MOBIPASS_CODE_SMS_SENT: Final = "MOBIPASS_SMS_SENT"
+
+# Server `code` → user-facing error key for a failed CléMobil transfer, shared
+# by the config flow and the repair flow.
+MOBIPASS_ERRORS: Final = {
+    MOBIPASS_CODE_OTP_INVALID: "mobipass_code_invalid",
+    MOBIPASS_CODE_BLOCKED: "mobipass_code_blocked",
+    MOBIPASS_CODE_NOT_AVAILABLE: "mobipass_not_available",
+}
 
 # `openmode` values. The official app routes the "open" tap by the access's
 # *first* mode (Android `AccessViewModel.openAccess`):

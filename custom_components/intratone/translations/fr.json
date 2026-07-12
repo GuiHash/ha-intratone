@@ -52,6 +52,7 @@
     },
     "error": {
       "invalid_format": "Format invalide. Attendu : `XXXXXX-XXXX`.",
+      "invalid_phone": "Saisissez un numéro de téléphone et un indicatif pays valides.",
       "invalid_code": "Le code d'invitation a été refusé par Intratone. Générez-en un nouveau et réessayez.",
       "invalid_sms_code": "Le code SMS a été refusé. Vérifiez les chiffres saisis et réessayez.",
       "sms_failed": "Intratone refuse d'envoyer un SMS à ce numéro. Vérifiez le numéro et l'indicatif pays.",
@@ -65,6 +66,7 @@
     },
     "abort": {
       "already_configured": "Cet appareil Intratone est déjà configuré.",
+      "unique_id_mismatch": "Le code d'invitation appartient à un autre compte ou appartement Intratone que celui en cours de ré-authentification. Générez un code depuis le même compte et réessayez.",
       "reauth_successful": "Re-couplage réussi.",
       "reconfigure_successful": "Reconfiguration réussie.",
       "mobipass_transfer_successful": "La CléMobil est maintenant active sur Home Assistant. Vos portes devraient apparaître sous peu.",
@@ -138,7 +140,7 @@
         },
         "data_description": {
           "video_enabled": "Négocie la vidéo VP8 avec la passerelle Intratone et la transmet à go2rtc. Désactivé pour le mode audio uniquement.",
-          "go2rtc_url": "URL RTSP sur laquelle go2rtc écoute. Par défaut : rtsp://127.0.0.1:8554. Les utilisateurs HA OS avec le go2rtc intégré doivent utiliser rtsp://127.0.0.1:18554."
+          "go2rtc_url": "URL RTSP sur laquelle go2rtc écoute. Par défaut : rtsp://127.0.0.1:8554. Le go2rtc intégré à HA ne peut pas accepter ce flux — utilisez plutôt une instance go2rtc autonome."
         }
       }
     }
@@ -159,6 +161,22 @@
         "entry_id": {
           "name": "ID de configuration",
           "description": "Cibler une entrée Intratone spécifique."
+        },
+        "sip_server_ip": {
+          "name": "IP du serveur SIP (mock)",
+          "description": "Si renseigné, le coordinateur déclenche un vrai INVITE SIP vers cette IP au lieu de sauter la partie SIP. Utilisez `127.0.0.1` avec `dev/mock_asterisk.py`."
+        },
+        "sip_target_user": {
+          "name": "Utilisateur SIP cible (LOGIN_TO_CALL)",
+          "description": "Partie utilisateur du Request-URI de l'INVITE."
+        },
+        "sip_user": {
+          "name": "Nom d'utilisateur SIP Digest",
+          "description": "Nom d'utilisateur pour le challenge d'authentification Digest optionnel."
+        },
+        "sip_pass": {
+          "name": "Mot de passe SIP Digest",
+          "description": "Mot de passe pour le challenge d'authentification Digest optionnel."
         }
       }
     }

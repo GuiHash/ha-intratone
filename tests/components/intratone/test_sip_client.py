@@ -16,6 +16,7 @@ all SIP framing/parsing is exercised via `client.data_received(bytes)`.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from typing import Any
 
@@ -721,6 +722,114 @@ def test_retransmitted_200_ok_re_acks_without_terminating(client_setup):
     assert start == "ACK sip:server@178.32.84.99:5060;transport=tcp SIP/2.0"
     assert len(established) == 1
     assert terminated == []
+
+
+@pytest.mark.parametrize(
+    "status_line, extra_headers",
+    [
+        ("486 Busy Here", ""),
+        ("500 Server Internal Error", ""),
+        (
+            "407 Proxy Authentication Required",
+            'Proxy-Authenticate: Digest realm="asterisk", nonce="N0NCE-002"\r\n',
+        ),
+    ],
+)
+def test_non_2xx_to_in_dialog_message_keeps_call_alive(
+    client_setup, status_line, extra_headers
+):
+    """A 4xx/5xx final response to an in-dialog MESSAGE (opendoor, MUTE_OFF,
+    contrast) must NOT tear down the call: ACK is INVITE-transaction-only
+    (RFC 3261 §17.1.1.3) and a failed MESSAGE leaves the dialog intact."""
+    client, transport, _, terminated = client_setup
+    call_id, from_tag = _confirm_call(client, transport)
+    assert client.send_mute_off(call_id) is True  # CSeq 52 MESSAGE
+    sent_before = len(transport.sent)
+
+    reject = (
+        f"SIP/2.0 {status_line}\r\n"
+        f"Via: SIP/2.0/TCP {LOCAL_HOST}:{LOCAL_PORT};branch=ignored;rport\r\n"
+        f"From: <sip:{USERNAME}@{LOCAL_HOST}>;tag={from_tag}\r\n"
+        f"To: <{TARGET_URI}>;tag=srv-confirmed\r\n"
+        f"Call-ID: {call_id}\r\n"
+        "CSeq: 52 MESSAGE\r\n"
+        f"{extra_headers}"
+        "Content-Length: 0\r\n\r\n"
+    ).encode()
+    client.data_received(reject)
+
+    # No ACK, no BYE, no terminate — call stays CONFIRMED.
+    assert len(transport.sent) == sent_before
+    assert terminated == []
+    assert client._call is not None
+    assert client._call.state == CallState.CONFIRMED
+
+
+def test_crlf_keepalive_before_bye_still_dispatches_bye(client_setup):
+    """RFC 5626 CRLF keep-alive (`\\r\\n\\r\\n`) followed by a BYE in the same
+    TCP segment: the unparseable keep-alive must be dropped and the complete
+    BYE behind it dispatched — not left stuck in the buffer."""
+    client, transport, _, terminated = client_setup
+    call_id, from_tag = _confirm_call(client, transport)
+    sent_before = len(transport.sent)
+
+    bye = (
+        f"BYE <sip:{USERNAME}@{LOCAL_HOST}> SIP/2.0\r\n"
+        f"Via: SIP/2.0/TCP 178.32.84.135;branch=z9hG4bK-bye\r\n"
+        f"From: <{TARGET_URI}>;tag=srv-confirmed\r\n"
+        f"To: <sip:{USERNAME}@{LOCAL_HOST}>;tag={from_tag}\r\n"
+        f"Call-ID: {call_id}\r\n"
+        "CSeq: 1 BYE\r\n"
+        "Content-Length: 0\r\n\r\n"
+    ).encode()
+    client.data_received(b"\r\n\r\n" + bye)
+
+    # BYE was answered with 200 OK and the call terminated.
+    assert len(transport.sent) == sent_before + 1
+    start, headers, _ = _parse(transport.sent[-1])
+    assert start == "SIP/2.0 200 OK"
+    assert headers["cseq"] == "1 BYE"
+    assert terminated == [call_id]
+
+
+def test_in_dialog_ack_after_session_refresh_is_silent(client_setup, caplog):
+    """The server ACKs our 200 OK to its session-timer re-INVITE on every
+    refresh — this is expected protocol flow, not an 'unhandled' method, so
+    no warning and nothing sent."""
+    client, transport, _, _ = client_setup
+    call_id, from_tag = _confirm_call(client, transport)
+
+    reinvite = (
+        f"INVITE <sip:{USERNAME}@{LOCAL_HOST}> SIP/2.0\r\n"
+        f"Via: SIP/2.0/TCP 178.32.84.135;branch=z9hG4bK-refresh\r\n"
+        f"From: <{TARGET_URI}>;tag=srv-confirmed\r\n"
+        f"To: <sip:{USERNAME}@{LOCAL_HOST}>;tag={from_tag}\r\n"
+        f"Call-ID: {call_id}\r\n"
+        "CSeq: 1 INVITE\r\n"
+        "Supported: timer\r\n"
+        "Session-Expires: 1800;refresher=uas\r\n"
+        "Content-Length: 0\r\n\r\n"
+    ).encode()
+    client.data_received(reinvite)
+    sent_before = len(transport.sent)
+
+    ack = (
+        f"ACK <sip:{USERNAME}@{LOCAL_HOST}> SIP/2.0\r\n"
+        f"Via: SIP/2.0/TCP 178.32.84.135;branch=z9hG4bK-refresh\r\n"
+        f"From: <{TARGET_URI}>;tag=srv-confirmed\r\n"
+        f"To: <sip:{USERNAME}@{LOCAL_HOST}>;tag={from_tag}\r\n"
+        f"Call-ID: {call_id}\r\n"
+        "CSeq: 1 ACK\r\n"
+        "Content-Length: 0\r\n\r\n"
+    ).encode()
+    with caplog.at_level(logging.DEBUG, logger="custom_components.intratone.sip_client"):
+        caplog.clear()
+        client.data_received(ack)
+
+    assert len(transport.sent) == sent_before  # nothing sent back
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert client._call is not None
+    assert client._call.state == CallState.CONFIRMED
 
 
 def test_stray_response_for_unknown_call_ignored(client_setup):

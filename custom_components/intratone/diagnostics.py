@@ -30,7 +30,9 @@ REDACT_ENTRY = {
 
 REDACT_STORE = {"jwt", "fcm_token", "fcm_creds"}
 
-REDACT_STATE = {"caller_login"}
+# door_code is sent as `opendoor:<code>` to trigger the relay — building-
+# security-adjacent, so keep it out of dumps users attach to GitHub issues.
+REDACT_STATE = {"caller_login", "door_code"}
 
 
 async def async_get_config_entry_diagnostics(

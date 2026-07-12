@@ -28,8 +28,8 @@ pytest_plugins = ["pytest_homeassistant_custom_component"]
 # installed aiohttp has `stream_writer`, wrap the response class aioresponses
 # instantiates so it supplies a stub stream_writer.
 # ---------------------------------------------------------------------------
-import aioresponses.core as _arc
-from aiohttp import ClientResponse as _ClientResponse
+import aioresponses.core as _arc  # noqa: E402
+from aiohttp import ClientResponse as _ClientResponse  # noqa: E402
 
 if "stream_writer" in inspect.signature(_ClientResponse.__init__).parameters:
     _OrigClientResponse = _arc.ClientResponse

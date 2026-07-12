@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from unittest.mock import AsyncMock, patch
 
+import aiohttp
 import pytest
 from aioresponses import aioresponses
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.intratone.const import (
     API_BASE,
+    CONF_DEVICE_ID,
+    CONF_INDICATIF,
+    CONF_NUMERIC_ID,
+    CONF_TEL,
+    DOMAIN,
     PATH_ACCESS_LIST,
     PATH_ACCESS_OPEN,
     PATH_MOBIPASS_ACTIVATE,
@@ -20,9 +29,12 @@ from custom_components.intratone.rest_api import (
     IntratoneAPI,
     IntratoneApiError,
     IntratoneAuthError,
+    IntratoneConnectionError,
     IntratoneMobipassError,
     authenticate_for_invite,
+    register_phone_for_sms,
     register_with_invite,
+    validate_sms_code,
     verify_user,
 )
 from custom_components.intratone.store import IntratoneCredentialsStore
@@ -458,3 +470,494 @@ async def test_verify_user_best_effort_on_failure(hass, aiomock) -> None:
         async_get_clientsession(hass), tel="612345678", indicatif="33"
     )
     assert data == {}
+
+
+# --- Finding 1: non-JSON bodies must surface as IntratoneApiError -----------
+
+
+async def test_answer_call_non_json_body_raises_api_error(
+    hass, mock_entry, aiomock
+) -> None:
+    """A non-JSON body (HTML 502 page from a proxy) must be a typed
+    IntratoneApiError — so answer_call's refresh-retry triggers — and must not
+    embed the raw body in the message."""
+    mock_entry.add_to_hass(hass)
+    store = await _seeded_store(hass)
+    api = IntratoneAPI(hass, async_get_clientsession(hass), mock_entry, store)
+
+    aiomock.post(f"{API_BASE}api/calls/123/answer", body="<html>bad gateway</html>")
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={"state": "ok", "data": {"jwt": "newjwt", "id": "3844428"}},
+    )
+    aiomock.post(f"{API_BASE}api/calls/123/answer", body="<html>bad gateway</html>")
+
+    with pytest.raises(IntratoneApiError) as exc:
+        await api.answer_call("123")
+    assert "<html>" not in str(exc.value)
+    # The refresh-retry DID happen (typed error → retry path).
+    assert store.jwt == "newjwt"
+
+
+async def test_register_with_invite_non_json_raises_api_error(hass, aiomock) -> None:
+    aiomock.post(f"{API_BASE}api/auth/registercodes", body="<html>oops</html>")
+    with pytest.raises(IntratoneApiError):
+        await register_with_invite(
+            async_get_clientsession(hass),
+            device_id="ha-test",
+            fcm_token="tok",
+            code="123456",
+            codepass="7890",
+        )
+
+
+async def test_authenticate_for_invite_skips_non_json_candidate(hass, aiomock) -> None:
+    """A non-JSON body for one candidate moves on to the next (the
+    per-candidate `continue` must actually be reachable)."""
+    aiomock.post(f"{API_BASE}api/auth/device", body="<html>oops</html>")
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={"state": "ok", "data": {"jwt": "ok", "id": "9"}},
+    )
+    data = await authenticate_for_invite(
+        async_get_clientsession(hass), tel="0612345678", device_id="ha-test"
+    )
+    assert data["jwt"] == "ok"
+
+
+# --- Finding 2: network errors wrapped into IntratoneApiError ---------------
+
+
+async def test_answer_call_network_error_does_not_refresh(
+    hass, mock_entry, aiomock
+) -> None:
+    """A transient connection reset is wrapped into IntratoneConnectionError
+    (typed, so lock.py surfaces a proper HomeAssistantError) but must NOT
+    trigger the JWT-refresh retry: the token was never the problem, and a
+    pointless auth/device round-trip on a dead network blocks the ring hot
+    path and hammers the rate-limited auth endpoint (issue #39)."""
+    mock_entry.add_to_hass(hass)
+    store = await _seeded_store(hass)
+    api = IntratoneAPI(hass, async_get_clientsession(hass), mock_entry, store)
+
+    aiomock.post(
+        f"{API_BASE}api/calls/123/answer",
+        exception=aiohttp.ClientConnectionError("reset"),
+    )
+
+    with pytest.raises(IntratoneConnectionError):
+        await api.answer_call("123")
+    # No auth/device call — the refresh path must not run.
+    assert not any(
+        str(key[1]).endswith("api/auth/device") for key in aiomock.requests
+    )
+
+
+async def test_register_phone_for_sms_network_error_wrapped(hass, aiomock) -> None:
+    aiomock.post(
+        f"{API_BASE}api/auth/register",
+        exception=aiohttp.ClientConnectionError("reset"),
+    )
+    with pytest.raises(IntratoneApiError):
+        await register_phone_for_sms(
+            async_get_clientsession(hass),
+            device_id="ha-test",
+            fcm_token="tok",
+            tel="612345678",
+            indicatif="33",
+        )
+
+
+async def test_validate_sms_code_timeout_wrapped(hass, aiomock) -> None:
+    aiomock.post(f"{API_BASE}api/auth/validate", exception=asyncio.TimeoutError())
+    with pytest.raises(IntratoneApiError):
+        await validate_sms_code(
+            async_get_clientsession(hass),
+            tel="612345678",
+            indicatif="33",
+            device_id="ha-test",
+            code="1234",
+        )
+
+
+async def test_authenticate_for_invite_network_error_wrapped(hass, aiomock) -> None:
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        exception=aiohttp.ClientConnectionError("reset"),
+        repeat=True,
+    )
+    with pytest.raises(IntratoneApiError):
+        await authenticate_for_invite(
+            async_get_clientsession(hass), tel="0612345678", device_id="ha-test"
+        )
+
+
+# --- Finding 3: HTTP >= 400 without a `state` envelope is an error ----------
+
+
+async def test_answer_call_http_401_without_envelope_triggers_refresh(
+    hass, mock_entry, aiomock
+) -> None:
+    """A 401 JSON body without the `state` envelope must NOT be treated as
+    success ("not picked up") — it must raise so the JWT-refresh retry runs."""
+    mock_entry.add_to_hass(hass)
+    store = await _seeded_store(hass)
+    api = IntratoneAPI(hass, async_get_clientsession(hass), mock_entry, store)
+
+    aiomock.post(
+        f"{API_BASE}api/calls/123/answer",
+        status=401,
+        payload={"message": "Unauthenticated."},
+    )
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={"state": "ok", "data": {"jwt": "newjwt", "id": "3844428"}},
+    )
+    aiomock.post(
+        f"{API_BASE}api/calls/123/answer", payload={"error": 0, "state": "ok"}
+    )
+
+    assert await api.answer_call("123") is True
+    assert store.jwt == "newjwt"
+
+
+async def test_list_access_http_503_raises_api_error(
+    hass, mock_entry, aiomock
+) -> None:
+    mock_entry.add_to_hass(hass)
+    store = await _seeded_store(hass)
+    api = IntratoneAPI(hass, async_get_clientsession(hass), mock_entry, store)
+
+    aiomock.get(
+        f"{API_BASE}{PATH_ACCESS_LIST}",
+        status=503,
+        payload={"message": "unavailable"},
+    )
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={"state": "ok", "data": {"jwt": "newjwt", "id": "3844428"}},
+    )
+    aiomock.get(
+        f"{API_BASE}{PATH_ACCESS_LIST}",
+        status=503,
+        payload={"message": "unavailable"},
+    )
+
+    with pytest.raises(IntratoneApiError) as exc:
+        await api.list_access()
+    assert exc.value.status == 503
+
+
+# --- Finding 4: concurrent refresh_jwt shares one in-flight auth ------------
+
+
+async def test_concurrent_refresh_jwt_runs_authenticate_device_once(
+    hass, mock_entry
+) -> None:
+    """Two concurrent 401s (multi-lock scene) must not stampede auth/device."""
+    mock_entry.add_to_hass(hass)
+    store = await _seeded_store(hass)
+    api = IntratoneAPI(hass, async_get_clientsession(hass), mock_entry, store)
+
+    calls = 0
+
+    async def fake_auth():
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0)
+        return {"jwt": "newjwt", "id": "3844428"}
+
+    with patch.object(api, "authenticate_device", fake_auth):
+        await asyncio.gather(api.refresh_jwt(), api.refresh_jwt())
+        assert calls == 1
+        assert store.jwt == "newjwt"
+
+        # A later, non-concurrent refresh must run a fresh auth.
+        await api.refresh_jwt()
+        assert calls == 2
+
+
+# --- Finding 5: call_id is URL-quoted ----------------------------------------
+
+
+async def test_answer_call_quotes_call_id(hass, mock_entry, aiomock) -> None:
+    """call_id comes from an FCM push / service call — it must be URL-quoted."""
+    mock_entry.add_to_hass(hass)
+    store = await _seeded_store(hass)
+    api = IntratoneAPI(hass, async_get_clientsession(hass), mock_entry, store)
+
+    aiomock.post(
+        f"{API_BASE}api/calls/ab%3Fcd/answer", payload={"error": 0, "state": "ok"}
+    )
+    assert await api.answer_call("ab?cd") is True
+
+
+# --- Finding 6: no credentials in auth failure messages ----------------------
+
+
+async def test_authenticate_device_failure_message_masks_tel(
+    hass, mock_entry, aiomock
+) -> None:
+    mock_entry.add_to_hass(hass)
+    store = await _seeded_store(hass)
+    api = IntratoneAPI(hass, async_get_clientsession(hass), mock_entry, store)
+
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={"state": "error", "message": "AUTH_FAILED"},
+        repeat=True,
+    )
+    with pytest.raises(IntratoneAuthError) as exc:
+        await api.authenticate_device()
+    assert "0671124546" not in str(exc.value)
+    # The server-side reason is still surfaced.
+    assert "AUTH_FAILED" in str(exc.value)
+
+
+async def test_authenticate_device_no_jwt_message_is_helpful(
+    hass, mock_entry, aiomock
+) -> None:
+    """All candidates accepted but no JWT returned → message must say so, not
+    end in an unhelpful ': None'."""
+    mock_entry.add_to_hass(hass)
+    store = await _seeded_store(hass)
+    api = IntratoneAPI(hass, async_get_clientsession(hass), mock_entry, store)
+
+    aiomock.post(
+        f"{API_BASE}api/auth/device", payload={"state": "ok", "data": {}}, repeat=True
+    )
+    with pytest.raises(IntratoneAuthError) as exc:
+        await api.authenticate_device()
+    assert "None" not in str(exc.value)
+
+
+async def test_authenticate_for_invite_failure_masks_credentials(
+    hass, aiomock
+) -> None:
+    """The no-JWT error must not dump tel/device_id from the response body."""
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={
+            "state": "ok",
+            "data": {"tel": "0612345678", "device_id": "devsecret123"},
+        },
+        repeat=True,
+    )
+    with pytest.raises(IntratoneAuthError) as exc:
+        await authenticate_for_invite(
+            async_get_clientsession(hass), tel="0612345678", device_id="devsecret123"
+        )
+    assert "0612345678" not in str(exc.value)
+    assert "devsecret123" not in str(exc.value)
+
+
+# --- Finding 7: envelope flags may be int or string ---------------------------
+
+
+async def test_answer_call_accepts_string_error_flag(
+    hass, mock_entry, aiomock
+) -> None:
+    """§4.2: numeric envelope flags are sent as int OR string."""
+    mock_entry.add_to_hass(hass)
+    store = await _seeded_store(hass)
+    api = IntratoneAPI(hass, async_get_clientsession(hass), mock_entry, store)
+
+    aiomock.post(
+        f"{API_BASE}api/calls/123/answer", payload={"error": "0", "state": "ok"}
+    )
+    assert await api.answer_call("123") is True
+
+
+async def test_open_access_accepts_string_error_flag(
+    hass, mock_entry, aiomock
+) -> None:
+    mock_entry.add_to_hass(hass)
+    store = await _seeded_store(hass)
+    api = IntratoneAPI(hass, async_get_clientsession(hass), mock_entry, store)
+
+    aiomock.post(
+        f"{API_BASE}{PATH_ACCESS_OPEN}", payload={"error": "0", "state": "ok"}
+    )
+    access = IntratoneAccess(
+        access_id="42",
+        phonenumber="0612345678",
+        name="Portail",
+        residence="Rés",
+        openmode="data",
+    )
+    assert await api.open_access(access) is True
+
+
+async def test_mobipass_activate_accepts_string_error_flag(
+    hass, mock_entry, aiomock
+) -> None:
+    mock_entry.add_to_hass(hass)
+    store = await _seeded_store(hass)
+    api = IntratoneAPI(hass, async_get_clientsession(hass), mock_entry, store)
+
+    aiomock.post(
+        f"{API_BASE}{PATH_MOBIPASS_ACTIVATE}",
+        payload={"state": "ok", "error": "0"},
+    )
+    # No raise = OTP request accepted.
+    await api.mobipass_activate()
+
+
+# --- Finding 8: periodic refresh failure paths -------------------------------
+
+
+async def test_periodic_refresh_starts_reauth_on_auth_error(
+    hass, mock_entry
+) -> None:
+    """A definitive server rejection (IntratoneAuthError) during the periodic
+    refresh must start a reauth flow (the FCM unregister push may be dead)."""
+    mock_entry.add_to_hass(hass)
+    store = await _seeded_store(hass)
+    api = IntratoneAPI(hass, async_get_clientsession(hass), mock_entry, store)
+
+    with patch(
+        "custom_components.intratone.rest_api.async_track_time_interval"
+    ) as track:
+        api.async_start_jwt_refresh()
+    tick = track.call_args[0][1]
+
+    with (
+        patch.object(
+            api, "refresh_jwt", AsyncMock(side_effect=IntratoneAuthError("revoked"))
+        ),
+        patch.object(mock_entry, "async_start_reauth") as reauth,
+    ):
+        await tick(None)
+    reauth.assert_called_once_with(hass)
+
+
+async def test_periodic_refresh_network_error_does_not_reauth(
+    hass, mock_entry, aiomock
+) -> None:
+    """End-to-end: a network outage at the refresh tick must NOT start reauth.
+
+    Regression guard: authenticate_device wraps per-candidate failures into
+    IntratoneAuthError — a connection error reaching that path would be
+    misread as "credentials revoked" and force a re-pair for a WiFi blip."""
+    mock_entry.add_to_hass(hass)
+    store = await _seeded_store(hass)
+    api = IntratoneAPI(hass, async_get_clientsession(hass), mock_entry, store)
+
+    with patch(
+        "custom_components.intratone.rest_api.async_track_time_interval"
+    ) as track:
+        api.async_start_jwt_refresh()
+    tick = track.call_args[0][1]
+
+    for _ in range(3):  # one per tel candidate, in case all are tried
+        aiomock.post(
+            f"{API_BASE}api/auth/device",
+            exception=aiohttp.ClientConnectionError("dns blip"),
+        )
+    with patch.object(mock_entry, "async_start_reauth") as reauth:
+        await tick(None)  # must not raise
+    reauth.assert_not_called()
+
+
+async def test_periodic_refresh_server_5xx_does_not_reauth(
+    hass, mock_entry, aiomock
+) -> None:
+    """End-to-end: an Intratone outage (HTTP 503) at the refresh tick is not
+    a credential verdict — it must NOT start reauth."""
+    mock_entry.add_to_hass(hass)
+    store = await _seeded_store(hass)
+    api = IntratoneAPI(hass, async_get_clientsession(hass), mock_entry, store)
+
+    with patch(
+        "custom_components.intratone.rest_api.async_track_time_interval"
+    ) as track:
+        api.async_start_jwt_refresh()
+    tick = track.call_args[0][1]
+
+    for _ in range(3):  # one per tel candidate, in case all are tried
+        aiomock.post(
+            f"{API_BASE}api/auth/device",
+            status=503,
+            payload={"message": "maintenance"},
+        )
+    with patch.object(mock_entry, "async_start_reauth") as reauth:
+        await tick(None)  # must not raise
+    reauth.assert_not_called()
+
+
+async def test_periodic_refresh_transient_error_does_not_reauth(
+    hass, mock_entry
+) -> None:
+    """A transient failure (IntratoneApiError) keeps the warning-only path."""
+    mock_entry.add_to_hass(hass)
+    store = await _seeded_store(hass)
+    api = IntratoneAPI(hass, async_get_clientsession(hass), mock_entry, store)
+
+    with patch(
+        "custom_components.intratone.rest_api.async_track_time_interval"
+    ) as track:
+        api.async_start_jwt_refresh()
+    tick = track.call_args[0][1]
+
+    with (
+        patch.object(
+            api, "refresh_jwt", AsyncMock(side_effect=IntratoneApiError("boom"))
+        ),
+        patch.object(mock_entry, "async_start_reauth") as reauth,
+    ):
+        await tick(None)  # must not raise
+    reauth.assert_not_called()
+
+
+# --- Finding 9: indicatif not hardcoded to "33" -------------------------------
+
+
+def _auth_device_calls(aiomock):
+    return next(
+        calls
+        for key, calls in aiomock.requests.items()
+        if str(key[1]).endswith("api/auth/device")
+    )
+
+
+async def test_authenticate_for_invite_uses_indicatif_kwarg(hass, aiomock) -> None:
+    aiomock.post(f"{API_BASE}api/auth/device", payload={"state": "ok", "data": {}})
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={"state": "ok", "data": {"jwt": "ok", "id": "9"}},
+    )
+    data = await authenticate_for_invite(
+        async_get_clientsession(hass),
+        tel="0612345678",
+        device_id="ha-test",
+        indicatif="32",
+    )
+    assert data["jwt"] == "ok"
+    calls = _auth_device_calls(aiomock)
+    assert calls[1].kwargs["data"]["tel"] == "32612345678"
+
+
+async def test_authenticate_device_uses_entry_indicatif(hass, aiomock) -> None:
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="1",
+        data={
+            CONF_DEVICE_ID: "ha-test",
+            CONF_NUMERIC_ID: "1",
+            CONF_TEL: "0671124546",
+            CONF_INDICATIF: "352",
+        },
+    )
+    entry.add_to_hass(hass)
+    store = await _seeded_store(hass)
+    api = IntratoneAPI(hass, async_get_clientsession(hass), entry, store)
+
+    aiomock.post(f"{API_BASE}api/auth/device", payload={"state": "ok", "data": {}})
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={"state": "ok", "data": {"jwt": "j", "id": "1"}},
+    )
+    data = await api.authenticate_device()
+    assert data["jwt"] == "j"
+    calls = _auth_device_calls(aiomock)
+    assert calls[1].kwargs["data"]["tel"] == "352671124546"
