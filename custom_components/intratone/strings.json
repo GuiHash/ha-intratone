@@ -48,6 +48,13 @@
         "data": {
           "code": "Transfer code"
         }
+      },
+      "video": {
+        "title": "Live video",
+        "description": "Enable VP8 video to watch the visitor during a call. Requires a **standalone go2rtc instance** (HA's embedded go2rtc can't accept the stream). When off, the camera and backlight entities are not created — doorbell rings, audio-free door opening and events keep working. You can change this later in the integration options.",
+        "data": {
+          "video_enabled": "Enable video (VP8)"
+        }
       }
     },
     "error": {
@@ -139,7 +146,7 @@
           "go2rtc_url": "go2rtc RTSP relay URL"
         },
         "data_description": {
-          "video_enabled": "Negotiates VP8 video with the Intratone gateway and forwards it to go2rtc. Leave off for audio-only mode.",
+          "video_enabled": "Negotiates VP8 video with the Intratone gateway and forwards it to go2rtc. When off, the camera and backlight entities are not created.",
           "go2rtc_url": "RTSP URL where go2rtc listens. Default: rtsp://127.0.0.1:8554. HA's embedded go2rtc can't accept this stream — run a standalone go2rtc instance instead."
         }
       }

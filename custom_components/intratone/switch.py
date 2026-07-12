@@ -17,7 +17,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import IntratoneConfigEntry
-from .entity import IntratoneEntity, MomentaryRevertMixin
+from .const import CONF_VIDEO_ENABLED
+from .entity import IntratoneEntity, MomentaryRevertMixin, async_remove_stale_entity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -29,6 +30,11 @@ async def async_setup_entry(
     entry: IntratoneConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
+    # The backlight illuminates the visitor for the camera — pointless
+    # without video, so it follows the same option as the camera entity.
+    if not entry.options.get(CONF_VIDEO_ENABLED, False):
+        async_remove_stale_entity(hass, "switch", f"{entry.entry_id}_backlight")
+        return
     async_add_entities([IntratoneBacklightSwitch(entry.runtime_data.coordinator)])
 
 

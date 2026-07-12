@@ -18,6 +18,7 @@ from custom_components.intratone.const import (
     CONF_NUMERIC_ID,
     CONF_REGISTER_METHOD,
     CONF_TEL,
+    CONF_VIDEO_ENABLED,
     DOMAIN,
     PATH_ACCESS_LIST,
     PATH_MOBIPASS_ACTIVATE,
@@ -92,9 +93,16 @@ async def test_happy_path_creates_entry(
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], {CONF_INVITE_CODE: "448789-1206"}
     )
+    # Pairing succeeded → the flow asks about video before creating the entry.
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "video"
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_VIDEO_ENABLED: True}
+    )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"][CONF_TEL] == "0671124546"
     assert result["data"][CONF_NUMERIC_ID] == "3844428"
+    assert result["options"][CONF_VIDEO_ENABLED] is True
     # JWT lives in the per-account credentials Store, not in entry.data.
     assert CONF_JWT not in result["data"]
     patched_fcm_register.assert_awaited_once()
@@ -204,12 +212,17 @@ async def test_sms_happy_path_creates_entry(
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], {"code": "1234"}
     )
+    assert result["step_id"] == "video"
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_VIDEO_ENABLED: False}
+    )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"][CONF_NUMERIC_ID] == "3844428"
     # The phone stored is the normalized national number (no leading 0).
     assert result["data"][CONF_TEL] == "671124546"
     # The collected indicatif is persisted for downstream auth calls.
     assert result["data"][CONF_INDICATIF] == "33"
+    assert result["options"][CONF_VIDEO_ENABLED] is False
     assert CONF_JWT not in result["data"]
 
     from custom_components.intratone.store import IntratoneCredentialsStore

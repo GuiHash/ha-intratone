@@ -55,6 +55,7 @@ PHONE_SCHEMA = vol.Schema(
 SMS_SCHEMA = vol.Schema({vol.Required("code"): str})
 # Shared with repairs.py (CléMobil transfer repair flow).
 MOBIPASS_OTP_SCHEMA = vol.Schema({vol.Required("code"): str})
+VIDEO_SCHEMA = vol.Schema({vol.Required(CONF_VIDEO_ENABLED, default=False): bool})
 
 
 def _normalize_phone(raw: str, indicatif: str) -> str:
@@ -110,6 +111,9 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
         self._reauth_entry = None
         # Carries SMS-flow state between async_step_phone and async_step_sms.
         self._pending_sms: dict[str, Any] = {}
+        # Entry title/data staged by a successful pairing, consumed by
+        # async_step_video which creates the entry with the chosen options.
+        self._pending_entry: dict[str, Any] | None = None
 
     async def async_step_user(
         self, _user_input: dict[str, Any] | None = None
@@ -234,20 +238,39 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
                 )
 
                 tel_display = f"{pending['indicatif']}{pending['phone']}"
-                return self.async_create_entry(
-                    title=f"Intratone (+{tel_display})",
-                    data={
+                self._pending_entry = {
+                    "title": f"Intratone (+{tel_display})",
+                    "data": {
                         CONF_DEVICE_ID: pending["device_id"],
                         CONF_NUMERIC_ID: numeric_id,
                         CONF_TEL: pending["phone"],
                         CONF_INDICATIF: pending["indicatif"],
                         CONF_REGISTER_METHOD: REGISTER_METHOD_SMS,
                     },
-                )
+                }
+                return await self.async_step_video()
 
         return self.async_show_form(
             step_id="sms", data_schema=SMS_SCHEMA, errors=errors
         )
+
+    async def async_step_video(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Final pairing step — opt into VP8 video.
+
+        Video needs a standalone go2rtc instance, so it defaults to off.
+        Without it the camera and backlight entities are not created (audio
+        and door opening keep working). Changeable later via the options.
+        """
+        if user_input is not None:
+            pending = self._pending_entry
+            return self.async_create_entry(
+                title=pending["title"],
+                data=pending["data"],
+                options={CONF_VIDEO_ENABLED: user_input[CONF_VIDEO_ENABLED]},
+            )
+        return self.async_show_form(step_id="video", data_schema=VIDEO_SCHEMA)
 
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
@@ -464,10 +487,11 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
                             self._reauth_entry, data=entry_data
                         )
 
-                    return self.async_create_entry(
-                        title=f"Intratone ({entry_data[CONF_TEL]})",
-                        data=entry_data,
-                    )
+                    self._pending_entry = {
+                        "title": f"Intratone ({entry_data[CONF_TEL]})",
+                        "data": entry_data,
+                    }
+                    return await self.async_step_video()
 
         return self.async_show_form(
             step_id=step_id,

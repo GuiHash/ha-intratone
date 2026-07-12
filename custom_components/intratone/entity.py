@@ -4,11 +4,25 @@ from __future__ import annotations
 
 import asyncio
 
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, MANUFACTURER, MODEL
 from .coordinator import IntratoneCoordinator
+
+
+@callback
+def async_remove_stale_entity(
+    hass: HomeAssistant, platform_domain: str, unique_id: str
+) -> None:
+    """Drop the registry entry an entity left behind when its feature was
+    disabled — otherwise it would linger forever as "unavailable"."""
+    registry = er.async_get(hass)
+    entity_id = registry.async_get_entity_id(platform_domain, DOMAIN, unique_id)
+    if entity_id is not None:
+        registry.async_remove(entity_id)
 
 
 class IntratoneEntity(CoordinatorEntity[IntratoneCoordinator]):

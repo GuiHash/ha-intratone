@@ -1,9 +1,10 @@
 """Camera entity for the Intratone intercom.
 
-Phase 2: returns the audio-only RTSP URL exposed by `AudioBridge` when a
-SIP call is active, so HomeKit Bridge (with `support_audio: true`) plays
-visitor audio. Outside of an active call, `stream_source` returns None so
-HomeKit falls back to the still-image placeholder.
+Only created when the `video_enabled` option is on — without VP8 video the
+stream would just show the synthetic placeholder frame (a black screen in
+HomeKit). Returns the RTSP URL exposed by `AudioBridge` when a SIP call is
+active. Outside of an active call, `stream_source` returns None so HomeKit
+falls back to the still-image placeholder.
 """
 
 from __future__ import annotations
@@ -17,7 +18,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import IntratoneConfigEntry
-from .entity import IntratoneEntity
+from .const import CONF_VIDEO_ENABLED
+from .entity import IntratoneEntity, async_remove_stale_entity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -29,6 +31,9 @@ async def async_setup_entry(
     entry: IntratoneConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
+    if not entry.options.get(CONF_VIDEO_ENABLED, False):
+        async_remove_stale_entity(hass, "camera", f"{entry.entry_id}_camera")
+        return
     async_add_entities([IntratoneCamera(entry.runtime_data.coordinator)])
 
 

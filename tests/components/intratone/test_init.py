@@ -7,7 +7,12 @@ from aioresponses import aioresponses
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 
-from custom_components.intratone.const import API_BASE, DOMAIN, PATH_ACCESS_LIST
+from custom_components.intratone.const import (
+    API_BASE,
+    CONF_VIDEO_ENABLED,
+    DOMAIN,
+    PATH_ACCESS_LIST,
+)
 
 
 @pytest.fixture
@@ -141,6 +146,10 @@ async def test_full_setup_push_open_door(
     hass, mock_entry, mock_fcm_client, mock_call_manager, aiomock
 ) -> None:
     mock_entry.add_to_hass(hass)
+    # Camera + backlight only exist with the video option on.
+    hass.config_entries.async_update_entry(
+        mock_entry, options={CONF_VIDEO_ENABLED: True}
+    )
 
     # Allow JWT refresh tick on first setup if it happens.
     aiomock.post(
@@ -296,3 +305,44 @@ async def test_simulate_ring_service(
     assert state is not None
     assert state.call_id == "sim-test"
     assert state.door_name == "PORTE COUR"
+
+
+async def test_camera_and_backlight_absent_without_video_option(
+    hass, mock_entry, mock_fcm_client, mock_call_manager, aiomock
+) -> None:
+    """With video off (the default), the camera and backlight entities are
+    not created, and stale registry entries left over from a previous
+    video-enabled run are removed. The other entities are unaffected."""
+    mock_entry.add_to_hass(hass)
+    registry = er.async_get(hass)
+    registry.async_get_or_create(
+        "camera", DOMAIN, f"{mock_entry.entry_id}_camera", config_entry=mock_entry
+    )
+    registry.async_get_or_create(
+        "switch", DOMAIN, f"{mock_entry.entry_id}_backlight", config_entry=mock_entry
+    )
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={"state": "ok", "data": {"jwt": "fake.jwt.token", "id": "3844428"}},
+        repeat=True,
+    )
+
+    assert await hass.config_entries.async_setup(mock_entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert (
+        registry.async_get_entity_id(
+            "camera", DOMAIN, f"{mock_entry.entry_id}_camera"
+        )
+        is None
+    )
+    assert (
+        registry.async_get_entity_id(
+            "switch", DOMAIN, f"{mock_entry.entry_id}_backlight"
+        )
+        is None
+    )
+    # The doorbell event entity is unaffected by the video option.
+    assert registry.async_get_entity_id(
+        "event", DOMAIN, f"{mock_entry.entry_id}_doorbell"
+    )
