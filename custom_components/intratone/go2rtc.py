@@ -120,6 +120,11 @@ async def async_selftest_go2rtc(
     args = [
         "-hide_banner",
         "-loglevel", "error",
+        # -re is load-bearing: without it ffmpeg encodes the whole synthetic
+        # clip in ~50ms, disconnects (rc=0), and go2rtc drops the producer
+        # before our first DESCRIBE — a false "publish refused" on a healthy
+        # relay. Real-time pacing keeps the publisher connected while we poll.
+        "-re",
         "-f", "lavfi",
         "-i", "color=color=0x202020:size=320x180:rate=5",
         "-t", str(int(timeout) + 2),

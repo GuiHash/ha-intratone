@@ -96,9 +96,13 @@ async def test_selftest_ok_when_publish_accepted_and_describe_200(
     with patch(
         "custom_components.intratone.go2rtc.asyncio.create_subprocess_exec",
         new=AsyncMock(return_value=process),
-    ):
+    ) as spawn:
         assert await async_selftest_go2rtc(URL) is None
     process.kill.assert_called_once()
+    # -re is load-bearing: without real-time pacing ffmpeg pushes the whole
+    # clip in ~50ms and disconnects before the first DESCRIBE, making a
+    # healthy relay look broken (verified against real go2rtc 1.9.14).
+    assert "-re" in spawn.call_args.args
 
 
 async def test_selftest_publish_refused_when_ffmpeg_dies() -> None:
