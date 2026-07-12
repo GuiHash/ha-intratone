@@ -48,6 +48,13 @@
         "data": {
           "code": "Code de transfert"
         }
+      },
+      "video": {
+        "title": "Vidéo en direct",
+        "description": "Activez la vidéo VP8 pour voir le visiteur pendant un appel. Nécessite une **instance go2rtc autonome** (le go2rtc intégré à HA ne peut pas accepter le flux). Désactivée, les entités caméra et rétroéclairage ne sont pas créées — la sonnette, l'ouverture de porte et les événements continuent de fonctionner. Modifiable plus tard dans les options de l'intégration.",
+        "data": {
+          "video_enabled": "Activer la vidéo (VP8)"
+        }
       }
     },
     "error": {
@@ -139,7 +146,7 @@
           "go2rtc_url": "URL RTSP du relais go2rtc"
         },
         "data_description": {
-          "video_enabled": "Négocie la vidéo VP8 avec la passerelle Intratone et la transmet à go2rtc. Désactivé pour le mode audio uniquement.",
+          "video_enabled": "Négocie la vidéo VP8 avec la passerelle Intratone et la transmet à go2rtc. Désactivée, les entités caméra et rétroéclairage ne sont pas créées.",
           "go2rtc_url": "URL RTSP sur laquelle go2rtc écoute. Par défaut : rtsp://127.0.0.1:8554. Le go2rtc intégré à HA ne peut pas accepter ce flux — utilisez plutôt une instance go2rtc autonome."
         }
       }

@@ -11,10 +11,10 @@ After pairing, the integration creates these entities under one device:
 | Entity | What you can do |
 |---|---|
 | `event.intratone_<ID>_doorbell` | Fires every time a visitor rings the intercom. Payload includes `door_name`, `door_number` (NBPORTE), `caller`, `call_id`. Usable as automation trigger. |
-| `camera.intratone_<ID>_intercom` | Placeholder image when idle. Live audio + video stream during a call. |
+| `camera.intratone_<ID>_intercom` | Placeholder image when idle. Live audio + video stream during a call. **Only created when the *Enable video (VP8)* option is on** (asked at pairing, changeable in the integration options). |
 | `lock.intratone_<ID>_door` | Tap *Unlock* → opens the door (sends `opendoor:<code>` SIP MESSAGE, same backend as the official Intratone app). Only works **during an active call** (see Caveats). |
 | `lock.intratone_<ID>_<access>` | One per **data-openable** access — Intratone's *Clé mobile* / **mobipass** (`data`/4G) and `ble` accesses. Tap *Unlock* to open that gate/door **on demand, no visitor needed** (`POST /api/access/open/clemobil`). Created at setup from `GET /api/access` (one per residence × door). Voice-assistant & HomeKit friendly for hands-free opening. **Legacy 2G `clemobil` accesses are not exposed** — the app opens those by placing a real phone call, which HA can't do. Absent if your account has no data-openable accesses, or until you [transfer the *Clé mobile* to HA](#transferring-the-clé-mobile-to-home-assistant) (single-owner since mid-2026). |
-| `switch.intratone_<ID>_backlight` | Toggle ON during an active call to ask the intercom hardware for its backlight / illuminator mode (low-light conditions). One-shot — the server resets it on call end. Some hardware models don't support it; in that case the signal is silently ignored. |
+| `switch.intratone_<ID>_backlight` | Toggle ON during an active call to ask the intercom hardware for its backlight / illuminator mode (low-light conditions). One-shot — the server resets it on call end. Some hardware models don't support it; in that case the signal is silently ignored. **Only created when the *Enable video (VP8)* option is on** (it illuminates the visitor for the camera). |
 | `binary_sensor.intratone_<ID>_push_channel_connected` | Diagnostic — `on` while the FCM push channel is up. If it goes `off`, you won't be notified of rings. |
 
 Exposed to HomeKit via HA's HomeKit Bridge, the camera tile on iPhone Home.app delivers:
