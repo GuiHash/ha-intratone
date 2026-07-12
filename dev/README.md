@@ -11,7 +11,9 @@ spikes. Files here are gitignored counterparts under `dev_config/` and
 |---|---|
 | `ha_overrides/bluetooth/` | No-op stub that overrides HA's core `bluetooth` integration **only in dev_config/**. macOS' TCC SIGKILLs any Python process that touches Core Bluetooth without `NSBluetoothAlwaysUsageDescription` in its Info.plist, which `hass` from a venv doesn't have. The stub prevents the auto-load crash. **Never ship this** under the project-root `custom_components/` — that would break real Linux/HA OS installs. |
 | `go2rtc.yaml` | Mock RTSP server config used by the HomeKit one-way audio spike. Generates `sine 440Hz + smptebars` at `rtsp://127.0.0.1:8554/fake_doorbell`. |
+| `go2rtc-prod.yaml` | Minimal go2rtc config for the Phase 2/3 audio+video relay. Pre-declares the `intratone` stream slot as empty so go2rtc accepts the integration's incoming RTSP PUBLISH. |
 | `configuration-spike.example.yaml` | Minimal HA config for the spike (camera.ffmpeg + homekit bridge with `support_audio: true`). Copied to `dev_config/configuration.yaml` on first run if missing. |
+| `mock_asterisk.py` | Tiny mock Asterisk for end-to-end testing without the real intercom. Accepts an INVITE (100/180/200 + SDP, optional Digest auth with `--digest`), streams a sine 440Hz over RTP G.711 µ-law to the client's SDP endpoint, and logs the silence-keepalive RTP it receives. Companion to the `intratone.simulate_ring` service (`sip_server_ip: 127.0.0.1`). |
 | `spike-up.sh` | Idempotent launcher: downloads `go2rtc` binary if needed, sets up symlinks, starts go2rtc + HA detached. |
 
 ## First-time setup

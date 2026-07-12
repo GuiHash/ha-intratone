@@ -129,9 +129,11 @@ Or manually:
 
 ### Manual
 
+The integration code lives at `custom_components/intratone/` **inside** the repo, so don't clone the repo directly into your `custom_components` folder — clone it elsewhere and copy (or symlink) the inner directory:
+
 ```bash
-cd <your HA config>/custom_components
-git clone https://github.com/GuiHash/ha-intratone.git intratone
+git clone https://github.com/GuiHash/ha-intratone.git /tmp/ha-intratone
+cp -r /tmp/ha-intratone/custom_components/intratone <your HA config>/custom_components/intratone
 # Or download a release archive and extract to custom_components/intratone/
 ```
 
@@ -195,7 +197,7 @@ homekit:
         audio_packet_size: 384
 ```
 
-Replace `<ID>` by the suffix HA uses in your entity IDs (your apartment's numeric ID, visible in any of the three entity names). Restart HA so the Bridge picks up the new config.
+Replace `<ID>` by the suffix HA uses in your entity IDs — it derives from the config entry title, which is the phone number you paired with (e.g. `Intratone (+33612345678)` → `event.intratone_33612345678_doorbell`); it's visible in any of the entity names. Restart HA so the Bridge picks up the new config.
 
 To opt into VP8 video, open the integration options (⚙️ on the Intratone card) and enable **Enable video (VP8)**.
 
@@ -252,7 +254,21 @@ logger:
 
 At `debug` level the integration logs every SIP message sent and received (TX/RX, credentials redacted), every FCM push received, and the exact ffmpeg command lines. Use these to diagnose ring delivery, audio, or video problems before opening an issue.
 
-**Ring doesn't reach iPhone** — verify `event.intratone_<ID>_doorbell` fires in HA (Developer Tools → Events) when someone rings. Check the FCM listener heartbeat in logs (`firebase_messaging` lines every ~20 s). Make sure your HomeKit Bridge accessory is paired and the `linked_doorbell_sensor` is set.
+### Testing without a visitor: `intratone.simulate_ring`
+
+The integration registers an `intratone.simulate_ring` service (Developer Tools → Actions) that injects a fake FCM ring payload into the coordinator, as if a visitor had pressed the button. By default it only fires the doorbell event (the fake `call_id` means the in-call door unlock would be rejected by the server). If you also set `sip_server_ip`, the **full call pipeline** fires — SIP INVITE → RTP → ffmpeg → go2rtc → HomeKit — which is designed for end-to-end testing against [`dev/mock_asterisk.py`](dev/mock_asterisk.py), a tiny mock SIP server that answers the INVITE and streams a 440 Hz sine over G.711 µ-law.
+
+Main fields:
+
+- `door_name` — human label carried in the event payload (default `PORTE TEST`)
+- `call_id` — override the generated fake call id, for repeatable tests
+- `entry_id` — target a specific config entry (defaults to all loaded entries)
+- `sip_server_ip` — when set, triggers the real SIP flow against this IP (use `127.0.0.1` with the mock)
+- `sip_target_user`, `sip_user`, `sip_pass` — SIP Request-URI user and Digest credentials for the mock flow
+
+> The default SIP credentials in the schema (`cogelecTest` / `CogeleC`) are test values matching `dev/mock_asterisk.py` — they are not real Intratone credentials.
+
+**Ring doesn't reach iPhone** — verify `event.intratone_<ID>_doorbell` fires in HA (Developer Tools → Events) when someone rings. Check the FCM listener heartbeat in logs (`firebase_messaging` lines every ~20 s). Make sure your HomeKit Bridge accessory is paired and the `linked_doorbell_sensor` is set. If rings **silently stopped after working fine**, Google may have rotated HA's FCM push token — Intratone keeps sending pushes to the old one. The integration detects this and raises a fixable Repair (**Settings → System → Repairs**) that asks for a fresh invitation code to re-register the new token.
 
 **Tile opens but loading spinner forever** — go2rtc must be running with the `intratone` slot declared. Look for `FFMPEG_PUSH_READY: ... consumable` in HA logs (the marker confirming our ffmpeg pushed successfully); if absent, enable `custom_components.intratone: debug` and look for ffmpeg errors.
 
