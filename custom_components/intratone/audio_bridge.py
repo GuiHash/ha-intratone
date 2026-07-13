@@ -1587,6 +1587,16 @@ class AudioBridge:
             # output (acceptable on localhost relay).
             "-g",
             "10",
+            # The VP8-over-RTP input carries no framerate; ffmpeg infers it
+            # from the 90 kHz RTP clock and reads the stream as 90 000 fps.
+            # With the muxer's default constant-frame-rate sync, libx264 then
+            # duplicates every real frame hundreds of thousands of times to
+            # hit that phantom rate (dup=200k+, speed≈0.05x), so the output
+            # falls ever further behind wall clock and HomeKit freezes after
+            # the first decoded frame. `passthrough` keeps each frame's real
+            # arrival timestamp and emits no duplicates.
+            "-fps_mode:v",
+            "passthrough",
             "-rtsp_transport",
             "tcp",
             "-f",
