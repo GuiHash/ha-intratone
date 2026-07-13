@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.3](https://github.com/GuiHash/ha-intratone/compare/v0.9.2...v0.9.3) (2026-07-13)
+
+
+### Bug Fixes
+
+* **config-flow:** shorten truncated onboarding menu labels ([#96](https://github.com/GuiHash/ha-intratone/issues/96)) ([cc6818b](https://github.com/GuiHash/ha-intratone/commit/cc6818bb43ed28dc6591f9cbf63c4120f499c408))
+
 ## [0.9.2](https://github.com/GuiHash/ha-intratone/compare/v0.9.1...v0.9.2) (2026-07-13)
 
 
