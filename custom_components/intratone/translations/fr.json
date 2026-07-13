@@ -3,10 +3,10 @@
     "step": {
       "user": {
         "title": "Coupler votre appartement Intratone",
-        "description": "Choisissez comment vous authentifier.",
+        "description": "Choisissez comment vous authentifier.\n\n- **Code d'invitation** (recommandé) : requis pour l'ouverture à distance (CléMobil).\n- **Code par SMS** : interphone uniquement — l'ouverture à distance / CléMobil n'est pas disponible ainsi.",
         "menu_options": {
-          "phone": "Code par SMS — interphone uniquement (l'ouverture à distance / CléMobil n'est PAS disponible ainsi)",
-          "invite": "Code d'invitation depuis l'appli — recommandé ; requis pour l'ouverture à distance (CléMobil)"
+          "phone": "Code par SMS",
+          "invite": "Code d'invitation (recommandé)"
         }
       },
       "phone": {

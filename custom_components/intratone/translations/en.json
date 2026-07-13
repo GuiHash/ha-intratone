@@ -3,10 +3,10 @@
     "step": {
       "user": {
         "title": "Pair with your Intratone apartment",
-        "description": "Pick how to authenticate.",
+        "description": "Pick how to authenticate.\n\n- **Invitation code** (recommended): required for remote door opening (CléMobil).\n- **SMS code**: doorbell only — remote door opening / CléMobil is not available this way.",
         "menu_options": {
-          "phone": "SMS code — doorbell only (remote door opening / CléMobil is NOT available this way)",
-          "invite": "Invitation code from the app — recommended; required for remote door opening (CléMobil)"
+          "phone": "SMS code",
+          "invite": "Invitation code (recommended)"
         }
       },
       "phone": {
