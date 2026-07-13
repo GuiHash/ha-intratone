@@ -150,7 +150,7 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
         """Initial pairing — let the user pick SMS or installer invite code."""
         return self.async_show_menu(
             step_id="user",
-            menu_options=["phone", "invite"],
+            menu_options=["invite", "phone"],
         )
 
     async def async_step_invite(
