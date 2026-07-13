@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.2](https://github.com/GuiHash/ha-intratone/compare/v0.9.1...v0.9.2) (2026-07-13)
+
+
+### Bug Fixes
+
+* **intratone:** stop HomeKit video freeze after first frame ([#95](https://github.com/GuiHash/ha-intratone/issues/95)) ([37dae47](https://github.com/GuiHash/ha-intratone/commit/37dae471da86579b244fa7c6f3136009e93945f9))
+* **intratone:** surface backlight failure as an error toast ([#93](https://github.com/GuiHash/ha-intratone/issues/93)) ([37cd657](https://github.com/GuiHash/ha-intratone/commit/37cd6578d18215104ba4d28c1b45053e819419e5))
+
 ## [0.9.1](https://github.com/GuiHash/ha-intratone/compare/v0.9.0...v0.9.1) (2026-07-12)
 
 
