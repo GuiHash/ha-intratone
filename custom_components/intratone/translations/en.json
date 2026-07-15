@@ -144,7 +144,7 @@
     },
     "go2rtc_unreachable": {
       "title": "go2rtc relay unreachable",
-      "description": "The Intratone stream could not be published to go2rtc at `{url}`. HomeKit will show an endless loading spinner on the camera until this is fixed.\n\nCheck that your standalone go2rtc instance is running and that the *go2rtc RTSP relay URL* in the integration options is correct, then use the *Test go2rtc relay* button (or answer the next call) to re-check."
+      "description": "The Intratone stream could not be published to go2rtc at `{url}`. Camera viewers (HomeKit, HA frontend, Companion apps) will show an endless loading spinner or an error until this is fixed.\n\nCheck that your standalone go2rtc instance is running and that the *go2rtc RTSP relay URL* in the integration options is correct, then use the *Test go2rtc relay* button (or answer the next call) to re-check."
     }
   },
   "options": {
@@ -157,7 +157,7 @@
         },
         "data_description": {
           "video_enabled": "Negotiates VP8 video with the Intratone gateway and forwards it to go2rtc. When off, the camera and backlight entities are not created.",
-          "go2rtc_url": "RTSP URL where go2rtc listens. Default: rtsp://127.0.0.1:8554. HA's embedded go2rtc can't accept this stream — run a standalone go2rtc instance instead."
+          "go2rtc_url": "RTSP URL where go2rtc listens. Default: rtsp://127.0.0.1:8554. HA's embedded go2rtc can't accept this stream — run a standalone go2rtc instance instead. This URL is also handed to HA's stream/WebRTC pipeline as the camera source, so it must be reachable from wherever HA's own go2rtc runs (the 127.0.0.1 default is correct for same-host setups)."
         }
       }
     },

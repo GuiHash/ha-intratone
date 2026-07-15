@@ -25,6 +25,13 @@ logger:
     homeassistant.components.ffmpeg: debug
     custom_components.intratone: debug
 
+# Native HA / Companion viewing (WebRTC). Required on HA Core (non-docker):
+# points HA's go2rtc integration at the standalone go2rtc's HTTP API so it
+# can pull the intratone stream and serve WebRTC to the frontend.
+# dev/go2rtc-prod.yaml already listens on 127.0.0.1:1984.
+# go2rtc:
+#   url: "http://127.0.0.1:1984"
+
 camera:
   - platform: ffmpeg
     name: fake_doorbell

@@ -18,10 +18,10 @@ After pairing, the integration creates these entities under one device:
 | `binary_sensor.intratone_<ID>_push_channel_connected` | Diagnostic — `on` while the FCM push channel is up. If it goes `off`, you won't be notified of rings. |
 | `button.intratone_<ID>_test_go2rtc_relay` | Diagnostic — publishes a short synthetic stream to go2rtc and reads it back, validating the exact path a real call uses. Raises/clears a repair issue with the result. **Only created when the *Enable video (VP8)* option is on.** Refuses to run during an active call. |
 
-Exposed to HomeKit via HA's HomeKit Bridge, the camera tile on iPhone Home.app delivers:
+The camera plays in the HA frontend, the [HA Companion apps (iOS & Android)](#viewing-in-home-assistant--the-companion-apps) and — via HA's HomeKit Bridge — on the iPhone Home.app camera tile:
 
-- Doorbell push notification < 2 s after a visitor rings (FCM)
-- One-way audio (visitor → iPhone): G.711 µ-law transcoded to Opus on the fly
+- Doorbell push notification < 2 s after a visitor rings (FCM) — native on HomeKit, [one blueprint import](#doorbell-notification-on-your-phone) on the Companion apps
+- One-way audio (visitor → phone): G.711 µ-law transcoded to Opus on the fly
 - Video (VP8 → H.264 baseline transcoding) — **opt-in** via the integration options (⚙️). Enable only if your Intratone subscription includes the visiophone (intercom with actual camera).
 - Lock tile to open the door
 
@@ -29,12 +29,13 @@ Exposed to HomeKit via HA's HomeKit Bridge, the camera tile on iPhone Home.app d
 
 ```mermaid
 flowchart TD
-    A[Visitor presses intercom] -->|FCM push ~1 s| B[HA doorbell event\niPhone push notification]
+    A[Visitor presses intercom] -->|FCM push ~1 s| B[HA doorbell event\nphone push notification]
     B -->|user taps tile| C[HA: SIP INVITE → 200 OK + SDP]
     C --> D[Intratone server\nRTP µ-law audio + VP8 video]
     D -->|audio_bridge.py\nSTUN-respond · depacket RTP| E[ffmpeg\nµ-law → Opus 16k mono\nVP8 → H.264 baseline]
     E -->|RTSP push| F[go2rtc]
     F -->|HomeKit Bridge| G[SRTP → iPhone Home.app]
+    F -->|HA go2rtc integration| H[WebRTC / HLS →\nHA frontend & Companion apps]
 ```
 
 The FCM listener stays connected for the lifetime of the integration and reconnects with exponential backoff on failure. The SIP dialog opens only when the user actually taps the camera tile or the lock — mirrors the Cogelec app, which doesn't dial until you tap *Pick Up*. See [`INTRATONE_API.md`](INTRATONE_API.md) for the full REST + SIP reverse-engineering notes.
@@ -50,7 +51,7 @@ The integration also reacts to two additional FCM push types Cogelec emits:
 - **Audio quality**: bounded by G.711 µ-law @ 8 kHz (Intratone's wire codec). Some accounts receive only comfort-noise µ-law from the server during a call rather than the real microphone stream — same behaviour observed on the official Intratone iOS app for those accounts, only the GSM fallback carries real audio. Not a bug in this integration; it's a server / account-side condition.
 - **Video quality**: bitrate is set by the intercom hardware (~5-10 kbps observed, ~2–5 fps). Equivalent quality to the official app — there's no client-side knob to request higher quality.
 - **Video startup delay**: The Intratone server schedules VP8 keyframes infrequently. After tapping the HomeKit tile, expect a **5–15 second black screen** before video appears. This is not a bug — ffmpeg can't start encoding until it receives an I-frame from the server. If no video appears after ~20 s, see [Troubleshooting](#troubleshooting).
-- **Camera entity is HomeKit-only**: `camera.intratone_<ID>_intercom` only delivers live video through the HomeKit + go2rtc path. Adding it to a Lovelace card or viewing it in Developer Tools → States will show "does not support play stream service" — this is expected.
+- **Live view only during a call**: the camera streams from the moment a visitor rings until ~60 s after the call ends. Tapping the tile outside that window shows the placeholder (HomeKit) or a "no stream" error (HA frontend) — there's no on-demand view, the intercom only streams during calls.
 - **France only**: tested against `sip.intratone.info`. Other Cogelec deployments untested.
 - **Both devices ring in parallel.** The official Intratone app on your phone continues to receive rings alongside HA. Whichever device opens first triggers the relay; the other still rings.
 - **The *Clé mobile* remote-open key is single-owner (since ~mid-2026).** Only one device per phone number can hold it, so the on-demand access locks live on either your phone **or** HA — not both. Ringing and in-call door unlock are unaffected. See [Transferring the *Clé mobile* to Home Assistant](#transferring-the-clé-mobile-to-home-assistant).
@@ -111,7 +112,69 @@ If your go2rtc isn't on `127.0.0.1:8554`, change the **go2rtc RTSP relay URL** i
 
 ### Note on HA's embedded go2rtc (since 2024.x)
 
-HA Core ships a bundled go2rtc binary that auto-starts in Docker / HA OS environments on port `18554`. Its config is HA-managed and **doesn't accept user `streams:` declarations**, so it can't accept our RTSP publish today. Use one of the options above instead.
+HA Core ships a bundled go2rtc binary that auto-starts in Docker / HA OS environments on port `18554`. Its config is HA-managed and **doesn't accept user `streams:` declarations**, so it can't accept our RTSP publish — the standalone instance above stays required. The embedded go2rtc has a different role: it's the **pull/viewer side** of [native HA viewing](#viewing-in-home-assistant--the-companion-apps) — it pulls the stream from your standalone instance and serves WebRTC to the HA frontend.
+
+## Viewing in Home Assistant & the Companion apps
+
+Besides HomeKit, the camera plays natively in the HA frontend: Lovelace cards, the more-info dialog, and the **HA Companion apps (iOS & Android)** — via WebRTC (sub-second) with an HLS fallback (~5 s latency). Same semantics as HomeKit: **tapping the camera answers the call** (marks it picked up at Intratone and opens the SIP audio/video stream), and outside a ring the tile shows the placeholder image.
+
+How it works: HA core's own go2rtc integration acts as the WebRTC provider — it pulls the RTSP stream this integration publishes to your standalone go2rtc, and serves it to the frontend. Two supported layouts:
+
+| Layout | Config needed | go2rtc instances |
+|---|---|---|
+| **HA OS / Container (default)** | none — HA's embedded go2rtc auto-starts and pulls from your standalone instance | 2 |
+| **Single instance** | point HA at your existing standalone go2rtc in `configuration.yaml` (below) | 1 |
+
+```yaml
+# configuration.yaml — single-instance layout, and REQUIRED for WebRTC on HA Core (venv/pip)
+go2rtc:
+  url: "http://127.0.0.1:1984"   # HTTP API of the same go2rtc the integration publishes to
+```
+
+The AlexxIT add-on and Frigate both expose the go2rtc HTTP API on port `1984`. Without a reachable go2rtc for HA (e.g. HA Core without the `go2rtc:` block), the camera still plays over HLS.
+
+Notes:
+
+- **Tapping the tile at idle** (nobody ringing) shows an immediate "no stream" error — there's no video to show outside a call, by design.
+- **Do not use `camera_view: live` cards or stream preload** with this camera. A wall panel in live mode would auto-answer every ring the moment the visitor presses the button. Keep the default `camera_view: auto` — the tile shows the placeholder image and only starts the stream when tapped.
+- Remote access through Nabu Casa may fall back to HLS depending on WebRTC connectivity.
+- The 5–15 s video start-up delay (VP8 keyframe scheduling, see [Caveats](#caveats)) applies to every client — HomeKit, Companion, Lovelace alike.
+
+### Doorbell notification on your phone
+
+HomeKit pushes doorbell notifications on its own; on the Companion apps it's one automation. Import the ready-made blueprint:
+
+[![Open your Home Assistant instance and show the blueprint import dialog with a specific blueprint pre-filled.](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2FGuiHash%2Fha-intratone%2Fblob%2Fmain%2Fblueprints%2Fautomation%2Fintratone%2Fdoorbell_notification.yaml)
+
+Pick your doorbell event entity and your phone, then optionally:
+
+- **Camera** — tapping the notification opens its live view (which answers the call, like picking up).
+- **Door lock** — adds an **"Open door" action button** to the notification (on iOS, long-press to reveal it): unlock straight from the notification, without opening the camera. Works with the intercom door lock (during the call window) or a *Clé mobile* access lock (any time).
+- **Critical** — rings through silent mode (the ring window is only ~25 s).
+
+The notification itself never answers the call; only opening the camera view answers it (and *Open door* on the intercom door lock dials just long enough to send the unlock — a *Clé mobile* lock opens without any call).
+
+Prefer an explicit automation? The equivalent YAML:
+
+```yaml
+automation:
+  - alias: "Intratone — doorbell notification"
+    triggers:
+      - trigger: state
+        entity_id: event.intratone_XXXX_doorbell
+        not_from: ["unknown", "unavailable"]
+    actions:
+      - action: notify.mobile_app_your_phone
+        data:
+          title: "Intratone"
+          message: >-
+            {% set door = state_attr(trigger.entity_id, 'door_name') %}
+            {{ 'Someone is ringing at ' ~ door if door else 'Someone is ringing at the door' }}
+          data:
+            # Tap → camera live view in Companion = answer the call
+            clickAction: entityId:camera.intratone_XXXX_intercom  # Android
+            url: entityId:camera.intratone_XXXX_intercom          # iOS
+```
 
 ## Installation
 

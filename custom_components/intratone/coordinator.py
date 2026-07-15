@@ -249,6 +249,11 @@ class IntratoneCoordinator(DataUpdateCoordinator[CallState | None]):
         # Fire the HomeKit doorbell event (ring on iPhone).
         self.async_set_updated_data(state)
 
+    @property
+    def relay_rtsp_url(self) -> str | None:
+        """Static go2rtc URL the bridge publishes to (known call or no call)."""
+        return self._call_manager.relay_rtsp_url if self._call_manager else None
+
     async def async_ensure_call_started(self) -> bool:
         """Trigger the SIP INVITE on first user interaction (live view or
         unlock tap). Idempotent: subsequent calls within the same ring just
