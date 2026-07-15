@@ -144,7 +144,7 @@
     },
     "go2rtc_unreachable": {
       "title": "Relais go2rtc injoignable",
-      "description": "Le flux Intratone n'a pas pu être publié vers go2rtc à `{url}`. HomeKit affichera un chargement infini sur la caméra tant que ce n'est pas corrigé.\n\nVérifiez que votre instance go2rtc autonome tourne et que l'*URL RTSP du relais go2rtc* dans les options de l'intégration est correcte, puis utilisez le bouton *Tester le relais go2rtc* (ou répondez au prochain appel) pour revérifier."
+      "description": "Le flux Intratone n'a pas pu être publié vers go2rtc à `{url}`. Les visionneuses de la caméra (HomeKit, interface HA, applications Companion) afficheront un chargement infini ou une erreur tant que ce n'est pas corrigé.\n\nVérifiez que votre instance go2rtc autonome tourne et que l'*URL RTSP du relais go2rtc* dans les options de l'intégration est correcte, puis utilisez le bouton *Tester le relais go2rtc* (ou répondez au prochain appel) pour revérifier."
     }
   },
   "options": {
@@ -157,7 +157,7 @@
         },
         "data_description": {
           "video_enabled": "Négocie la vidéo VP8 avec la passerelle Intratone et la transmet à go2rtc. Désactivée, les entités caméra et rétroéclairage ne sont pas créées.",
-          "go2rtc_url": "URL RTSP sur laquelle go2rtc écoute. Par défaut : rtsp://127.0.0.1:8554. Le go2rtc intégré à HA ne peut pas accepter ce flux — utilisez plutôt une instance go2rtc autonome."
+          "go2rtc_url": "URL RTSP sur laquelle go2rtc écoute. Par défaut : rtsp://127.0.0.1:8554. Le go2rtc intégré à HA ne peut pas accepter ce flux — utilisez plutôt une instance go2rtc autonome. Cette URL est aussi transmise au pipeline stream/WebRTC de HA comme source de la caméra : elle doit être joignable depuis l'endroit où tourne le go2rtc de HA (le 127.0.0.1 par défaut convient aux installations sur un même hôte)."
         }
       }
     },

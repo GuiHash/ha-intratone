@@ -1,0 +1,130 @@
+blueprint:
+  name: Intratone doorbell notification
+  description: >-
+    Send a notification to a Home Assistant Companion app device when the
+    Intratone intercom rings. The notification itself never answers the
+    call — tapping it opens the camera live view, and THAT answers (picks
+    up), exactly like the official app. An optional "Open door" action
+    button unlocks a chosen lock straight from the notification.
+  domain: automation
+  source_url: https://github.com/GuiHash/ha-intratone/blob/main/blueprints/automation/intratone/doorbell_notification.yaml
+  input:
+    doorbell_event:
+      name: Doorbell event entity
+      description: The Intratone doorbell event entity (event.intratone_…_doorbell).
+      selector:
+        entity:
+          filter:
+            integration: intratone
+            domain: event
+    notify_device:
+      name: Device to notify
+      description: A phone or tablet running the Home Assistant Companion app.
+      selector:
+        device:
+          filter:
+            integration: mobile_app
+    camera_entity:
+      name: Camera (optional)
+      description: >-
+        Intratone camera entity. Tapping the notification opens its live
+        view in the Companion app — which answers the call, like picking
+        up. Leave empty if video is disabled.
+      default: ""
+      selector:
+        entity:
+          filter:
+            integration: intratone
+            domain: camera
+    door_lock:
+      name: Door lock (optional)
+      description: >-
+        Adds an "Open door" action button to the notification (on iOS,
+        long-press the notification to reveal it). The intercom door lock
+        only works during the call window (~25 s); a Clé mobile access
+        lock works any time. Leave empty for no button.
+      default: ""
+      selector:
+        entity:
+          filter:
+            integration: intratone
+            domain: lock
+    critical:
+      name: Critical notification
+      description: >-
+        Ring through silent/Do-Not-Disturb mode (iOS critical alert /
+        Android high priority). The ring window is only ~25 seconds, so
+        being heard immediately matters.
+      default: false
+      selector:
+        boolean:
+
+# restart: a new ring supersedes the previous one (fresh notification,
+# fresh wait for the "Open door" button press).
+mode: restart
+max_exceeded: silent
+
+triggers:
+  - trigger: state
+    entity_id: !input doorbell_event
+    not_from:
+      - unknown
+      - unavailable
+
+variables:
+  camera_entity: !input camera_entity
+  door_lock: !input door_lock
+  critical: !input critical
+  # Unique per lock so two instances of this blueprint can't unlock each
+  # other's door.
+  unlock_action: >-
+    {{ 'INTRATONE_UNLOCK_' ~ door_lock | replace('.', '_') | upper if door_lock else '' }}
+
+actions:
+  - domain: mobile_app
+    type: notify
+    device_id: !input notify_device
+    title: Intratone
+    message: >-
+      {% set door = state_attr(trigger.entity_id, 'door_name') %}
+      {{ 'Someone is ringing at ' ~ door if door else 'Someone is ringing at the door' }}
+    data: >-
+      {% set data = {} %}
+      {% if camera_entity %}
+        {% set data = dict(data,
+          clickAction='entityId:' ~ camera_entity,
+          url='entityId:' ~ camera_entity) %}
+      {% endif %}
+      {% if door_lock %}
+        {% set data = dict(data,
+          actions=[{'action': unlock_action, 'title': 'Open door'}]) %}
+      {% endif %}
+      {% if critical %}
+        {% set data = dict(data,
+          push={'sound': {'name': 'default', 'critical': 1, 'volume': 1.0}},
+          priority='high',
+          ttl=0,
+          channel='alarm_stream') %}
+      {% endif %}
+      {{ data }}
+  - if:
+      - condition: template
+        value_template: "{{ door_lock != '' }}"
+    then:
+      # Wait for the "Open door" button. 120 s covers the max call
+      # duration; pressing the button later does nothing (timeout).
+      - wait_for_trigger:
+          - trigger: event
+            event_type: mobile_app_notification_action
+            event_data:
+              action: "{{ unlock_action }}"
+        timeout:
+          seconds: 120
+        continue_on_timeout: true
+      - if:
+          - condition: template
+            value_template: "{{ wait.trigger is not none }}"
+        then:
+          - action: lock.unlock
+            target:
+              entity_id: !input door_lock

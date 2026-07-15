@@ -92,6 +92,16 @@ async def test_handle_push_type_24_alternative_format(coordinator) -> None:
     assert coordinator._pending.target_uri == "sip:TARGET@sip.intratone.info"
 
 
+async def test_relay_rtsp_url_delegates_to_call_manager(coordinator_with_cm) -> None:
+    coordinator, cm = coordinator_with_cm
+    cm.relay_rtsp_url = "rtsp://127.0.0.1:8554/intratone"
+    assert coordinator.relay_rtsp_url == "rtsp://127.0.0.1:8554/intratone"
+
+
+async def test_relay_rtsp_url_none_without_call_manager(coordinator) -> None:
+    assert coordinator.relay_rtsp_url is None
+
+
 async def test_open_door_with_no_call_returns_false(coordinator) -> None:
     assert await coordinator.async_open_door() is False
     coordinator.api.answer_call.assert_not_awaited()
