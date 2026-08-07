@@ -28,7 +28,9 @@ async def async_setup_entry(
 ) -> None:
     runtime = entry.runtime_data
     async_add_entities(
-        [IntratoneFcmConnectedSensor(runtime.coordinator, runtime.fcm)]
+        [IntratoneFcmConnectedSensor(runtime.coordinator, runtime.fcm),
+         IntratoneCallActiveSensor(runtime.coordinator),
+        ]
     )
 
 
@@ -62,3 +64,19 @@ class IntratoneFcmConnectedSensor(IntratoneEntity, BinarySensorEntity):
     def _on_state(self, connected: bool) -> None:
         self._attr_is_on = connected
         self.async_write_ha_state()
+
+class IntratoneCallActiveSensor(IntratoneEntity, BinarySensorEntity):
+    """`on` tant qu'un appel SIP est actif (bridge audio monté).
+    Pilote le badge sur le dashboard : passe à `off` quand l'appel se
+    termine (raccroché, timeout, ou le visiteur est parti)."""
+
+    _attr_name = "Appel en cours"
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.entry.entry_id}_call_active"
+
+    @property
+    def is_on(self) -> bool:
+        data = self.coordinator.data
+        return data is not None and data.stream_url is not None
