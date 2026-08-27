@@ -38,6 +38,8 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
+from homeassistant.core import HomeAssistant
+
 from .stun import build_binding_response, is_stun_binding_request
 
 _LOGGER = logging.getLogger(__name__)
@@ -657,6 +659,26 @@ class _PrewarmedFfmpeg:
     sdp_path: str | None
 
 
+def _write_sdp_file(sdp: str) -> str:
+    """Blocking: write `sdp` to a temp file, return its path.
+
+    Called via the executor — this sits in the call setup path, so on an
+    installation with slow storage doing it inline would stall the event
+    loop at the exact moment a doorbell call is being answered."""
+    fd, path = tempfile.mkstemp(prefix="intratone-video-", suffix=".sdp")
+    with os.fdopen(fd, "w") as f:
+        f.write(sdp)
+    return path
+
+
+def _unlink_sdp_file(path: str) -> None:
+    """Blocking: best-effort delete of a temp SDP file. Executor-only."""
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
 def _pick_free_udp_port() -> int:
     """Bind UDP(127.0.0.1, 0), return the assigned port, release.
 
@@ -676,11 +698,14 @@ class AudioBridge:
 
     def __init__(
         self,
+        hass: HomeAssistant,
         ffmpeg_binary: str = "ffmpeg",
         rtsp_path: str = "intratone",
         rtsp_relay_url: str = "rtsp://127.0.0.1:8554",
         on_relay_status: Callable[[bool], None] | None = None,
     ) -> None:
+        # Only used to run the temp SDP file I/O off the event loop.
+        self._hass = hass
         self._ffmpeg_binary = ffmpeg_binary
         self._rtsp_path = rtsp_path
         # Sync callback fired once per start() with the outcome of the push
@@ -767,16 +792,13 @@ class AudioBridge:
         sdp_path: str | None = None
         if video:
             video_port = _pick_free_udp_port()
-            sdp_path = self._write_video_sdp(video_port)
+            sdp_path = await self._async_write_video_sdp(video_port)
         push_ready = asyncio.Event()
         try:
             process = await self._spawn_ffmpeg(video_sdp_path=sdp_path)
         except Exception:
             if sdp_path is not None:
-                try:
-                    os.unlink(sdp_path)
-                except OSError:
-                    pass
+                await self._hass.async_add_executor_job(_unlink_sdp_file, sdp_path)
             raise
         stderr_task = asyncio.create_task(self._drain_stderr(process, push_ready))
         _LOGGER.debug("FFMPEG_PREWARM: spawned (video=%s)", video)
@@ -856,10 +878,9 @@ class AudioBridge:
         if not prewarmed.stderr_task.done():
             prewarmed.stderr_task.cancel()
         if prewarmed.sdp_path is not None:
-            try:
-                os.unlink(prewarmed.sdp_path)
-            except OSError:
-                pass
+            await self._hass.async_add_executor_job(
+                _unlink_sdp_file, prewarmed.sdp_path
+            )
 
     async def start(
         self,
@@ -969,7 +990,9 @@ class AudioBridge:
                 await self._discard_prewarm(prewarmed)
             if video_enabled:
                 ffmpeg_video_port = _pick_free_udp_port()
-                self._video_sdp_path = self._write_video_sdp(ffmpeg_video_port)
+                self._video_sdp_path = await self._async_write_video_sdp(
+                    ffmpeg_video_port
+                )
             self._ffmpeg_push_ready = asyncio.Event()
             self._process = await self._spawn_ffmpeg(
                 video_sdp_path=self._video_sdp_path
@@ -1287,7 +1310,7 @@ class AudioBridge:
         except Exception:  # noqa: BLE001
             _LOGGER.exception("PLI_LOOP crashed")
 
-    def _write_video_sdp(self, ffmpeg_listen_port: int) -> str:
+    async def _async_write_video_sdp(self, ffmpeg_listen_port: int) -> str:
         """Write a minimal SDP describing the VP8 RTP stream we feed ffmpeg.
 
         ffmpeg uses this to know how to demux the loopback UDP packets we push
@@ -1301,21 +1324,18 @@ class AudioBridge:
             f"m=video {ffmpeg_listen_port} RTP/AVP 96\r\n"
             "a=rtpmap:96 VP8/90000\r\n"
         )
-        fd, path = tempfile.mkstemp(prefix="intratone-video-", suffix=".sdp")
-        with os.fdopen(fd, "w") as f:
-            f.write(sdp)
+        path = await self._hass.async_add_executor_job(_write_sdp_file, sdp)
         _LOGGER.debug(
             "VIDEO_SDP_FILE: wrote %s for ffmpeg input — listens on 127.0.0.1:%d for VP8",
             path, ffmpeg_listen_port,
         )
         return path
 
-    def _cleanup_video_sdp(self) -> None:
+    async def _async_cleanup_video_sdp(self) -> None:
         if self._video_sdp_path is not None:
-            try:
-                os.unlink(self._video_sdp_path)
-            except OSError:
-                pass
+            await self._hass.async_add_executor_job(
+                _unlink_sdp_file, self._video_sdp_path
+            )
             self._video_sdp_path = None
 
     async def stop(self) -> None:
@@ -1384,7 +1404,7 @@ class AudioBridge:
             video_rtcp.close()
         if video_rtcp_transport is not None and not video_rtcp_transport.is_closing():
             video_rtcp_transport.close()
-        self._cleanup_video_sdp()
+        await self._async_cleanup_video_sdp()
 
         if process is not None and process.returncode is None:
             if process.stdin is not None and not process.stdin.is_closing():
@@ -1457,7 +1477,7 @@ class AudioBridge:
                 except OSError:
                     pass
         await self._kill_ffmpeg_now()
-        self._cleanup_video_sdp()
+        await self._async_cleanup_video_sdp()
         self._ffmpeg_push_ready = None
 
     async def _kill_ffmpeg_now(self) -> None:

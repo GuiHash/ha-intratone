@@ -10,6 +10,7 @@ import asyncio
 import os
 import signal
 import struct
+import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -222,8 +223,8 @@ def fake_datagram_endpoint():
         yield transport
 
 
-async def test_start_returns_rtsp_url(mock_subprocess, fake_datagram_endpoint):
-    bridge = AudioBridge(rtsp_relay_url="rtsp://127.0.0.1:8554", rtsp_path="intratone")
+async def test_start_returns_rtsp_url(hass, mock_subprocess, fake_datagram_endpoint):
+    bridge = AudioBridge(hass, rtsp_relay_url="rtsp://127.0.0.1:8554", rtsp_path="intratone")
     url = await bridge.start(
         rtp_socket=_fake_rtp_socket(16384),
         remote_rtp_ip="178.32.84.135",
@@ -235,9 +236,10 @@ async def test_start_returns_rtsp_url(mock_subprocess, fake_datagram_endpoint):
 
 
 async def test_start_spawns_ffmpeg_with_mulaw_stdin_input(
+    hass,
     mock_subprocess, fake_datagram_endpoint
 ):
-    bridge = AudioBridge(ffmpeg_binary="ffmpeg")
+    bridge = AudioBridge(hass, ffmpeg_binary="ffmpeg")
     await bridge.start(
         rtp_socket=_fake_rtp_socket(16384),
         remote_rtp_ip="178.32.84.135",
@@ -261,8 +263,8 @@ async def test_start_spawns_ffmpeg_with_mulaw_stdin_input(
     await bridge.stop()
 
 
-async def test_start_is_idempotent(mock_subprocess, fake_datagram_endpoint):
-    bridge = AudioBridge()
+async def test_start_is_idempotent(hass, mock_subprocess, fake_datagram_endpoint):
+    bridge = AudioBridge(hass)
     await bridge.start(
         rtp_socket=_fake_rtp_socket(16384),
         remote_rtp_ip="178.32.84.135",
@@ -278,12 +280,13 @@ async def test_start_is_idempotent(mock_subprocess, fake_datagram_endpoint):
 
 
 async def test_relay_status_reported_true_on_push_success(
+    hass,
     mock_subprocess, fake_datagram_endpoint
 ):
     """A successful ANNOUNCE to go2rtc fires on_relay_status(True) so the
     integration can clear a previously raised relay repair issue."""
     statuses: list[bool] = []
-    bridge = AudioBridge(on_relay_status=statuses.append)
+    bridge = AudioBridge(hass, on_relay_status=statuses.append)
     await bridge.start(
         rtp_socket=_fake_rtp_socket(16384),
         remote_rtp_ip="178.32.84.135",
@@ -294,6 +297,7 @@ async def test_relay_status_reported_true_on_push_success(
 
 
 async def test_relay_status_reported_false_when_ffmpeg_dies_before_push(
+    hass,
     mock_subprocess, fake_process, fake_datagram_endpoint
 ):
     """go2rtc down → ffmpeg exits before emitting the push marker →
@@ -306,7 +310,7 @@ async def test_relay_status_reported_false_when_ffmpeg_dies_before_push(
     fake_process.returncode = 1
 
     statuses: list[bool] = []
-    bridge = AudioBridge(on_relay_status=statuses.append)
+    bridge = AudioBridge(hass, on_relay_status=statuses.append)
     with patch.object(bridge_mod, "_FFMPEG_PUSH_READY_TIMEOUT_S", 0.05):
         await bridge.start(
             rtp_socket=_fake_rtp_socket(16384),
@@ -318,9 +322,10 @@ async def test_relay_status_reported_false_when_ffmpeg_dies_before_push(
 
 
 async def test_received_rtp_forwards_ulaw_to_ffmpeg_stdin(
+    hass,
     mock_subprocess, fake_process, fake_datagram_endpoint
 ):
-    bridge = AudioBridge()
+    bridge = AudioBridge(hass)
     await bridge.start(
         rtp_socket=_fake_rtp_socket(16384),
         remote_rtp_ip="178.32.84.135",
@@ -339,9 +344,10 @@ async def test_received_rtp_forwards_ulaw_to_ffmpeg_stdin(
 
 
 async def test_stop_sends_sigterm_and_closes_socket(
+    hass,
     mock_subprocess, fake_process, fake_datagram_endpoint
 ):
-    bridge = AudioBridge()
+    bridge = AudioBridge(hass)
     await bridge.start(
         rtp_socket=_fake_rtp_socket(16384),
         remote_rtp_ip="178.32.84.135",
@@ -359,9 +365,10 @@ async def test_stop_sends_sigterm_and_closes_socket(
 
 
 async def test_stop_kills_if_ffmpeg_hangs(
+    hass,
     mock_subprocess, fake_process, fake_datagram_endpoint
 ):
-    bridge = AudioBridge()
+    bridge = AudioBridge(hass)
     await bridge.start(
         rtp_socket=_fake_rtp_socket(16384),
         remote_rtp_ip="178.32.84.135",
@@ -385,16 +392,17 @@ async def test_stop_kills_if_ffmpeg_hangs(
     fake_process.kill.assert_called_once()
 
 
-async def test_stop_safe_when_never_started():
-    bridge = AudioBridge()
+async def test_stop_safe_when_never_started(hass):
+    bridge = AudioBridge(hass)
     await bridge.stop()  # must not raise
     assert not bridge.is_running
 
 
 async def test_stop_safe_when_called_twice(
+    hass,
     mock_subprocess, fake_process, fake_datagram_endpoint
 ):
-    bridge = AudioBridge()
+    bridge = AudioBridge(hass)
     await bridge.start(
         rtp_socket=_fake_rtp_socket(16384),
         remote_rtp_ip="178.32.84.135",
@@ -405,13 +413,13 @@ async def test_stop_safe_when_called_twice(
     assert fake_process.send_signal.call_count == 1
 
 
-async def test_bind_failure_kills_ffmpeg(mock_subprocess, fake_process):
+async def test_bind_failure_kills_ffmpeg(hass, mock_subprocess, fake_process):
     """If the RTP bind fails, the ffmpeg subprocess must not be orphaned."""
 
     async def _create_fails(_protocol_factory, **_kwargs):
         raise OSError("Address already in use")
 
-    bridge = AudioBridge()
+    bridge = AudioBridge(hass)
     loop = asyncio.get_event_loop()
     rtp_sock = _fake_rtp_socket(16384)
     with patch.object(loop, "create_datagram_endpoint", side_effect=_create_fails):
@@ -428,6 +436,7 @@ async def test_bind_failure_kills_ffmpeg(mock_subprocess, fake_process):
 
 
 async def test_stderr_is_drained_to_logger(
+    hass,
     mock_subprocess, fake_process, fake_datagram_endpoint, caplog
 ):
     """ffmpeg stderr is read line-by-line and logged so the pipe never fills.
@@ -442,7 +451,7 @@ async def test_stderr_is_drained_to_logger(
     )
     fake_process.stderr.readline = AsyncMock(side_effect=lambda: next(lines))
 
-    bridge = AudioBridge()
+    bridge = AudioBridge(hass)
     with caplog.at_level(logging.DEBUG, logger="custom_components.intratone.audio_bridge"):
         await bridge.start(
             rtp_socket=_fake_rtp_socket(16384),
@@ -466,6 +475,7 @@ async def test_stderr_is_drained_to_logger(
 
 
 async def test_stop_during_push_ready_wait_aborts_start_cleanly(
+    hass,
     mock_subprocess, fake_process, fake_datagram_endpoint
 ):
     """stop() while start() is parked on the ffmpeg push-ready wait: the old
@@ -483,7 +493,7 @@ async def test_stop_during_push_ready_wait_aborts_start_cleanly(
         await asyncio.Event().wait()  # park forever (cancelled by stop)
 
     fake_process.stderr.readline = readline
-    bridge = AudioBridge()
+    bridge = AudioBridge(hass)
     start_task = asyncio.create_task(
         bridge.start(
             rtp_socket=_fake_rtp_socket(16384),
@@ -507,6 +517,7 @@ async def test_stop_during_push_ready_wait_aborts_start_cleanly(
 
 
 async def test_stop_between_endpoint_wraps_leaves_no_orphans(
+    hass,
     mock_subprocess, fake_process
 ):
     """stop() while start() is suspended wrapping the video endpoint: the
@@ -529,7 +540,7 @@ async def test_stop_between_endpoint_wraps_leaves_no_orphans(
         return transport, proto
 
     loop = asyncio.get_event_loop()
-    bridge = AudioBridge()
+    bridge = AudioBridge(hass)
     with (
         patch.object(loop, "create_datagram_endpoint", side_effect=_create),
         _patch_video_port(),
@@ -564,13 +575,14 @@ async def test_stop_between_endpoint_wraps_leaves_no_orphans(
 
 
 async def test_stop_survives_sigterm_process_lookup_error(
+    hass,
     mock_subprocess, fake_process, fake_datagram_endpoint
 ):
     """SIGTERM can race the child watcher's reap (ProcessLookupError). stop()
     must swallow it like _discard_prewarm does — otherwise _teardown_bridge
     aborts before on_call_ended fires and the coordinator/camera stay stuck
     'active'."""
-    bridge = AudioBridge()
+    bridge = AudioBridge(hass)
     await bridge.start(
         rtp_socket=_fake_rtp_socket(16384),
         remote_rtp_ip="178.32.84.135",
@@ -584,10 +596,11 @@ async def test_stop_survives_sigterm_process_lookup_error(
 
 
 async def test_stop_kill_fallback_survives_process_lookup_error(
+    hass,
     mock_subprocess, fake_process, fake_datagram_endpoint
 ):
     """Same reap race on the kill() fallback after the SIGTERM grace expires."""
-    bridge = AudioBridge()
+    bridge = AudioBridge(hass)
     await bridge.start(
         rtp_socket=_fake_rtp_socket(16384),
         remote_rtp_ip="178.32.84.135",
@@ -613,7 +626,7 @@ async def test_stop_kill_fallback_survives_process_lookup_error(
     fake_process.kill.assert_called_once()
 
 
-async def test_video_rtp_wrap_failure_is_fatal(mock_subprocess, fake_process):
+async def test_video_rtp_wrap_failure_is_fatal(hass, mock_subprocess, fake_process):
     """A failed video RTP wrap cannot degrade to audio-only: ffmpeg was
     spawned with `-f sdp -i <path>` + `-map 1:v`, so without VP8 packets the
     RTSP muxer never initializes and NO media (audio included) reaches
@@ -634,7 +647,7 @@ async def test_video_rtp_wrap_failure_is_fatal(mock_subprocess, fake_process):
     loop = asyncio.get_event_loop()
     video_sock = _fake_rtp_socket(16386)
     rtcp_sock = _fake_rtp_socket(16387)
-    bridge = AudioBridge()
+    bridge = AudioBridge(hass)
     with (
         patch.object(loop, "create_datagram_endpoint", side_effect=_create),
         _patch_video_port(),
@@ -657,7 +670,7 @@ async def test_video_rtp_wrap_failure_is_fatal(mock_subprocess, fake_process):
     assert not bridge.is_running
 
 
-async def test_cancel_start_during_prewarm_consume_reattaches_prewarm():
+async def test_cancel_start_during_prewarm_consume_reattaches_prewarm(hass):
     """CallManager cancels an in-flight start() when the call is superseded.
     If the cancel lands while start() awaits the still-spawning prewarm task,
     `_consume_prewarm` has already popped `_prewarm_task` to None — the
@@ -677,9 +690,9 @@ async def test_cancel_start_during_prewarm_consume_reattaches_prewarm():
         ),
         _patch_video_port(),
     ):
-        bridge = AudioBridge()
+        bridge = AudioBridge(hass)
         bridge.prewarm(video=True)
-        await asyncio.sleep(0)  # prewarm task now parked inside _spawn_ffmpeg
+        await asyncio.sleep(0)  # prewarm task now in flight (SDP write → spawn)
 
         start_task = asyncio.create_task(
             bridge.start(
@@ -704,6 +717,7 @@ async def test_cancel_start_during_prewarm_consume_reattaches_prewarm():
 
 
 async def test_cancel_start_during_push_ready_wait_closes_sockets(
+    hass,
     mock_subprocess, fake_process, fake_datagram_endpoint
 ):
     """A raw cancel of start() (call superseded / entry unload) is not a
@@ -721,7 +735,7 @@ async def test_cancel_start_during_push_ready_wait_closes_sockets(
 
     fake_process.stderr.readline = readline
     rtp_sock = _fake_rtp_socket(16384)
-    bridge = AudioBridge()
+    bridge = AudioBridge(hass)
     start_task = asyncio.create_task(
         bridge.start(
             rtp_socket=rtp_sock,
@@ -749,6 +763,7 @@ async def test_cancel_start_during_push_ready_wait_closes_sockets(
 
 
 async def test_cancelled_stop_propagates_cancellation(
+    hass,
     mock_subprocess, fake_process, fake_datagram_endpoint
 ):
     """A stop() that is itself cancelled while awaiting the stderr drainer
@@ -766,7 +781,7 @@ async def test_cancelled_stop_propagates_cancellation(
             raise
 
     fake_process.stderr.readline = readline
-    bridge = AudioBridge()
+    bridge = AudioBridge(hass)
     with patch(
         "custom_components.intratone.audio_bridge._FFMPEG_PUSH_READY_TIMEOUT_S",
         0.01,
@@ -828,13 +843,55 @@ def _patch_video_port(port: int = 55555):
     )
 
 
-async def test_prewarm_ffmpeg_is_reused_by_video_start(fake_datagram_endpoint):
+async def _await_prewarm(bridge) -> None:
+    """Wait for the prewarm task to finish spawning ffmpeg.
+
+    The SDP file is written through the executor now, so the prewarm no
+    longer completes within a single event-loop tick."""
+    await asyncio.wait_for(asyncio.shield(bridge._prewarm_task), timeout=5)
+
+
+async def test_video_sdp_file_io_stays_off_the_event_loop(hass):
+    """Writing/removing the temp SDP happens in the call setup path — doing it
+    inline would stall the loop while a doorbell call is being answered."""
+    from custom_components.intratone import audio_bridge as bridge_mod
+
+    loop_thread = threading.get_ident()
+    write_threads: list[int] = []
+    unlink_threads: list[int] = []
+    orig_write, orig_unlink = bridge_mod._write_sdp_file, bridge_mod._unlink_sdp_file
+
+    def _spy_write(sdp):
+        write_threads.append(threading.get_ident())
+        return orig_write(sdp)
+
+    def _spy_unlink(path):
+        unlink_threads.append(threading.get_ident())
+        return orig_unlink(path)
+
+    with (
+        patch.object(bridge_mod, "_write_sdp_file", _spy_write),
+        patch.object(bridge_mod, "_unlink_sdp_file", _spy_unlink),
+    ):
+        bridge = AudioBridge(hass)
+        bridge._video_sdp_path = await bridge._async_write_video_sdp(12345)
+        path = bridge._video_sdp_path
+        assert os.path.exists(path)
+        await bridge._async_cleanup_video_sdp()
+
+    assert not os.path.exists(path)
+    assert bridge._video_sdp_path is None
+    assert write_threads and loop_thread not in write_threads
+    assert unlink_threads and loop_thread not in unlink_threads
+
+
+async def test_prewarm_ffmpeg_is_reused_by_video_start(hass, fake_datagram_endpoint):
     """prewarm() spawns the video-SDP ffmpeg during SIP negotiation; a video
     start() must reuse that process instead of spawning a second one."""
     with _patch_spawn([_make_fake_process()]) as spawn, _patch_video_port():
-        bridge = AudioBridge()
+        bridge = AudioBridge(hass)
         bridge.prewarm(video=True)
-        await asyncio.sleep(0)
+        await _await_prewarm(bridge)
         assert spawn.await_count == 1
         args = " ".join(spawn.await_args.args[1:])
         assert "-f sdp" in args  # video variant, not the lavfi placeholder
@@ -855,27 +912,27 @@ async def test_prewarm_ffmpeg_is_reused_by_video_start(fake_datagram_endpoint):
         assert bridge._video_sdp_path is None  # temp SDP cleaned up
 
 
-async def test_prewarm_discarded_when_server_rejects_video(fake_datagram_endpoint):
+async def test_prewarm_discarded_when_server_rejects_video(hass, fake_datagram_endpoint):
     """If the 200 OK carries no video, the prewarmed video-SDP ffmpeg must be
     killed and the lavfi-placeholder variant spawned instead."""
     prewarm_proc = _make_fake_process()
     call_proc = _make_fake_process()
     sdp_paths: list[str] = []
-    orig_write_sdp = AudioBridge._write_video_sdp
+    orig_write_sdp = AudioBridge._async_write_video_sdp
 
-    def _capture_sdp(self, port):
-        path = orig_write_sdp(self, port)
+    async def _capture_sdp(self, port):
+        path = await orig_write_sdp(self, port)
         sdp_paths.append(path)
         return path
 
     with (
         _patch_spawn([prewarm_proc, call_proc]) as spawn,
         _patch_video_port(),
-        patch.object(AudioBridge, "_write_video_sdp", _capture_sdp),
+        patch.object(AudioBridge, "_async_write_video_sdp", _capture_sdp),
     ):
-        bridge = AudioBridge()
+        bridge = AudioBridge(hass)
         bridge.prewarm(video=True)
-        await asyncio.sleep(0)
+        await _await_prewarm(bridge)
 
         url = await bridge.start(
             rtp_socket=_fake_rtp_socket(16384),
@@ -893,26 +950,26 @@ async def test_prewarm_discarded_when_server_rejects_video(fake_datagram_endpoin
         await bridge.stop()
 
 
-async def test_stop_discards_unused_prewarm():
+async def test_stop_discards_unused_prewarm(hass):
     """A call that dies before 200 OK never consumes the prewarm — stop()
     must kill the process and clean the temp SDP file."""
     proc = _make_fake_process()
     sdp_paths: list[str] = []
-    orig_write_sdp = AudioBridge._write_video_sdp
+    orig_write_sdp = AudioBridge._async_write_video_sdp
 
-    def _capture_sdp(self, port):
-        path = orig_write_sdp(self, port)
+    async def _capture_sdp(self, port):
+        path = await orig_write_sdp(self, port)
         sdp_paths.append(path)
         return path
 
     with (
         _patch_spawn([proc]),
         _patch_video_port(),
-        patch.object(AudioBridge, "_write_video_sdp", _capture_sdp),
+        patch.object(AudioBridge, "_async_write_video_sdp", _capture_sdp),
     ):
-        bridge = AudioBridge()
+        bridge = AudioBridge(hass)
         bridge.prewarm(video=True)
-        await asyncio.sleep(0)
+        await _await_prewarm(bridge)
         await bridge.stop()
 
     proc.kill.assert_called_once()
@@ -921,13 +978,13 @@ async def test_stop_discards_unused_prewarm():
     assert sdp_paths and not os.path.exists(sdp_paths[0])
 
 
-async def test_cancel_prewarm_kills_process_without_stop():
+async def test_cancel_prewarm_kills_process_without_stop(hass):
     """`cancel_prewarm()` (sync, callable from SIP callbacks) must reap the
     unadopted ffmpeg promptly instead of leaving it to idle until the 60 s
     post-BYE grace teardown finally calls stop()."""
     proc = _make_fake_process()
     with _patch_spawn([proc]), _patch_video_port():
-        bridge = AudioBridge()
+        bridge = AudioBridge(hass)
         bridge.prewarm(video=True)
         await asyncio.sleep(0)
         bridge.cancel_prewarm()
@@ -940,7 +997,7 @@ async def test_cancel_prewarm_kills_process_without_stop():
         await bridge.stop()  # still safe afterwards
 
 
-async def test_prewarm_failure_falls_back_to_normal_spawn(fake_datagram_endpoint):
+async def test_prewarm_failure_falls_back_to_normal_spawn(hass, fake_datagram_endpoint):
     """A failed prewarm (ffmpeg missing, spawn error) must not break the call:
     start() falls back to the on-demand spawn path."""
     proc = _make_fake_process()
@@ -948,7 +1005,7 @@ async def test_prewarm_failure_falls_back_to_normal_spawn(fake_datagram_endpoint
         _patch_spawn([FileNotFoundError("no ffmpeg"), proc]) as spawn,
         _patch_video_port(),
     ):
-        bridge = AudioBridge()
+        bridge = AudioBridge(hass)
         bridge.prewarm(video=True)
         await asyncio.sleep(0)
         url = await bridge.start(
@@ -963,9 +1020,10 @@ async def test_prewarm_failure_falls_back_to_normal_spawn(fake_datagram_endpoint
 
 
 async def test_prewarm_noop_when_bridge_already_running(
+    hass,
     mock_subprocess, fake_datagram_endpoint
 ):
-    bridge = AudioBridge()
+    bridge = AudioBridge(hass)
     await bridge.start(
         rtp_socket=_fake_rtp_socket(16384),
         remote_rtp_ip="178.32.84.135",
@@ -1124,10 +1182,10 @@ async def test_video_rtp_gate_drops_interframes_until_keyframe():
 # --- AudioBridge._pli_loop -------------------------------------------------
 
 
-def _bridge_with_video(on_video_failure=None):
+def _bridge_with_video(hass, on_video_failure=None):
     """AudioBridge with real video RTP/RTCP protocols on fake transports —
     just enough wiring for `_pli_loop` to run without sockets or ffmpeg."""
-    bridge = AudioBridge()
+    bridge = AudioBridge(hass)
     bridge._video_rtp = _VideoRtpProtocol(ffmpeg_target=("127.0.0.1", 12345))
     bridge._video_rtp.connection_made(_FakeTransport())
     bridge._video_rtcp = _VideoRtcpProtocol(remote_addr=("178.32.84.135", 52983))
@@ -1145,11 +1203,11 @@ async def _wait_until(cond, timeout_s: float = 1.0) -> None:
         await asyncio.sleep(0.001)
 
 
-async def test_pli_loop_sends_first_pli_immediately_on_first_rtp():
+async def test_pli_loop_sends_first_pli_immediately_on_first_rtp(hass):
     """The first PLI (keyframe request) must go out as soon as the first RTP
     packet reveals the media SSRC — event-driven, no polling delay. A handful
     of bare event-loop ticks (no wall-clock sleep) must be enough."""
-    bridge, rtcp_transport = _bridge_with_video()
+    bridge, rtcp_transport = _bridge_with_video(hass)
     task = asyncio.create_task(bridge._pli_loop())
     for _ in range(5):
         await asyncio.sleep(0)
@@ -1164,11 +1222,11 @@ async def test_pli_loop_sends_first_pli_immediately_on_first_rtp():
     task.cancel()
 
 
-async def test_pli_loop_gives_up_without_rtp_and_sends_nothing():
+async def test_pli_loop_gives_up_without_rtp_and_sends_nothing(hass):
     """No VP8 RTP within the first-RTP window → loop exits without sending a
     single PLI and without firing the video-failure callback."""
     failure = MagicMock()
-    bridge, rtcp_transport = _bridge_with_video(on_video_failure=failure)
+    bridge, rtcp_transport = _bridge_with_video(hass, on_video_failure=failure)
     with patch(
         "custom_components.intratone.audio_bridge._PLI_WAIT_FIRST_RTP_S", 0.01
     ):
@@ -1177,11 +1235,11 @@ async def test_pli_loop_gives_up_without_rtp_and_sends_nothing():
     failure.assert_not_called()
 
 
-async def test_pli_loop_exhausts_burst_then_fires_video_failure():
+async def test_pli_loop_exhausts_burst_then_fires_video_failure(hass):
     """RTP flows but no keyframe ever arrives → the loop sends the full PLI
     burst then asks CallManager for the audio-only re-INVITE."""
     failure = MagicMock()
-    bridge, rtcp_transport = _bridge_with_video(on_video_failure=failure)
+    bridge, rtcp_transport = _bridge_with_video(hass, on_video_failure=failure)
     # First RTP already seen (interframe) so the SSRC is known.
     bridge._video_rtp.datagram_received(_VP8_INTERFRAME_PKT, ("x", 1))
     with patch("custom_components.intratone.audio_bridge._PLI_INTERVAL_S", 0.001):
@@ -1192,11 +1250,11 @@ async def test_pli_loop_exhausts_burst_then_fires_video_failure():
     failure.assert_called_once()
 
 
-async def test_pli_loop_stops_burst_when_keyframe_arrives():
+async def test_pli_loop_stops_burst_when_keyframe_arrives(hass):
     """A keyframe mid-burst stops the PLI spam and the failure callback must
     never fire; the loop then parks in the periodic phase."""
     failure = MagicMock()
-    bridge, _ = _bridge_with_video(on_video_failure=failure)
+    bridge, _ = _bridge_with_video(hass, on_video_failure=failure)
     bridge._video_rtp.datagram_received(_VP8_INTERFRAME_PKT, ("x", 1))
     with patch("custom_components.intratone.audio_bridge._PLI_INTERVAL_S", 0.01):
         task = asyncio.create_task(bridge._pli_loop())
@@ -1212,10 +1270,10 @@ async def test_pli_loop_stops_burst_when_keyframe_arrives():
     failure.assert_not_called()
 
 
-async def test_pli_loop_periodic_resets_gate_and_reopens_on_keyframe():
+async def test_pli_loop_periodic_resets_gate_and_reopens_on_keyframe(hass):
     """Periodic PLI closes the forwarding gate; the fresh keyframe reopens it
     and interframes flow to ffmpeg again."""
-    bridge, _ = _bridge_with_video()
+    bridge, _ = _bridge_with_video(hass)
     video = bridge._video_rtp
     video.datagram_received(_VP8_INTERFRAME_PKT, ("x", 1))
     with (
