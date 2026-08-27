@@ -8,6 +8,7 @@ flow). FCM push only fires the HomeKit doorbell event.
 from __future__ import annotations
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -353,6 +354,26 @@ async def test_open_door_sends_sip_message_with_payload_code(
     # state exists.
     assert await coordinator.async_open_door() is True
     cm.send_open_door.assert_called_once_with("5")
+
+
+async def test_open_door_never_logs_the_door_code(
+    coordinator_with_cm, caplog
+) -> None:
+    """The door code opens the building — logs end up in issue reports, so it
+    must not appear there (diagnostics already redacts it)."""
+    coordinator, cm = coordinator_with_cm
+    cm.send_open_door = MagicMock(return_value=True)
+    await coordinator.async_handle_push(
+        {"call_id": "42", "message": "X", "codes": "1234"}
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="custom_components.intratone.coordinator"):
+        caplog.clear()
+        assert await coordinator.async_open_door() is True
+
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "Door opened for call 42" in text
+    assert "1234" not in text
 
 
 async def test_open_door_returns_false_when_sip_message_fails(
