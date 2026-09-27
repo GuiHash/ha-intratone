@@ -79,7 +79,7 @@ class MobipassTransferRepairFlow(RepairsFlow):
             except (IntratoneAuthError, IntratoneApiError) as err:
                 _LOGGER.warning("mobipass activate failed: %s", err)
                 errors["base"] = "mobipass_failed"
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _LOGGER.exception("Unexpected mobipass activate error")
                 errors["base"] = "unknown"
             else:
@@ -107,7 +107,7 @@ class MobipassTransferRepairFlow(RepairsFlow):
             except (IntratoneAuthError, IntratoneApiError) as err:
                 _LOGGER.warning("mobipass verify failed: %s", err)
                 errors["base"] = "mobipass_failed"
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _LOGGER.exception("Unexpected mobipass verify error")
                 errors["base"] = "unknown"
             else:
@@ -173,7 +173,7 @@ class FcmTokenStaleRepairFlow(RepairsFlow):
                 except FcmRegistrationError as err:
                     _LOGGER.warning("FCM registration failed: %s", err)
                     errors["base"] = "fcm_failed"
-                except Exception:  # noqa: BLE001
+                except Exception:
                     _LOGGER.exception("Unexpected FCM re-pair error")
                     errors["base"] = "unknown"
                 else:

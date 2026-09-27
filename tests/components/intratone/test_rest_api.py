@@ -602,7 +602,7 @@ async def test_register_phone_for_sms_network_error_wrapped(hass, aiomock) -> No
 
 
 async def test_validate_sms_code_timeout_wrapped(hass, aiomock) -> None:
-    aiomock.post(f"{API_BASE}api/auth/validate", exception=asyncio.TimeoutError())
+    aiomock.post(f"{API_BASE}api/auth/validate", exception=TimeoutError())
     with pytest.raises(IntratoneApiError):
         await validate_sms_code(
             async_get_clientsession(hass),

@@ -281,7 +281,7 @@ class IntratoneCoordinator(DataUpdateCoordinator[CallState | None]):
                 sip_password=pending.sip_password,
                 max_duration_s=pending.max_duration_s,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             _LOGGER.exception("Failed to initiate SIP call")
             pending.started = False
             return False
@@ -326,7 +326,7 @@ class IntratoneCoordinator(DataUpdateCoordinator[CallState | None]):
             return self.data.stream_url if self.data else None
         try:
             await asyncio.wait_for(self._pending.stream_ready.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             _LOGGER.warning("Stream not ready within %ss", timeout)
             return None
         return self.data.stream_url if self.data else None

@@ -10,6 +10,7 @@ import asyncio
 import base64
 import signal
 import struct
+from itertools import pairwise
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -354,7 +355,7 @@ async def test_stop_sends_sigterm_and_closes_socket(
 
     await bridge.stop()
 
-    assert getattr(fake_process, "_last_signal") == signal.SIGTERM
+    assert fake_process._last_signal == signal.SIGTERM
     fake_process.wait.assert_awaited()
     assert transport.closed is True
     assert not bridge.is_running
@@ -1218,7 +1219,7 @@ async def test_video_placeholder_feeds_ffmpeg_until_real_video():
     seqs = [p[2] for p in pkts]
     assert seqs == list(range(seqs[0], seqs[0] + len(seqs)))
     frame_tss = [frame[0][3] for frame in frames]
-    assert all(b > a for a, b in zip(frame_tss, frame_tss[1:]))
+    assert all(b > a for a, b in pairwise(frame_tss))
     assert proto.placeholder_frames_sent == len(frames)
     assert proto.rtp_packets_forwarded == 0  # real-video counter untouched
 

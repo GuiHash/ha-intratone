@@ -145,7 +145,7 @@ class FcmListener:
         for listener in list(self._state_listeners):
             try:
                 listener(connected)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _LOGGER.exception("FCM state listener raised")
 
     async def async_start(self) -> None:

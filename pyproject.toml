@@ -1,7 +1,41 @@
 [tool.ruff]
 # Oldest Python in the CI matrix.
 target-version = "py312"
-# Default rule set (E4/E7/E9 + F) — lint for real defects, not style.
+
+[tool.ruff.lint]
+# Default rule set (E4/E7/E9 + F) plus families whose findings could all be
+# fixed with behaviour-preserving rewrites.
+extend-select = [
+    "ASYNC", # flake8-async
+    "B",     # flake8-bugbear
+    "BLE",   # flake8-blind-except (every intentional catch-all carries a noqa)
+    "C4",    # flake8-comprehensions
+    "G",     # flake8-logging-format
+    "LOG",   # flake8-logging
+    "PIE",   # flake8-pie
+    "RUF",   # Ruff-specific rules
+    "SIM",   # flake8-simplify
+    "UP",    # pyupgrade
+]
+ignore = [
+    # `timeout` parameters are part of these helpers' signatures; switching to
+    # caller-side `asyncio.timeout()` would change the API.
+    "ASYNC109",
+    # Deadline-bounded polling of state that exposes no Event to await.
+    "ASYNC110",
+    # HA's `_attr_*` class-attribute pattern; ClassVar clashes with the
+    # instance-attribute declarations in HA's base classes (HA core ignores it too).
+    "RUF012",
+    # contextlib.suppress() also swallows matching ExceptionGroups (3.12+),
+    # which `try/except X: pass` does not — not a like-for-like rewrite.
+    "SIM105",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Fire-and-forget tasks and nested `with pytest.raises()` blocks are deliberate
+# in tests and in the dev mock server.
+"tests/**" = ["RUF006", "SIM117"]
+"dev/**" = ["RUF006"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -36,7 +36,7 @@ import struct
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from collections.abc import Callable
 
 from .stun import build_binding_response, is_stun_binding_request
 
@@ -232,7 +232,7 @@ class _RtpProtocol(asyncio.DatagramProtocol):
                 try:
                     response = build_binding_response(data, addr)
                     self._transport.sendto(response, addr)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     _LOGGER.exception("AUDIO_STUN response build/send failed")
             if self.stun_count <= 3:
                 _LOGGER.debug(
@@ -364,7 +364,7 @@ class _RtpProtocol(asyncio.DatagramProtocol):
 
         try:
             self._on_ulaw(payload)
-        except Exception:  # noqa: BLE001
+        except Exception:
             _LOGGER.exception("on_ulaw callback raised")
 
     def dump_summary(self) -> None:
@@ -560,7 +560,7 @@ class _VideoRtpProtocol(asyncio.DatagramProtocol):
             try:
                 response = build_binding_response(data, addr)
                 self._transport.sendto(response, addr)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _LOGGER.exception("VIDEO_STUN: response build/send failed")
             if self.stun_requests <= 3:
                 _LOGGER.debug(
@@ -1234,7 +1234,7 @@ class AudioBridge:
                 timeout=_FFMPEG_PUSH_READY_TIMEOUT_S,
             )
             timed_out = False
-        except asyncio.TimeoutError:
+        except TimeoutError:
             timed_out = True
         # Checkpoint: stop() while we waited for the push — everything else
         # was already visible to (and closed by) stop(); just don't create
@@ -1326,7 +1326,7 @@ class AudioBridge:
                         self._video_rtp.keyframe_event.wait(),
                         timeout=_PLI_INTERVAL_S,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass
 
             # A keyframe that arrived during the final wait must not trigger
@@ -1351,7 +1351,7 @@ class AudioBridge:
                 if self._on_video_failure is not None:
                     try:
                         self._on_video_failure()
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         _LOGGER.exception("on_video_failure callback raised")
                 return
 
@@ -1380,7 +1380,7 @@ class AudioBridge:
                     await asyncio.wait_for(
                         self._video_rtp.keyframe_event.wait(), timeout=1.0
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass
                 if self._video_rtp is not None and self._video_rtp.keyframe_received:
                     _LOGGER.debug("PLI_LOOP: periodic keyframe received — resuming")
@@ -1394,7 +1394,7 @@ class AudioBridge:
                     )
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001
+        except Exception:
             _LOGGER.exception("PLI_LOOP crashed")
 
     async def stop(self) -> None:
@@ -1477,7 +1477,7 @@ class AudioBridge:
                 )
             except ProcessLookupError:
                 pass  # already reaped — the child watcher won the race
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 _LOGGER.warning("ffmpeg did not exit on SIGTERM; killing")
                 try:
                     process.kill()
