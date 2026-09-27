@@ -34,6 +34,7 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from homeassistant.components.camera import Camera, CameraEntityFeature
 from homeassistant.core import HomeAssistant
@@ -42,6 +43,9 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from . import IntratoneConfigEntry
 from .const import CONF_VIDEO_ENABLED
 from .entity import IntratoneEntity, async_remove_stale_entity
+
+if TYPE_CHECKING:
+    from homeassistant.components.stream import Stream
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -83,6 +87,17 @@ class IntratoneCamera(IntratoneEntity, Camera):
             await super().async_refresh_providers(write_state=write_state)
         finally:
             self._in_provider_refresh = False
+
+    async def async_create_stream(self) -> Stream | None:
+        # Core caches `self.stream` for the entity's lifetime, so after the
+        # first HLS view stream_source() — the pick-up signal — would never
+        # run again and later rings would never be answered. Once its call
+        # is over (no stream_url) a cached stream is stale: drop it.
+        state = self.coordinator.data
+        if self.stream is not None and not (state and state.stream_url):
+            await self.stream.stop()
+            self.stream = None
+        return await super().async_create_stream()
 
     async def stream_source(self) -> str | None:
         if self._in_provider_refresh:

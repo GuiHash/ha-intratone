@@ -157,3 +157,70 @@ async def test_provider_refresh_during_ring_does_not_dial(hass, coordinator) -> 
     assert provider.seen == [_RELAY_URL]
     coordinator._call_manager.start_call.assert_not_called()
     coordinator.api.answer_call.assert_not_called()
+
+
+async def _answer_ring_over_hls(coordinator, cam, call_id: str):
+    """Push a ring, then open it the way the HLS path does (core's
+    async_create_stream), with the bridge coming up shortly after the dial."""
+    import asyncio as _asyncio
+
+    await coordinator.async_handle_push({**_PUSH_WITH_SIP, "call_id": call_id})
+
+    async def fire_ready_after_start() -> None:
+        await _asyncio.sleep(0.01)
+        coordinator.set_stream_url("sip-call-test", _RELAY_URL)
+
+    _asyncio.create_task(fire_ready_after_start())
+    return await cam.async_create_stream()
+
+
+async def test_hls_redials_on_every_ring(hass, coordinator) -> None:
+    """Core caches `camera.stream` for the entity's lifetime. A stream left
+    over from a past call must not short-circuit stream_source() — the
+    pick-up signal — on the next ring, or HLS viewers never answer again."""
+    from unittest.mock import patch
+
+    cam = IntratoneCamera(coordinator)
+    cam.hass = hass
+    cam.entity_id = "camera.intratone_test"
+    streams = [MagicMock(stop=AsyncMock()), MagicMock(stop=AsyncMock())]
+    with (
+        patch(
+            "homeassistant.components.camera.create_stream", side_effect=streams
+        ) as create_stream,
+        patch(
+            "homeassistant.components.camera.get_dynamic_camera_stream_settings",
+            AsyncMock(),
+        ),
+    ):
+        assert await _answer_ring_over_hls(coordinator, cam, "1") is streams[0]
+        coordinator.set_stream_url("sip-call-test", None)  # call ends
+
+        assert await _answer_ring_over_hls(coordinator, cam, "2") is streams[1]
+
+    assert coordinator._call_manager.start_call.await_count == 2
+    assert create_stream.call_args.args[1] == _RELAY_URL
+    streams[0].stop.assert_awaited_once()
+
+
+async def test_hls_reuses_stream_during_live_call(hass, coordinator) -> None:
+    """While the call is live, a second viewer reuses the running stream —
+    no teardown, no second dial."""
+    from unittest.mock import patch
+
+    cam = IntratoneCamera(coordinator)
+    cam.hass = hass
+    cam.entity_id = "camera.intratone_test"
+    stream = MagicMock(stop=AsyncMock())
+    with (
+        patch("homeassistant.components.camera.create_stream", return_value=stream),
+        patch(
+            "homeassistant.components.camera.get_dynamic_camera_stream_settings",
+            AsyncMock(),
+        ),
+    ):
+        assert await _answer_ring_over_hls(coordinator, cam, "1") is stream
+        assert await cam.async_create_stream() is stream
+
+    coordinator._call_manager.start_call.assert_awaited_once()
+    stream.stop.assert_not_awaited()
