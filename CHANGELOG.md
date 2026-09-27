@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.1](https://github.com/GuiHash/ha-intratone/compare/v0.10.0...v0.10.1) (2026-09-27)
+
+
+### Bug Fixes
+
+* **video:** keep audio when no VP8 arrives, show video once it does ([#134](https://github.com/GuiHash/ha-intratone/issues/134)) ([f882e1c](https://github.com/GuiHash/ha-intratone/commit/f882e1c79cf5ca8db473e599060bbd58f5adbf36))
+
 ## [0.10.0](https://github.com/GuiHash/ha-intratone/compare/v0.9.3...v0.10.0) (2026-09-27)
 
 
