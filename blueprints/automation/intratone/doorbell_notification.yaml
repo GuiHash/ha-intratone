@@ -68,7 +68,12 @@ max_exceeded: silent
 triggers:
   - trigger: state
     entity_id: !input doorbell_event
+    # Both directions: a config-entry reload drives the entity through
+    # unavailable and back, and neither transition is a ring.
     not_from:
+      - unknown
+      - unavailable
+    not_to:
       - unknown
       - unavailable
 

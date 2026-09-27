@@ -166,6 +166,7 @@ automation:
       - trigger: state
         entity_id: event.intratone_XXXX_doorbell
         not_from: ["unknown", "unavailable"]
+        not_to: ["unknown", "unavailable"]
     actions:
       - action: notify.mobile_app_your_phone
         data:
