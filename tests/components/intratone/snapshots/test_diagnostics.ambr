@@ -1,0 +1,31 @@
+# serializer version: 1
+# name: test_diagnostics_snapshot
+  dict({
+    'coordinator': dict({
+      'last_call': dict({
+        'call_id': '300705065',
+        'caller_login': '**REDACTED**',
+        'door_code': '**REDACTED**',
+        'door_name': 'PORTE RUE',
+        'has_stream_url': False,
+        'received_at': '2024-01-15T10:30:00+00:00',
+        'ring_seq': 1,
+      }),
+    }),
+    'entry': dict({
+      'data': dict({
+        'device_id': '**REDACTED**',
+        'numeric_id': '**REDACTED**',
+        'register_method': 'invite',
+        'tel': '**REDACTED**',
+      }),
+      'options': dict({
+      }),
+    }),
+    'store': dict({
+      'fcm_creds': '**REDACTED**',
+      'fcm_token': '**REDACTED**',
+      'jwt': '**REDACTED**',
+    }),
+  })
+# ---
