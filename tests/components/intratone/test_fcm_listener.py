@@ -49,6 +49,21 @@ def fake_client():
         yield cls
 
 
+def _make_client(hass, run_state, *, listen_done: bool) -> MagicMock:
+    """A fake FcmPushClient whose `tasks` mirror start(): [_listen, _do_monitor]."""
+    client = MagicMock()
+    client.checkin_or_register = AsyncMock(return_value="fake-fcm-token")
+    client.start = AsyncMock()
+    client.stop = AsyncMock()
+    client.run_state = run_state
+    client.is_started = lambda: client.run_state is FcmPushClientRunState.STARTED
+    listen, monitor = hass.loop.create_future(), hass.loop.create_future()
+    if listen_done:
+        listen.set_result(None)
+    client.tasks = [listen, monitor]
+    return client
+
+
 def _logged_backoffs(caplog) -> list[float]:
     """Extract the backoff delays from the supervisor's crash warnings."""
     return [
@@ -128,6 +143,82 @@ async def test_healthcheck_detects_silent_client_death(
         await listener._run_once()
 
     assert listener.connected is False
+
+
+async def test_supervisor_restarts_client_stuck_after_connect_retries(
+    hass, listener, monkeypatch
+) -> None:
+    """When the first MCS connect exhausts its retries, the library's _listen
+    returns without _terminate(): run_state stays STARTING_CONNECTION while
+    _do_monitor keeps running. The supervisor must stop that client and start
+    a new one instead of polling it forever."""
+    monkeypatch.setattr(fcm_listener, "HEALTHCHECK_INTERVAL_S", 0.01)
+    monkeypatch.setattr(
+        fcm_listener, "STARTUP_POLL_INTERVAL_S", 0.01, raising=False
+    )
+    monkeypatch.setattr(
+        fcm_listener, "STARTUP_POLL_TIMEOUT_S", 0.02, raising=False
+    )
+    monkeypatch.setattr(fcm_listener, "BACKOFF_INITIAL_S", 0.01)
+    stuck = _make_client(
+        hass, FcmPushClientRunState.STARTING_CONNECTION, listen_done=True
+    )
+    healthy = _make_client(hass, FcmPushClientRunState.STARTED, listen_done=False)
+    states: list[bool] = []
+    listener.add_state_listener(states.append)
+
+    with patch(
+        "firebase_messaging.FcmPushClient", side_effect=[stuck, healthy]
+    ) as cls:
+        await listener.async_start()
+        await asyncio.sleep(0.2)
+
+        assert cls.call_count == 2
+        stuck.stop.assert_awaited_once()
+        healthy.stop.assert_not_awaited()
+        # Never reported connected while stuck, up once the new client is.
+        assert states == [True]
+
+        await listener.async_stop()
+
+
+@pytest.mark.parametrize(
+    "run_state",
+    [
+        FcmPushClientRunState.STARTED,
+        # The library's own reconnect: _reset() goes RESETTING ->
+        # STARTING_CONNECTION while _listen keeps running.
+        FcmPushClientRunState.RESETTING,
+        FcmPushClientRunState.STARTING_CONNECTION,
+    ],
+)
+async def test_healthcheck_keeps_client_while_listen_task_runs(
+    hass, listener, monkeypatch, run_state
+) -> None:
+    """A client whose _listen task is still running is not restarted."""
+    monkeypatch.setattr(fcm_listener, "HEALTHCHECK_INTERVAL_S", 0.01)
+    monkeypatch.setattr(
+        fcm_listener, "STARTUP_POLL_INTERVAL_S", 0.01, raising=False
+    )
+    monkeypatch.setattr(
+        fcm_listener, "STARTUP_POLL_TIMEOUT_S", 0.02, raising=False
+    )
+    client = _make_client(hass, run_state, listen_done=False)
+
+    with patch("firebase_messaging.FcmPushClient", return_value=client):
+        task = hass.async_create_background_task(
+            listener._run_once(), name="test_fcm_run_once"
+        )
+        # Well past the startup poll timeout and several healthchecks.
+        await asyncio.sleep(0.1)
+
+        assert not task.done()
+        client.stop.assert_not_awaited()
+        assert listener.connected is (run_state is FcmPushClientRunState.STARTED)
+
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
 
 async def test_connected_only_reported_once_client_started(

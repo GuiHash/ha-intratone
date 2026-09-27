@@ -246,6 +246,18 @@ class FcmListener:
                     raise RuntimeError(
                         f"FcmPushClient stopped itself (state={state})"
                     )
+                # When the first MCS connect exhausts its retries, _listen
+                # (tasks[0]) returns WITHOUT _terminate(): run_state stays
+                # STARTING_CONNECTION and _do_monitor keeps running, so stop
+                # the client ourselves. _listen otherwise only ends through
+                # _terminate()/stop() — it keeps running across resets.
+                tasks = getattr(self._client, "tasks", None)
+                listen_task = tasks[0] if isinstance(tasks, list) and tasks else None
+                if isinstance(listen_task, asyncio.Future) and listen_task.done():
+                    await self._client.stop()
+                    raise RuntimeError(
+                        f"FcmPushClient listen task ended (state={state})"
+                    )
                 self._set_connected(bool(self._client.is_started()))
         finally:
             self._set_connected(False)
