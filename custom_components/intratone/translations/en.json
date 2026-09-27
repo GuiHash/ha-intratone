@@ -9,6 +9,18 @@
           "invite": "Invitation code (recommended)"
         }
       },
+      "credentials": {
+        "title": "App credentials",
+        "description": "Enter the app credentials used to talk to Intratone and to receive doorbell pushes (the official app's values). See the README for details.",
+        "data": {
+          "app_id": "Intratone app ID",
+          "app_token": "Intratone app token",
+          "fcm_project_id": "Firebase project ID",
+          "fcm_app_id": "Firebase app ID",
+          "fcm_api_key": "Firebase API key",
+          "fcm_sender_id": "Firebase sender ID"
+        }
+      },
       "phone": {
         "title": "Sign in by SMS",
         "description": "Enter the phone number registered on your Intratone account. Intratone will text a 4-digit code to that number.",
@@ -75,7 +87,8 @@
       "mobipass_failed": "The CléMobil transfer failed. Check the logs and try again.",
       "unknown": "Unexpected error. Check the logs.",
       "invalid_url": "Enter a valid RTSP URL (rtsp://host:port).",
-      "go2rtc_unreachable": "No RTSP server answered at this URL. Check that your standalone go2rtc instance is running and the address is correct."
+      "go2rtc_unreachable": "No RTSP server answered at this URL. Check that your standalone go2rtc instance is running and the address is correct.",
+      "credentials_missing": "Some app credentials are missing: fill in every field."
     },
     "abort": {
       "already_configured": "This Intratone device is already configured.",
@@ -159,12 +172,27 @@
         "data_description": {
           "video_enabled": "Negotiates VP8 video with the Intratone gateway and forwards it to go2rtc. When off, the camera and backlight entities are not created.",
           "go2rtc_url": "RTSP URL where go2rtc listens. Default: rtsp://127.0.0.1:8554. HA's embedded go2rtc can't accept this stream — run a standalone go2rtc instance instead."
+        },
+        "sections": {
+          "app_credentials": {
+            "name": "App credentials (advanced)",
+            "description": "Values used to talk to Intratone and to receive doorbell pushes. Changing a Firebase value requires re-pairing for doorbell pushes to keep working.",
+            "data": {
+              "app_id": "Intratone app ID",
+              "app_token": "Intratone app token",
+              "fcm_project_id": "Firebase project ID",
+              "fcm_app_id": "Firebase app ID",
+              "fcm_api_key": "Firebase API key",
+              "fcm_sender_id": "Firebase sender ID"
+            }
+          }
         }
       }
     },
     "error": {
       "invalid_url": "Enter a valid RTSP URL (rtsp://host:port).",
-      "go2rtc_unreachable": "No RTSP server answered at this URL. Check that your standalone go2rtc instance is running and the address is correct."
+      "go2rtc_unreachable": "No RTSP server answered at this URL. Check that your standalone go2rtc instance is running and the address is correct.",
+      "credentials_missing": "Some app credentials are missing: fill in every field."
     }
   },
   "services": {

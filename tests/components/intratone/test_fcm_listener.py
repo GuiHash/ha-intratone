@@ -234,7 +234,9 @@ async def test_async_stop_is_clean(
     assert states == [True, False]
 
 
-async def test_register_standalone_failure_is_typed_and_closes_session() -> None:
+async def test_register_standalone_failure_is_typed_and_closes_session(
+    app_creds,
+) -> None:
     """A refused registration raises FcmRegistrationError and leaves no
     unclosed aiohttp session behind (issue #124: "Unclosed client session")."""
     client = MagicMock()
@@ -245,6 +247,6 @@ async def test_register_standalone_failure_is_typed_and_closes_session() -> None
     )
     with patch("firebase_messaging.FcmPushClient", return_value=client) as cls:
         with pytest.raises(FcmRegistrationError):
-            await fcm_register_standalone(None)
+            await fcm_register_standalone(app_creds)
     session = cls.call_args.kwargs["http_client_session"]
     assert session.closed

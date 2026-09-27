@@ -9,7 +9,10 @@ from aioresponses import aioresponses
 from homeassistant import config_entries
 from homeassistant.data_entry_flow import FlowResultType
 
-from custom_components.intratone.config_flow import _normalize_phone
+from custom_components.intratone.config_flow import (
+    APP_CREDENTIALS_SECTION,
+    _normalize_phone,
+)
 from custom_components.intratone.fcm_listener import FcmRegistrationError
 from custom_components.intratone.const import (
     API_BASE,
@@ -181,7 +184,11 @@ async def test_options_flow_probes_go2rtc_when_video_enabled(
     patched_probe.return_value = "go2rtc_unreachable"
     result = await hass.config_entries.options.async_configure(
         result["flow_id"],
-        {CONF_VIDEO_ENABLED: True, CONF_GO2RTC_URL: DEFAULT_GO2RTC_URL},
+        {
+            CONF_VIDEO_ENABLED: True,
+            CONF_GO2RTC_URL: DEFAULT_GO2RTC_URL,
+            APP_CREDENTIALS_SECTION: {},
+        },
     )
     assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {CONF_GO2RTC_URL: "go2rtc_unreachable"}
@@ -189,7 +196,11 @@ async def test_options_flow_probes_go2rtc_when_video_enabled(
     patched_probe.return_value = None
     result = await hass.config_entries.options.async_configure(
         result["flow_id"],
-        {CONF_VIDEO_ENABLED: True, CONF_GO2RTC_URL: DEFAULT_GO2RTC_URL},
+        {
+            CONF_VIDEO_ENABLED: True,
+            CONF_GO2RTC_URL: DEFAULT_GO2RTC_URL,
+            APP_CREDENTIALS_SECTION: {},
+        },
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert mock_entry.options[CONF_VIDEO_ENABLED] is True
@@ -204,7 +215,11 @@ async def test_options_flow_skips_probe_when_video_disabled(
     result = await hass.config_entries.options.async_init(mock_entry.entry_id)
     result = await hass.config_entries.options.async_configure(
         result["flow_id"],
-        {CONF_VIDEO_ENABLED: False, CONF_GO2RTC_URL: DEFAULT_GO2RTC_URL},
+        {
+            CONF_VIDEO_ENABLED: False,
+            CONF_GO2RTC_URL: DEFAULT_GO2RTC_URL,
+            APP_CREDENTIALS_SECTION: {},
+        },
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     patched_probe.assert_not_awaited()
@@ -632,3 +647,158 @@ async def test_reauth_with_other_accounts_invite_aborts_without_store_write(
     assert result["reason"] == "unique_id_mismatch"
     # The other account's Store file was never written.
     assert "intratone.9999999.creds" not in hass_storage
+
+
+USER_CREDENTIALS = {
+    "app_id": "user_app_id",
+    "app_token": "user-app-token",
+    "fcm_project_id": "user-project",
+    "fcm_app_id": "1:111111111111:android:1111111111111111",
+    "fcm_api_key": "user-fcm-api-key",
+    "fcm_sender_id": "111111111111",
+}
+
+
+async def test_source_install_asks_credentials_before_pairing(
+    hass, aiomock, default_credentials, patched_fcm_register, patched_probe
+) -> None:
+    """No app credentials available: the flow asks for them first, pairs with them and stores them on the entry."""
+    default_credentials.clear()
+    aiomock.post(
+        f"{API_BASE}api/auth/registercodes",
+        payload={"state": "ok", "data": {"id": "3844428", "tel": "0671124546"}},
+    )
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={"state": "ok", "data": {"jwt": "fresh.jwt", "id": "3844428"}},
+    )
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "credentials"
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], USER_CREDENTIALS
+    )
+    assert result["type"] is FlowResultType.MENU
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "invite"}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_INVITE_CODE: "448789-1206"}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_VIDEO_ENABLED: False}
+    )
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    for key, value in USER_CREDENTIALS.items():
+        assert result["options"][key] == value, key
+    fcm_creds_arg = patched_fcm_register.await_args.args[0]
+    assert fcm_creds_arg.fcm_api_key == USER_CREDENTIALS["fcm_api_key"]
+    register = next(
+        calls[0]
+        for key, calls in aiomock.requests.items()
+        if str(key[1]).endswith("api/auth/registercodes")
+    )
+    assert register.kwargs["data"]["app_token"] == USER_CREDENTIALS["app_token"]
+
+
+async def test_credentials_step_rejects_blank_field(hass, default_credentials) -> None:
+    default_credentials.clear()
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {**USER_CREDENTIALS, "app_token": " "}
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "credentials_missing"}
+
+
+async def test_options_flow_stores_only_real_credential_overrides(
+    hass, mock_entry: MockConfigEntry, default_credentials, patched_probe
+) -> None:
+    """The form is prefilled with the defaults; only a value the user
+    actually changed is stored, so updated defaults still apply to the rest."""
+    mock_entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(mock_entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            CONF_VIDEO_ENABLED: False,
+            CONF_GO2RTC_URL: DEFAULT_GO2RTC_URL,
+            APP_CREDENTIALS_SECTION: {
+                **default_credentials,
+                "app_token": "user-app-token",
+            },
+        },
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert dict(mock_entry.options) == {
+        CONF_VIDEO_ENABLED: False,
+        CONF_GO2RTC_URL: DEFAULT_GO2RTC_URL,
+        "app_token": "user-app-token",
+    }
+
+
+async def test_options_flow_rejects_clearing_credential_without_default(
+    hass, mock_entry: MockConfigEntry, default_credentials, patched_probe
+) -> None:
+    """Without a default, a cleared credential has nothing to fall back to."""
+    default_credentials.clear()
+    mock_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(mock_entry, options=USER_CREDENTIALS)
+    result = await hass.config_entries.options.async_init(mock_entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            CONF_VIDEO_ENABLED: False,
+            CONF_GO2RTC_URL: DEFAULT_GO2RTC_URL,
+            APP_CREDENTIALS_SECTION: {**USER_CREDENTIALS, "fcm_api_key": ""},
+        },
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "credentials_missing"}
+    assert mock_entry.options["fcm_api_key"] == USER_CREDENTIALS["fcm_api_key"]
+
+
+async def test_missing_credentials_at_setup_start_reauth_for_them(
+    hass,
+    mock_entry: MockConfigEntry,
+    default_credentials,
+    mock_fcm_client,
+    mock_call_manager,
+    aiomock,
+) -> None:
+    """An existing entry without app credentials can't set up: it
+    raises a reauth that asks for the credentials, then loads with them."""
+    default_credentials.clear()
+    mock_entry.add_to_hass(hass)
+    assert not await hass.config_entries.async_setup(mock_entry.entry_id)
+    await hass.async_block_till_done()
+    assert mock_entry.state is config_entries.ConfigEntryState.SETUP_ERROR
+
+    flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+    assert len(flows) == 1
+    assert flows[0]["step_id"] == "credentials"
+
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={"state": "ok", "data": {"jwt": "j", "id": "3844428"}},
+        repeat=True,
+    )
+    aiomock.get(
+        f"{API_BASE}{PATH_ACCESS_LIST}",
+        payload={"state": "ok", "data": {"list": []}},
+        repeat=True,
+    )
+    result = await hass.config_entries.flow.async_configure(
+        flows[0]["flow_id"], USER_CREDENTIALS
+    )
+    await hass.async_block_till_done()
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reauth_successful"
+    assert mock_entry.options["app_token"] == USER_CREDENTIALS["app_token"]
+    assert mock_entry.state is config_entries.ConfigEntryState.LOADED

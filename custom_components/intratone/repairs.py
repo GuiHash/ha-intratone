@@ -19,6 +19,7 @@ from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
+from .app_credentials import resolve_app_credentials
 from .config_flow import MOBIPASS_OTP_SCHEMA, USER_SCHEMA
 from .const import (
     CONF_DEVICE_ID,
@@ -194,9 +195,13 @@ class FcmTokenStaleRepairFlow(RepairsFlow):
             self.hass, entry.unique_id or entry.entry_id
         )
         await store.async_load()
-        fcm_token, fcm_creds = await fcm_register_standalone(store.fcm_creds)
+        app_creds = resolve_app_credentials(entry.options)
+        fcm_token, fcm_creds = await fcm_register_standalone(
+            app_creds, store.fcm_creds
+        )
         register_data = await register_with_invite(
             session,
+            app_creds=app_creds,
             device_id=device_id,
             fcm_token=fcm_token,
             code=code,
@@ -204,7 +209,7 @@ class FcmTokenStaleRepairFlow(RepairsFlow):
         )
         tel = str(register_data["tel"])
         auth_data = await authenticate_for_invite(
-            session, tel=tel, device_id=device_id
+            session, app_creds=app_creds, tel=tel, device_id=device_id
         )
         await store.async_update(
             jwt=auth_data["jwt"], fcm_token=fcm_token, fcm_creds=fcm_creds

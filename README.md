@@ -141,6 +141,13 @@ cp -r /tmp/ha-intratone/custom_components/intratone <your HA config>/custom_comp
 # Or download a release archive and extract to custom_components/intratone/
 ```
 
+### App credentials
+
+The integration identifies itself with the official app's credentials: an Intratone API app id + token and the app's Firebase project (used to receive doorbell pushes). They are not part of this repository.
+
+- If they are missing, the first setup step asks for them (and an existing entry asks for them through a re-authentication).
+- To change them: **Settings → Devices & Services → Doorbell for Intratone (unofficial) → Configure → App credentials (advanced)**. Changing a Firebase value needs a re-pair for doorbell pushes to keep working.
+
 ## Pairing
 
 In Home Assistant: **Settings → Devices & Services → Add Integration → Doorbell for Intratone (unofficial)**. Pick one of two paths.
@@ -292,10 +299,11 @@ The integration stores in the HA config entry:
 - The **FCM credentials** handed back by Google's MCS (used to keep the push channel open across restarts).
 - The **device id** generated locally during pairing (a random 16-character hex string, mimicking an Android `ANDROID_ID`).
 - The **numeric account id** and **phone number** associated with the Intratone account that was paired.
+- The **app credentials** you entered, if any (in the entry options — see [App credentials](#app-credentials)).
 
 No call history, audio, or video is persisted to disk by the integration — RTP frames are transcoded and forwarded to go2rtc/HomeKit in real time, then dropped.
 
-**Settings → Devices & Services → Doorbell for Intratone (unofficial) → ⋮ → Download diagnostics** produces a JSON dump for issue reports; phone number, JWT, FCM token + credentials, device id, numeric id and the caller SIP login are redacted automatically before download.
+**Settings → Devices & Services → Doorbell for Intratone (unofficial) → ⋮ → Download diagnostics** produces a JSON dump for issue reports; phone number, JWT, FCM token + credentials, app credentials, device id, numeric id and the caller SIP login are redacted automatically before download.
 
 ## Credits
 

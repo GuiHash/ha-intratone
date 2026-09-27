@@ -20,6 +20,10 @@ if sys.version_info[:2] == (3, 12):
         t for t in _orig_enumerate() if "_run_safe_shutdown_loop" not in t.name
     ]
 
+from custom_components.intratone.app_credentials import (
+    AppCredentials,
+    resolve_app_credentials,
+)
 from custom_components.intratone.const import (
     CONF_DEVICE_ID,
     CONF_FCM_CREDS,
@@ -33,6 +37,31 @@ from custom_components.intratone.const import (
 )
 
 
+# Fake app credential defaults (never the real ones).
+FAKE_DEFAULT_CREDENTIALS = {
+    "app_id": "test_app_id",
+    "app_token": "test-app-token",
+    "fcm_project_id": "test-project",
+    "fcm_app_id": "1:000000000000:android:0000000000000000",
+    "fcm_api_key": "test-fcm-api-key",
+    "fcm_sender_id": "000000000000",
+}
+
+
+@pytest.fixture(autouse=True)
+def default_credentials():
+    """Provide app credential defaults so tests don't have to enter them.
+
+    Tests of the "nothing provided" case clear the returned dict.
+    """
+    defaults = dict(FAKE_DEFAULT_CREDENTIALS)
+    with patch("custom_components.intratone.app_credentials.DEFAULTS", defaults):
+        yield defaults
+
+
+@pytest.fixture
+def app_creds(default_credentials) -> AppCredentials:
+    return resolve_app_credentials({})
 @pytest.fixture
 def mock_entry_data() -> dict:
     return {
