@@ -2,6 +2,8 @@ pytest-homeassistant-custom-component==0.13.195 ; python_version == "3.12"
 pytest-homeassistant-custom-component==0.13.316 ; python_version == "3.13"
 pytest-homeassistant-custom-component>=0.13.366 ; python_version >= "3.14"
 pytest-xdist
+pytest-cov
+pytest-timeout
 aioresponses
 firebase-messaging>=0.4.5
 # Imported in custom_components/intratone/sip_client.py for the SipMessage

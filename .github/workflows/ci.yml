@@ -36,7 +36,7 @@ jobs:
         run: uv pip install --system --prerelease=allow -r requirements_test.txt
 
       - name: Run pytest
-        run: pytest tests/components/intratone/ -v -n auto --tb=short
+        run: pytest tests/components/intratone/ -v -n auto --tb=short --cov --cov-report=term-missing:skip-covered --cov-fail-under=85
 
   lint:
     name: ruff
