@@ -123,8 +123,9 @@ MOBIPASS_CODE_NOT_AVAILABLE: Final = "MOBIPASS_NOT_AVAILABLE"
 MOBIPASS_CODE_SMS_SENT: Final = "MOBIPASS_SMS_SENT"
 
 # Server `code` → user-facing error key for a failed CléMobil transfer, shared
-# by the config flow and the repair flow.
-MOBIPASS_ERRORS: Final = {
+# by the config flow and the repair flow. Keyed `str | None` because it is
+# looked up with `IntratoneMobipassError.code`, which may be None.
+MOBIPASS_ERRORS: Final[dict[str | None, str]] = {
     MOBIPASS_CODE_OTP_INVALID: "mobipass_code_invalid",
     MOBIPASS_CODE_BLOCKED: "mobipass_code_blocked",
     MOBIPASS_CODE_NOT_AVAILABLE: "mobipass_not_available",

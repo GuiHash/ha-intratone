@@ -15,7 +15,7 @@ import dataclasses
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
@@ -232,12 +232,13 @@ class IntratoneCoordinator(DataUpdateCoordinator[CallState | None]):
         sip_pass = payload.get("PASS")
         sip_server_ip = payload.get("ip_adress") or payload.get("domain_sip")
         if all((sip_target_user, sip_user, sip_pass, sip_server_ip)):
+            # all() above rules out None; mypy can't narrow through it.
             self._pending = _PendingInvite(
                 fcm_call_id=str(call_id),
                 target_uri=f"sip:{sip_target_user}@{sip_server_ip}",
-                target_host=sip_server_ip,
-                sip_username=sip_user,
-                sip_password=sip_pass,
+                target_host=cast(str, sip_server_ip),
+                sip_username=cast(str, sip_user),
+                sip_password=cast(str, sip_pass),
                 max_duration_s=_parse_seconds(payload.get("callEndDelay")),
             )
         else:

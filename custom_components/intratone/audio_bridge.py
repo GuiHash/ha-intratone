@@ -37,6 +37,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Callable
+from typing import cast
 
 from .stun import build_binding_response, is_stun_binding_request
 
@@ -1144,8 +1145,10 @@ class AudioBridge:
             raise BridgeStoppedError("stopped during audio RTP wrap")
 
         if video_enabled:
+            # video_enabled ⇒ the remote video address and ffmpeg's video port
+            # are set; mypy can't follow that through the bool.
             video_proto = _VideoRtpProtocol(
-                ffmpeg_target=("127.0.0.1", ffmpeg_video_port),
+                ffmpeg_target=("127.0.0.1", cast(int, ffmpeg_video_port)),
             )
             self._video_rtp = video_proto
             try:
@@ -1172,7 +1175,10 @@ class AudioBridge:
             # RTCP for video — RFC 3550 convention puts it on `rtp_port + 1`
             # for the remote side. Used to send PLI to the gateway.
             if self._video_rtp is not None and video_rtcp_socket is not None:
-                remote_rtcp_addr = (remote_video_rtp_ip, remote_video_rtp_port + 1)
+                remote_rtcp_addr = (
+                    cast(str, remote_video_rtp_ip),
+                    cast(int, remote_video_rtp_port) + 1,
+                )
                 rtcp_proto = _VideoRtcpProtocol(remote_addr=remote_rtcp_addr)
                 self._video_rtcp = rtcp_proto
                 try:

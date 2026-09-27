@@ -10,10 +10,11 @@ is held by another device.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 import voluptuous as vol
 from homeassistant.components.repairs import RepairsFlow
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import issue_registry as ir
@@ -54,7 +55,10 @@ class MobipassTransferRepairFlow(RepairsFlow):
         if not self._entry_id:
             return None
         entry = self.hass.config_entries.async_get_entry(self._entry_id)
-        return getattr(entry, "runtime_data", None) and entry.runtime_data.api
+        # getattr() already yields None for a missing entry.
+        return getattr(entry, "runtime_data", None) and cast(
+            ConfigEntry, entry
+        ).runtime_data.api
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None

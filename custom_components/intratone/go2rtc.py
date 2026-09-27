@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import cast
 from urllib.parse import urlparse
 
 _LOGGER = logging.getLogger(__name__)
@@ -115,7 +116,7 @@ async def async_selftest_go2rtc(
     err = await async_probe_go2rtc(url)
     if err is not None:
         return err
-    host, port = _parse_rtsp_url(url)  # probe validated it already
+    host, port = cast(tuple[str, int], _parse_rtsp_url(url))  # probe validated it already
 
     args = [
         "-hide_banner",

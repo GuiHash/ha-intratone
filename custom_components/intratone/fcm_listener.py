@@ -15,7 +15,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import aiohttp
 
@@ -30,6 +30,9 @@ from .const import (
     FCM_TOKEN_ISSUE_PREFIX,
 )
 from .store import IntratoneCredentialsStore
+
+if TYPE_CHECKING:
+    from firebase_messaging import FcmPushClient
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -118,7 +121,7 @@ class FcmListener:
         self._coordinator = coordinator
         self._store = store
         self._task: asyncio.Task | None = None
-        self._client = None
+        self._client: FcmPushClient | None = None
         self._stopping = False
         self._connected = False
         self._state_listeners: list[Callable[[bool], None]] = []

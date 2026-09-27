@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import TYPE_CHECKING
 
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
@@ -51,6 +52,14 @@ class MomentaryRevertMixin:
     """
 
     _revert_task: asyncio.Task | None = None
+
+    if TYPE_CHECKING:
+        # Provided by the Entity the mixin is combined with. Declared for the
+        # type checker only: a runtime definition here would shadow Entity's
+        # (the mixin comes first in the MRO).
+        hass: HomeAssistant
+
+        def async_write_ha_state(self) -> None: ...
 
     @property
     def _revert_delay_s(self) -> float:

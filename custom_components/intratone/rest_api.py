@@ -12,7 +12,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote
 
 import aiohttp
@@ -259,7 +259,7 @@ class IntratoneAPI:
         self._session = session
         self._entry = entry
         self._store = store
-        self._refresh_unsub = None
+        self._refresh_unsub: Callable[[], None] | None = None
         # In-flight JWT refresh, shared by concurrent callers (see refresh_jwt).
         self._refresh_task: asyncio.Task | None = None
         # Latest CléMobil/Mobipass flags, refreshed on every `authenticate_device`
@@ -552,7 +552,8 @@ class IntratoneAPI:
                     _LOGGER.debug("Mobipass %s: transfer code already sent", path)
                     return
                 if code.startswith("MOBIPASS"):
-                    raise _mobipass_error(err_body, err.status) from err
+                    # A non-empty code implies err_body is a dict.
+                    raise _mobipass_error(cast(dict[str, Any], err_body), err.status) from err
                 raise  # non-Mobipass (likely 401) — let the caller retry
             # Log the raw response including success — `_post_form` only logs on
             # a `state:error` envelope, so without this the "it worked" path

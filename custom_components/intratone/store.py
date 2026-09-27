@@ -13,7 +13,7 @@ flow can pre-write credentials before `async_create_entry` returns.
 
 from __future__ import annotations
 
-from typing import Any, TypedDict
+from typing import Any, TypedDict, cast
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
@@ -39,7 +39,7 @@ class IntratoneCredentialsStore:
 
     async def async_load(self) -> None:
         loaded = await self._store.async_load()
-        self._cache = dict(loaded) if loaded else {}
+        self._cache = cast(CredsData, dict(loaded)) if loaded else {}
 
     @property
     def jwt(self) -> str | None:
@@ -55,7 +55,7 @@ class IntratoneCredentialsStore:
 
     def snapshot(self) -> CredsData:
         """Return a shallow copy of the cached values for diagnostics."""
-        return dict(self._cache)
+        return cast(CredsData, dict(self._cache))
 
     async def async_update(
         self,

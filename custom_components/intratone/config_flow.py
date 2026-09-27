@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Any
+from typing import Any, cast
 
 import voluptuous as vol
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult, OptionsFlow
+from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult, OptionsFlow
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import section
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -208,7 +208,7 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
         return IntratoneOptionsFlowHandler()
 
     def __init__(self) -> None:
-        self._reauth_entry = None
+        self._reauth_entry: ConfigEntry | None = None
         # Carries SMS-flow state between async_step_phone and async_step_sms.
         self._pending_sms: dict[str, Any] = {}
         # Entry title/data staged by a successful pairing, consumed by
@@ -422,7 +422,8 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             errors = await _async_validate_video_options(user_input)
             if not errors:
-                pending = self._pending_entry
+                # Always staged by the pairing step that showed this form.
+                pending = cast(dict[str, Any], self._pending_entry)
                 return self.async_create_entry(
                     title=pending["title"],
                     data=pending["data"],
