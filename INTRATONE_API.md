@@ -43,16 +43,18 @@ Three protocols are involved:
 
 ## 2. Firebase / FCM configuration
 
-Extracted from `strings.xml` and `google-services.json` in the APK:
+Found in `strings.xml` and `google-services.json` in the APK. The values are
+not reproduced in this repository: the user enters them at setup (see the
+README, "App credentials").
 
-| Key                | Value                                              |
-| ------------------ | -------------------------------------------------- |
-| `project_id`       | `android-ipvideo-studio`                           |
-| `app_id`           | `1:676502914290:android:5393f05ec7f22bd6`          |
-| `api_key`          | `AIzaSyB7RtCyt6LZWMruWKj7Z_9Ii7_VAIVdSKU`          |
-| `messaging_sender_id` | `676502914290`                                  |
-| `package_name`     | `com.cogelec.notificationpush`                     |
-| `cert_sha1`        | `353F1762E3AE0B2DD83DC74D282BA77EC6A934D4`         |
+| Key                   | Value                                  |
+| --------------------- | -------------------------------------- |
+| `project_id`          | `<FCM_PROJECT_ID>`                     |
+| `app_id`              | `<FCM_APP_ID>`                         |
+| `api_key`             | `<FCM_API_KEY>`                        |
+| `messaging_sender_id` | `<FCM_SENDER_ID>`                      |
+| `package_name`        | `com.cogelec.notificationpush`         |
+| `cert_sha1`           | `<APK signing certificate SHA-1>`      |
 
 **Important**: the `bundle_id` passed to FCM registration MUST be
 `com.cogelec.notificationpush`. Using anything else (e.g. `org.chromium.linux`
@@ -88,10 +90,10 @@ or [`push-receiver`][pr] (Node). They handle:
 from firebase_messaging import FcmPushClient, FcmRegisterConfig
 
 config = FcmRegisterConfig(
-    project_id="android-ipvideo-studio",
-    app_id="1:676502914290:android:5393f05ec7f22bd6",
-    api_key="AIzaSyB7RtCyt6LZWMruWKj7Z_9Ii7_VAIVdSKU",
-    messaging_sender_id="676502914290",
+    project_id="<FCM_PROJECT_ID>",
+    app_id="<FCM_APP_ID>",
+    api_key="<FCM_API_KEY>",
+    messaging_sender_id="<FCM_SENDER_ID>",
     bundle_id="com.cogelec.notificationpush",
 )
 
@@ -133,9 +135,11 @@ Authenticated endpoints expect `Authorization: Bearer <JWT>`.
 
 ### App credentials (hardcoded in APK)
 
+Not reproduced in this repository (see the README, "App credentials"):
+
 ```
-app_id    = app_apisip_android
-app_token = >KompY95?oijeIKR8049?OLysIekjpceKejLAHhh
+app_id    = <APP_ID>
+app_token = <APP_TOKEN>
 ```
 
 ### 4.1 — `POST /api/auth/registercodes`  (Invite-code registration)
@@ -148,7 +152,7 @@ Body fields:
 
 | field                  | value                                |
 | ---------------------- | ------------------------------------ |
-| `app_id`               | `app_apisip_android`                 |
+| `app_id`               | (constant above)                     |
 | `app_token`            | (constant above)                     |
 | `code`                 | first part of invite code (`448789`) |
 | `codepass`             | second part (`1206`)                 |
@@ -188,7 +192,7 @@ Body:
 
 | field         | value                       |
 | ------------- | --------------------------- |
-| `app_id`      | `app_apisip_android`        |
+| `app_id`      | (constant)                  |
 | `app_token`   | (constant)                  |
 | `tel`         | phone from registercodes    |
 | `device_id`   | same as registration        |
@@ -426,7 +430,7 @@ What firebase-messaging delivers when the bell rings:
 ```python
 {
   "fcmMessageId": "0d434d98-bb44-4e42-8a1b-87401cfcffdb",
-  "from":         "676502914290",            # = messaging_sender_id
+  "from":         "<FCM_SENDER_ID>",         # = messaging_sender_id
   "priority":     "normal",
   "data": {
     "ip_adress":        "178.32.84.135",      # SIP server

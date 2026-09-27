@@ -9,10 +9,26 @@ from typing import Any
 import voluptuous as vol
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult, OptionsFlow
 from homeassistant.core import callback
+from homeassistant.data_entry_flow import section
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.selector import (
+    TextSelector,
+    TextSelectorConfig,
+    TextSelectorType,
+)
 
+from .app_credentials import (
+    AppCredentials,
+    AppCredentialsMissing,
+    credential_overrides,
+    effective_values,
+    resolve_app_credentials,
+)
 from .const import (
+    APP_CREDENTIAL_KEYS,
+    CONF_APP_TOKEN,
     CONF_DEVICE_ID,
+    CONF_FCM_API_KEY,
     CONF_GO2RTC_URL,
     CONF_INDICATIF,
     CONF_INVITE_CODE,
@@ -63,6 +79,34 @@ VIDEO_SCHEMA = vol.Schema(
     }
 )
 
+# Options-form section holding the app credential overrides.
+APP_CREDENTIALS_SECTION = "app_credentials"
+_SECRET_KEYS = (CONF_APP_TOKEN, CONF_FCM_API_KEY)
+
+
+def _credential_fields(marker: type[vol.Marker]) -> dict[vol.Marker, Any]:
+    return {
+        marker(key): TextSelector(
+            TextSelectorConfig(
+                type=TextSelectorType.PASSWORD
+                if key in _SECRET_KEYS
+                else TextSelectorType.TEXT
+            )
+        )
+        for key in APP_CREDENTIAL_KEYS
+    }
+
+
+CREDENTIALS_SCHEMA = vol.Schema(_credential_fields(vol.Required))
+
+
+def _with_overrides(
+    options: dict[str, Any], overrides: dict[str, str]
+) -> dict[str, Any]:
+    """Replace the credential overrides in `options`, keeping other options."""
+    kept = {k: v for k, v in options.items() if k not in APP_CREDENTIAL_KEYS}
+    return {**kept, **overrides}
+
 
 async def _async_validate_video_options(
     user_input: dict[str, Any],
@@ -96,7 +140,7 @@ def _normalize_phone(raw: str, indicatif: str) -> str:
 
 
 class IntratoneOptionsFlowHandler(OptionsFlow):
-    """Handle Intratone options (video, go2rtc URL)."""
+    """Handle Intratone options (video, go2rtc URL, app credential overrides)."""
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -104,8 +148,21 @@ class IntratoneOptionsFlowHandler(OptionsFlow):
         errors: dict[str, str] = {}
         if user_input is not None:
             errors = await _async_validate_video_options(user_input)
+            overrides = credential_overrides(user_input[APP_CREDENTIALS_SECTION])
             if not errors:
-                return self.async_create_entry(data=user_input)
+                try:
+                    resolve_app_credentials(overrides)
+                except AppCredentialsMissing:
+                    errors["base"] = "credentials_missing"
+            if not errors:
+                options = {
+                    k: v
+                    for k, v in user_input.items()
+                    if k != APP_CREDENTIALS_SECTION
+                }
+                return self.async_create_entry(
+                    data=_with_overrides(options, overrides)
+                )
 
         # On error, re-fill the form with what the user just typed.
         current = user_input or self.config_entry.options
@@ -119,10 +176,24 @@ class IntratoneOptionsFlowHandler(OptionsFlow):
                     CONF_GO2RTC_URL,
                     default=current.get(CONF_GO2RTC_URL, DEFAULT_GO2RTC_URL),
                 ): str,
+                # Empty field = use the default value, if any.
+                vol.Required(APP_CREDENTIALS_SECTION): section(
+                    vol.Schema(_credential_fields(vol.Optional)),
+                    {"collapsed": True},
+                ),
             }
         )
+        credentials = (
+            user_input[APP_CREDENTIALS_SECTION]
+            if user_input is not None
+            else effective_values(self.config_entry.options)
+        )
         return self.async_show_form(
-            step_id="init", data_schema=schema, errors=errors
+            step_id="init",
+            data_schema=self.add_suggested_values_to_schema(
+                schema, {APP_CREDENTIALS_SECTION: credentials}
+            ),
+            errors=errors,
         )
 
 
@@ -143,14 +214,64 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
         # Entry title/data staged by a successful pairing, consumed by
         # async_step_video which creates the entry with the chosen options.
         self._pending_entry: dict[str, Any] | None = None
+        # App credentials entered in async_step_credentials (only the values
+        # differing from the defaults), stored on the new entry's options.
+        self._app_overrides: dict[str, str] = {}
+
+    def _app_credentials(self) -> AppCredentials:
+        if self._reauth_entry is not None:
+            return resolve_app_credentials(self._reauth_entry.options)
+        return resolve_app_credentials(self._app_overrides)
 
     async def async_step_user(
         self, _user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Initial pairing — let the user pick SMS or installer invite code."""
+        try:
+            self._app_credentials()
+        except AppCredentialsMissing:
+            return await self.async_step_credentials()
         return self.async_show_menu(
             step_id="user",
             menu_options=["invite", "phone"],
+        )
+
+    async def async_step_credentials(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Ask for the app credentials when some are missing.
+
+        Shown before pairing, or as a reauth of an entry lacking them.
+        """
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            overrides = credential_overrides(user_input)
+            try:
+                resolve_app_credentials(overrides)
+            except AppCredentialsMissing:
+                errors["base"] = "credentials_missing"
+            else:
+                if self._reauth_entry is not None:
+                    return self.async_update_reload_and_abort(
+                        self._reauth_entry,
+                        options=_with_overrides(
+                            dict(self._reauth_entry.options), overrides
+                        ),
+                    )
+                self._app_overrides = overrides
+                return await self.async_step_user()
+
+        current = (
+            self._reauth_entry.options
+            if self._reauth_entry is not None
+            else self._app_overrides
+        )
+        return self.async_show_form(
+            step_id="credentials",
+            data_schema=self.add_suggested_values_to_schema(
+                CREDENTIALS_SCHEMA, user_input or effective_values(current)
+            ),
+            errors=errors,
         )
 
     async def async_step_invite(
@@ -188,7 +309,9 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
                         session, tel=phone, indicatif=indicatif
                     )
                     _LOGGER.debug("auth/verify account flags: %s", verify_data)
-                    fcm_token, fcm_creds = await fcm_register_standalone(None)
+                    fcm_token, fcm_creds = await fcm_register_standalone(
+                        self._app_credentials()
+                    )
                     await register_phone_for_sms(
                         session,
                         device_id=device_id,
@@ -240,6 +363,7 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
                 )
                 auth_data = await authenticate_for_invite(
                     session,
+                    app_creds=self._app_credentials(),
                     tel=pending["phone"],
                     device_id=pending["device_id"],
                     indicatif=pending["indicatif"],
@@ -307,6 +431,7 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
                         CONF_GO2RTC_URL: user_input.get(
                             CONF_GO2RTC_URL, DEFAULT_GO2RTC_URL
                         ),
+                        **self._app_overrides,
                     },
                 )
         return self.async_show_form(
@@ -422,6 +547,10 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
         etc.).
         """
         self._reauth_entry = self._get_reauth_entry()
+        try:
+            self._app_credentials()
+        except AppCredentialsMissing:
+            return await self.async_step_credentials()
         new_data = await self._async_try_silent_reauth()
         if new_data is not None:
             return self.async_update_reload_and_abort(
@@ -447,6 +576,7 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
             session = async_get_clientsession(self.hass)
             data = await authenticate_for_invite(
                 session,
+                app_creds=self._app_credentials(),
                 tel=tel,
                 device_id=device_id,
                 indicatif=entry.data.get(CONF_INDICATIF, DEFAULT_INDICATIF),
@@ -572,10 +702,14 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
             await cached.async_load()
             existing_creds = cached.fcm_creds
 
-        fcm_token, fcm_creds = await fcm_register_standalone(existing_creds)
+        app_creds = self._app_credentials()
+        fcm_token, fcm_creds = await fcm_register_standalone(
+            app_creds, existing_creds
+        )
 
         register_data = await register_with_invite(
             session,
+            app_creds=app_creds,
             device_id=device_id,
             fcm_token=fcm_token,
             code=code,
@@ -585,7 +719,7 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
         numeric_id = str(register_data["id"])
 
         auth_data = await authenticate_for_invite(
-            session, tel=tel, device_id=device_id
+            session, app_creds=app_creds, tel=tel, device_id=device_id
         )
 
         entry_data = {

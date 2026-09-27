@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import pytest
 from aioresponses import aioresponses
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.intratone.const import API_BASE
+from custom_components.intratone.const import API_BASE, DOMAIN
 from custom_components.intratone.diagnostics import (
     async_get_config_entry_diagnostics,
 )
@@ -65,3 +66,19 @@ async def test_diagnostics_redacts_credentials_and_dumps_state(
     assert last_call["caller_login"] == "**REDACTED**"
     assert last_call["door_code"] == "**REDACTED**"
     assert last_call["ring_seq"] == 1
+
+
+async def test_diagnostics_redacts_app_credential_overrides(hass) -> None:
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={},
+        options={"video_enabled": False, "app_token": "user-app-token"},
+    )
+    entry.add_to_hass(hass)
+
+    diag = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert diag["entry"]["options"] == {
+        "video_enabled": False,
+        "app_token": "**REDACTED**",
+    }

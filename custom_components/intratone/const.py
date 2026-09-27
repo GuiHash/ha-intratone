@@ -10,8 +10,6 @@ MANUFACTURER: Final = "Cogelec"
 MODEL: Final = "Intratone Bridge (HA)"
 
 API_BASE: Final = "https://sip.intratone.info/"
-APP_ID: Final = "app_apisip_android"
-APP_TOKEN: Final = ">KompY95?oijeIKR8049?OLysIekjpceKejLAHhh"
 # Sent as `appversion` on every request. Bumped 4.6.3 → 4.6.4 to match the app
 # version that introduced Mobipass: the server returns MOBIPASS_NOT_AVAILABLE to
 # affected accounts on this client, and it may be gating the mobipass endpoints
@@ -38,10 +36,23 @@ DEVICE_DESCRIPTION: Final = "Galaxy S25"
 # User-Agent sent by the official Android app (okhttp); mirror it on every Intratone request (issue #61).
 APP_USER_AGENT: Final = "okhttp/5.0.0-alpha.2"
 
-FCM_PROJECT_ID: Final = "android-ipvideo-studio"
-FCM_APP_ID: Final = "1:676502914290:android:5393f05ec7f22bd6"
-FCM_API_KEY: Final = "AIzaSyB7RtCyt6LZWMruWKj7Z_9Ii7_VAIVdSKU"
-FCM_SENDER_ID: Final = "676502914290"
+# Cogelec app credentials (Intratone API + the app's Firebase project), entered
+# by the user per entry (config flow / options) and stored in `entry.options`
+# under these keys. See app_credentials.py.
+CONF_APP_ID: Final = "app_id"
+CONF_APP_TOKEN: Final = "app_token"
+CONF_FCM_PROJECT_ID: Final = "fcm_project_id"
+CONF_FCM_APP_ID: Final = "fcm_app_id"
+CONF_FCM_API_KEY: Final = "fcm_api_key"
+CONF_FCM_SENDER_ID: Final = "fcm_sender_id"
+APP_CREDENTIAL_KEYS: Final = (
+    CONF_APP_ID,
+    CONF_APP_TOKEN,
+    CONF_FCM_PROJECT_ID,
+    CONF_FCM_APP_ID,
+    CONF_FCM_API_KEY,
+    CONF_FCM_SENDER_ID,
+)
 
 CONF_INVITE_CODE: Final = "invite_code"
 # Installer invitation code shape (`XXXXXX-XXXX`), shared by the config flow
