@@ -161,7 +161,7 @@ Prefer an explicit automation? The equivalent YAML:
 
 ```yaml
 automation:
-  - alias: "Intratone — doorbell notification"
+  - alias: "Doorbell for Intratone — notification"
     triggers:
       - trigger: state
         entity_id: event.intratone_XXXX_doorbell

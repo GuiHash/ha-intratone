@@ -1,8 +1,9 @@
 blueprint:
-  name: Intratone doorbell notification
+  name: Doorbell notification for Intratone (unofficial)
   description: >-
     Send a notification to a Home Assistant Companion app device when the
-    Intratone intercom rings. The notification itself never answers the
+    Intratone intercom rings. Unofficial community blueprint, not
+    affiliated with Cogelec. The notification itself never answers the
     call — tapping it opens the camera live view, and THAT answers (picks
     up), exactly like the official app. An optional "Open door" action
     button unlocks a chosen lock straight from the notification.
