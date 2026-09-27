@@ -7,7 +7,7 @@ pytest-socket blocks them) and the ffmpeg lifecycle with mocked subprocess.
 from __future__ import annotations
 
 import asyncio
-import os
+import base64
 import signal
 import struct
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -615,7 +615,7 @@ async def test_stop_kill_fallback_survives_process_lookup_error(
 
 async def test_video_rtp_wrap_failure_is_fatal(mock_subprocess, fake_process):
     """A failed video RTP wrap cannot degrade to audio-only: ffmpeg was
-    spawned with `-f sdp -i <path>` + `-map 1:v`, so without VP8 packets the
+    spawned with `-f sdp -i data:…` + `-map 1:v`, so without VP8 packets the
     RTSP muxer never initializes and NO media (audio included) reaches
     go2rtc. start() must clean up and raise so CallManager hangs up instead
     of publishing a dead stream after the 15 s push-ready timeout."""
@@ -653,7 +653,6 @@ async def test_video_rtp_wrap_failure_is_fatal(mock_subprocess, fake_process):
     fake_process.kill.assert_called_once()
     video_sock.close.assert_called_once()
     rtcp_sock.close.assert_called_once()
-    assert bridge._video_sdp_path is None  # temp SDP cleaned up
     assert not bridge.is_running
 
 
@@ -828,13 +827,40 @@ def _patch_video_port(port: int = 55555):
     )
 
 
+async def _await_prewarm(bridge) -> None:
+    """Wait for the prewarm task to finish spawning ffmpeg — deterministic,
+    unlike counting bare event-loop ticks."""
+    await asyncio.wait_for(asyncio.shield(bridge._prewarm_task), timeout=5)
+
+
+async def test_video_input_is_an_inline_sdp_not_a_temp_file():
+    """The SDP describing the loopback VP8 stream is passed inline as a
+    `data:` URL: no disk I/O in the call setup path, nothing to clean up or
+    leak. ffmpeg must be allowed the `data` protocol to read it."""
+    with _patch_spawn([_make_fake_process()]) as spawn, _patch_video_port(55555):
+        bridge = AudioBridge()
+        bridge.prewarm(video=True)
+        await _await_prewarm(bridge)
+        args = list(spawn.await_args.args[1:])
+        await bridge.stop()
+
+    assert args[args.index("-protocol_whitelist") + 1] == "data,udp,rtp"
+    sdp_input = args[args.index("sdp") + 2]  # `-f sdp -i <url>`
+    prefix = "data:application/sdp;base64,"
+    assert sdp_input.startswith(prefix)
+    sdp = base64.b64decode(sdp_input.removeprefix(prefix)).decode()
+    assert "c=IN IP4 127.0.0.1\r\n" in sdp
+    assert "m=video 55555 RTP/AVP 96\r\n" in sdp
+    assert "a=rtpmap:96 VP8/90000\r\n" in sdp
+
+
 async def test_prewarm_ffmpeg_is_reused_by_video_start(fake_datagram_endpoint):
     """prewarm() spawns the video-SDP ffmpeg during SIP negotiation; a video
     start() must reuse that process instead of spawning a second one."""
     with _patch_spawn([_make_fake_process()]) as spawn, _patch_video_port():
         bridge = AudioBridge()
         bridge.prewarm(video=True)
-        await asyncio.sleep(0)
+        await _await_prewarm(bridge)
         assert spawn.await_count == 1
         args = " ".join(spawn.await_args.args[1:])
         assert "-f sdp" in args  # video variant, not the lavfi placeholder
@@ -852,7 +878,6 @@ async def test_prewarm_ffmpeg_is_reused_by_video_start(fake_datagram_endpoint):
         assert bridge.is_running
         assert spawn.await_count == 1  # no respawn — prewarmed process reused
         await bridge.stop()
-        assert bridge._video_sdp_path is None  # temp SDP cleaned up
 
 
 async def test_prewarm_discarded_when_server_rejects_video(fake_datagram_endpoint):
@@ -860,22 +885,13 @@ async def test_prewarm_discarded_when_server_rejects_video(fake_datagram_endpoin
     killed and the lavfi-placeholder variant spawned instead."""
     prewarm_proc = _make_fake_process()
     call_proc = _make_fake_process()
-    sdp_paths: list[str] = []
-    orig_write_sdp = AudioBridge._write_video_sdp
-
-    def _capture_sdp(self, port):
-        path = orig_write_sdp(self, port)
-        sdp_paths.append(path)
-        return path
-
     with (
         _patch_spawn([prewarm_proc, call_proc]) as spawn,
         _patch_video_port(),
-        patch.object(AudioBridge, "_write_video_sdp", _capture_sdp),
     ):
         bridge = AudioBridge()
         bridge.prewarm(video=True)
-        await asyncio.sleep(0)
+        await _await_prewarm(bridge)
 
         url = await bridge.start(
             rtp_socket=_fake_rtp_socket(16384),
@@ -888,37 +904,25 @@ async def test_prewarm_discarded_when_server_rejects_video(fake_datagram_endpoin
         second_args = " ".join(spawn.await_args_list[1].args[1:])
         assert "-f lavfi" in second_args
         assert "-f sdp" not in second_args
-        # The prewarm's temp SDP file must not leak.
-        assert sdp_paths and not os.path.exists(sdp_paths[0])
         await bridge.stop()
 
 
 async def test_stop_discards_unused_prewarm():
     """A call that dies before 200 OK never consumes the prewarm — stop()
-    must kill the process and clean the temp SDP file."""
+    must kill the process."""
     proc = _make_fake_process()
-    sdp_paths: list[str] = []
-    orig_write_sdp = AudioBridge._write_video_sdp
-
-    def _capture_sdp(self, port):
-        path = orig_write_sdp(self, port)
-        sdp_paths.append(path)
-        return path
-
     with (
         _patch_spawn([proc]),
         _patch_video_port(),
-        patch.object(AudioBridge, "_write_video_sdp", _capture_sdp),
     ):
         bridge = AudioBridge()
         bridge.prewarm(video=True)
-        await asyncio.sleep(0)
+        await _await_prewarm(bridge)
         await bridge.stop()
 
     proc.kill.assert_called_once()
     assert not bridge.is_running
     assert bridge._prewarm_task is None
-    assert sdp_paths and not os.path.exists(sdp_paths[0])
 
 
 async def test_cancel_prewarm_kills_process_without_stop():
@@ -931,12 +935,11 @@ async def test_cancel_prewarm_kills_process_without_stop():
         bridge.prewarm(video=True)
         await asyncio.sleep(0)
         bridge.cancel_prewarm()
-        for _ in range(10):
-            await asyncio.sleep(0)
-            if proc.kill.called:
-                break
-        proc.kill.assert_called_once()
         assert bridge._prewarm_task is None
+        # The reap is a background task that first awaits the in-flight
+        # prewarm — await it rather than spinning on bare event-loop ticks.
+        await bridge._prewarm_cleanup_task
+        proc.kill.assert_called_once()
         await bridge.stop()  # still safe afterwards
 
 

@@ -28,12 +28,11 @@ need the deprecated `audioop` module (removed from Python 3.13).
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
-import os
 import signal
 import socket
 import struct
-import tempfile
 import time
 from dataclasses import dataclass
 from typing import Callable
@@ -654,7 +653,26 @@ class _PrewarmedFfmpeg:
     stderr_task: asyncio.Task
     push_ready: asyncio.Event
     video_port: int | None
-    sdp_path: str | None
+
+
+def _video_sdp_url(ffmpeg_listen_port: int) -> str:
+    """Minimal SDP describing the VP8 RTP stream we feed ffmpeg, as an inline
+    `data:` URL.
+
+    ffmpeg uses it to demux the loopback UDP packets we push from
+    `_VideoRtpProtocol`. Passing it inline instead of through a temp file
+    keeps disk I/O entirely out of the call setup path (nothing to write off
+    the event loop, nothing to clean up or leak if HA dies mid-call)."""
+    sdp = (
+        "v=0\r\n"
+        "o=- 0 0 IN IP4 127.0.0.1\r\n"
+        "s=intratone-video\r\n"
+        "c=IN IP4 127.0.0.1\r\n"
+        "t=0 0\r\n"
+        f"m=video {ffmpeg_listen_port} RTP/AVP 96\r\n"
+        "a=rtpmap:96 VP8/90000\r\n"
+    )
+    return "data:application/sdp;base64," + base64.b64encode(sdp.encode()).decode()
 
 
 def _pick_free_udp_port() -> int:
@@ -702,7 +720,6 @@ class AudioBridge:
         self._video_rtp_transport: asyncio.DatagramTransport | None = None
         self._video_rtcp: _VideoRtcpProtocol | None = None
         self._video_rtcp_transport: asyncio.DatagramTransport | None = None
-        self._video_sdp_path: str | None = None
         # Total µ-law bytes written to ffmpeg stdin during the call. Compared
         # against the expected 8000 B/s consumption rate, it tells us whether
         # the bottleneck is upstream (we don't have data to push) or
@@ -763,21 +780,9 @@ class AudioBridge:
         self._prewarm_task = asyncio.create_task(self._do_prewarm(video))
 
     async def _do_prewarm(self, video: bool) -> _PrewarmedFfmpeg:
-        video_port: int | None = None
-        sdp_path: str | None = None
-        if video:
-            video_port = _pick_free_udp_port()
-            sdp_path = self._write_video_sdp(video_port)
+        video_port = _pick_free_udp_port() if video else None
         push_ready = asyncio.Event()
-        try:
-            process = await self._spawn_ffmpeg(video_sdp_path=sdp_path)
-        except Exception:
-            if sdp_path is not None:
-                try:
-                    os.unlink(sdp_path)
-                except OSError:
-                    pass
-            raise
+        process = await self._spawn_ffmpeg(video_port=video_port)
         stderr_task = asyncio.create_task(self._drain_stderr(process, push_ready))
         _LOGGER.debug("FFMPEG_PREWARM: spawned (video=%s)", video)
         return _PrewarmedFfmpeg(
@@ -786,7 +791,6 @@ class AudioBridge:
             stderr_task=stderr_task,
             push_ready=push_ready,
             video_port=video_port,
-            sdp_path=sdp_path,
         )
 
     async def _consume_prewarm(self) -> _PrewarmedFfmpeg | None:
@@ -855,11 +859,6 @@ class AudioBridge:
                 pass
         if not prewarmed.stderr_task.done():
             prewarmed.stderr_task.cancel()
-        if prewarmed.sdp_path is not None:
-            try:
-                os.unlink(prewarmed.sdp_path)
-            except OSError:
-                pass
 
     async def start(
         self,
@@ -952,7 +951,6 @@ class AudioBridge:
             self._process = prewarmed.process
             self._stderr_task = prewarmed.stderr_task
             self._ffmpeg_push_ready = prewarmed.push_ready
-            self._video_sdp_path = prewarmed.sdp_path
             ffmpeg_video_port = prewarmed.video_port
             _LOGGER.info(
                 "FFMPEG_PREWARM: adopting ffmpeg spawned during SIP negotiation"
@@ -969,10 +967,9 @@ class AudioBridge:
                 await self._discard_prewarm(prewarmed)
             if video_enabled:
                 ffmpeg_video_port = _pick_free_udp_port()
-                self._video_sdp_path = self._write_video_sdp(ffmpeg_video_port)
             self._ffmpeg_push_ready = asyncio.Event()
             self._process = await self._spawn_ffmpeg(
-                video_sdp_path=self._video_sdp_path
+                video_port=ffmpeg_video_port
             )
             self._stderr_task = asyncio.create_task(
                 self._drain_stderr(self._process, self._ffmpeg_push_ready)
@@ -1041,7 +1038,7 @@ class AudioBridge:
                 )
             except OSError:
                 # Fatal, not degradable to audio-only: ffmpeg was spawned
-                # with `-f sdp -i <path>` + `-map 1:v`, so with no video
+                # with `-f sdp -i data:…` + `-map 1:v`, so with no video
                 # packets ever arriving the RTSP muxer never initializes —
                 # the push-ready wait below would burn its full 15 s and NO
                 # media (audio included) would reach go2rtc. Tear down like
@@ -1287,37 +1284,6 @@ class AudioBridge:
         except Exception:  # noqa: BLE001
             _LOGGER.exception("PLI_LOOP crashed")
 
-    def _write_video_sdp(self, ffmpeg_listen_port: int) -> str:
-        """Write a minimal SDP describing the VP8 RTP stream we feed ffmpeg.
-
-        ffmpeg uses this to know how to demux the loopback UDP packets we push
-        from `_VideoRtpProtocol`. Returns the absolute file path."""
-        sdp = (
-            "v=0\r\n"
-            "o=- 0 0 IN IP4 127.0.0.1\r\n"
-            "s=intratone-video\r\n"
-            "c=IN IP4 127.0.0.1\r\n"
-            "t=0 0\r\n"
-            f"m=video {ffmpeg_listen_port} RTP/AVP 96\r\n"
-            "a=rtpmap:96 VP8/90000\r\n"
-        )
-        fd, path = tempfile.mkstemp(prefix="intratone-video-", suffix=".sdp")
-        with os.fdopen(fd, "w") as f:
-            f.write(sdp)
-        _LOGGER.debug(
-            "VIDEO_SDP_FILE: wrote %s for ffmpeg input — listens on 127.0.0.1:%d for VP8",
-            path, ffmpeg_listen_port,
-        )
-        return path
-
-    def _cleanup_video_sdp(self) -> None:
-        if self._video_sdp_path is not None:
-            try:
-                os.unlink(self._video_sdp_path)
-            except OSError:
-                pass
-            self._video_sdp_path = None
-
     async def stop(self) -> None:
         """Tear down ffmpeg + RTP socket(s) + keepalive. Always safe."""
         # Invalidate any in-flight start(): its next generation checkpoint
@@ -1384,7 +1350,6 @@ class AudioBridge:
             video_rtcp.close()
         if video_rtcp_transport is not None and not video_rtcp_transport.is_closing():
             video_rtcp_transport.close()
-        self._cleanup_video_sdp()
 
         if process is not None and process.returncode is None:
             if process.stdin is not None and not process.stdin.is_closing():
@@ -1457,7 +1422,6 @@ class AudioBridge:
                 except OSError:
                     pass
         await self._kill_ffmpeg_now()
-        self._cleanup_video_sdp()
         self._ffmpeg_push_ready = None
 
     async def _kill_ffmpeg_now(self) -> None:
@@ -1476,20 +1440,21 @@ class AudioBridge:
             stderr_task.cancel()
 
     async def _spawn_ffmpeg(
-        self, video_sdp_path: str | None = None
+        self, video_port: int | None = None
     ) -> asyncio.subprocess.Process:
         # HomeKit's Camera service requires a video stream alongside audio.
         # When the Intratone server negotiated VP8 video (m=video > 0 in 200
-        # OK), `video_sdp_path` points at an SDP file describing the RTP VP8
-        # stream we receive over loopback; ffmpeg transcodes VP8 → H.264 for
-        # HomeKit. Otherwise we synthesize a dark placeholder frame.
+        # OK), ffmpeg listens on loopback `video_port` for the RTP VP8 stream
+        # described by an inline SDP; it transcodes VP8 → H.264 for HomeKit.
+        # Otherwise we synthesize a dark placeholder frame.
         video_input: list[str]
-        if video_sdp_path is not None:
+        if video_port is not None:
             video_input = [
-                # `-protocol_whitelist` is required since SDP triggers UDP+RTP
-                # demuxers that aren't in ffmpeg's default safe list.
+                # `-protocol_whitelist` is required since the inline SDP
+                # (`data:`) triggers UDP+RTP demuxers that aren't in ffmpeg's
+                # default safe list.
                 "-protocol_whitelist",
-                "file,udp,rtp",
+                "data,udp,rtp",
                 # Force ffmpeg to start the demuxer on the first packet. The
                 # SDP already declares `a=rtpmap:96 VP8/90000`, so analysis is
                 # redundant. Intratone runs at ~2-5 fps and ~50 kbps; the
@@ -1506,7 +1471,7 @@ class AudioBridge:
                 "-f",
                 "sdp",
                 "-i",
-                video_sdp_path,
+                _video_sdp_url(video_port),
             ]
         else:
             video_input = [

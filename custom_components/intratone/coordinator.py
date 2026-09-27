@@ -384,11 +384,9 @@ class IntratoneCoordinator(DataUpdateCoordinator[CallState | None]):
         door_opened = self._call_manager.send_open_door(self.data.door_code)
 
         if door_opened:
-            _LOGGER.info(
-                "Door opened for call %s (code=%s)",
-                self.data.call_id,
-                self.data.door_code,
-            )
+            # The door code is deliberately not logged — it physically opens
+            # the building and logs get attached to issue reports.
+            _LOGGER.info("Door opened for call %s", self.data.call_id)
         else:
             _LOGGER.warning(
                 "Open door failed for call %s — no confirmed SIP call to send "
@@ -456,7 +454,8 @@ class IntratoneCoordinator(DataUpdateCoordinator[CallState | None]):
         self._pending = None
 
 
-_REDACT_KEYS = {"LOGIN", "PASS", "ip_adress"}
+# `codes` is the door code — masked like the SIP credentials (see diagnostics).
+_REDACT_KEYS = {"LOGIN", "PASS", "ip_adress", "codes"}
 
 
 def _redact(payload: dict) -> dict:

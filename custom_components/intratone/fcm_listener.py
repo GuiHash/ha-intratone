@@ -17,17 +17,16 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+import aiohttp
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import issue_registry as ir
 
+from .app_credentials import AppCredentials, resolve_app_credentials
 from .const import (
     DEVICE_BUNDLE_ID,
     DOMAIN,
-    FCM_API_KEY,
-    FCM_APP_ID,
-    FCM_PROJECT_ID,
-    FCM_SENDER_ID,
     FCM_TOKEN_ISSUE_PREFIX,
 )
 from .store import IntratoneCredentialsStore
@@ -52,20 +51,28 @@ STARTUP_POLL_TIMEOUT_S = 10
 HEALTHCHECK_INTERVAL_S = 30
 
 
-def _fcm_config():
+def _fcm_config(app_creds: AppCredentials):
     """Build the FcmRegisterConfig (lazy import to keep top-level light)."""
     from firebase_messaging import FcmRegisterConfig
 
     return FcmRegisterConfig(
-        project_id=FCM_PROJECT_ID,
-        app_id=FCM_APP_ID,
-        api_key=FCM_API_KEY,
-        messaging_sender_id=FCM_SENDER_ID,
+        project_id=app_creds.fcm_project_id,
+        app_id=app_creds.fcm_app_id,
+        api_key=app_creds.fcm_api_key,
+        messaging_sender_id=app_creds.fcm_sender_id,
         bundle_id=DEVICE_BUNDLE_ID,
     )
 
 
+class FcmRegistrationError(Exception):
+    """Google refused to register a push token (e.g. PHONE_REGISTRATION_ERROR).
+
+    Usually transient on Google's side — retrying later typically works.
+    """
+
+
 async def fcm_register_standalone(
+    app_creds: AppCredentials,
     existing_creds: dict | None = None,
 ) -> tuple[str, dict | None]:
     """Register with FCM and return (token, creds).
@@ -79,13 +86,20 @@ async def fcm_register_standalone(
     def _on_creds_updated(new_creds: dict) -> None:
         holder["creds"] = new_creds
 
-    client = FcmPushClient(
-        callback=lambda *_: None,
-        fcm_config=_fcm_config(),
-        credentials=existing_creds,
-        credentials_updated_callback=_on_creds_updated,
-    )
-    token = await client.checkin_or_register()
+    # Own the HTTP session: the library only closes its internal one on
+    # success, leaking it ("Unclosed client session") when registration fails.
+    async with aiohttp.ClientSession() as session:
+        client = FcmPushClient(
+            callback=lambda *_: None,
+            fcm_config=_fcm_config(app_creds),
+            credentials=existing_creds,
+            credentials_updated_callback=_on_creds_updated,
+            http_client_session=session,
+        )
+        try:
+            token = await client.checkin_or_register()
+        except RuntimeError as err:
+            raise FcmRegistrationError(str(err)) from err
     return token, holder["creds"]
 
 
@@ -194,7 +208,7 @@ class FcmListener:
 
         self._client = FcmPushClient(
             callback=_on_push,
-            fcm_config=_fcm_config(),
+            fcm_config=_fcm_config(resolve_app_credentials(self._entry.options)),
             credentials=creds,
             credentials_updated_callback=_on_creds_updated,
         )

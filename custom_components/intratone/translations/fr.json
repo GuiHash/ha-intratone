@@ -9,6 +9,18 @@
           "invite": "Code d'invitation (recommandé)"
         }
       },
+      "credentials": {
+        "title": "Identifiants applicatifs",
+        "description": "Saisissez les identifiants applicatifs utilisés pour dialoguer avec Intratone et recevoir les notifications de sonnerie (ceux de l'application officielle). Voir le README pour plus de détails.",
+        "data": {
+          "app_id": "App ID Intratone",
+          "app_token": "Token applicatif Intratone",
+          "fcm_project_id": "ID du projet Firebase",
+          "fcm_app_id": "App ID Firebase",
+          "fcm_api_key": "Clé API Firebase",
+          "fcm_sender_id": "Sender ID Firebase"
+        }
+      },
       "phone": {
         "title": "Connexion par SMS",
         "description": "Saisissez le numéro de téléphone rattaché à votre compte Intratone. Un code à 4 chiffres vous sera envoyé par SMS.",
@@ -67,7 +79,7 @@
       "invalid_code": "Le code d'invitation a été refusé par Intratone. Générez-en un nouveau et réessayez.",
       "invalid_sms_code": "Le code SMS a été refusé. Vérifiez les chiffres saisis et réessayez.",
       "sms_failed": "Intratone refuse d'envoyer un SMS à ce numéro. Vérifiez le numéro et l'indicatif pays.",
-      "fcm_failed": "Impossible de s'enregistrer auprès de Firebase. Vérifiez votre connexion.",
+      "fcm_failed": "Google a refusé d'enregistrer un jeton de notification pour Home Assistant. C'est généralement temporaire côté Google — patientez quelques minutes puis réessayez.",
       "auth_failed": "Impossible de s'authentifier auprès d'Intratone après l'enregistrement.",
       "mobipass_code_invalid": "Le code de transfert a été refusé. Vérifiez-le et réessayez.",
       "mobipass_code_blocked": "Trop de tentatives — le code de transfert est temporairement bloqué. Réessayez plus tard.",
@@ -75,7 +87,8 @@
       "mobipass_failed": "Le transfert de la CléMobil a échoué. Consultez les logs et réessayez.",
       "unknown": "Erreur inattendue. Consultez les logs.",
       "invalid_url": "Saisissez une URL RTSP valide (rtsp://hôte:port).",
-      "go2rtc_unreachable": "Aucun serveur RTSP ne répond à cette URL. Vérifiez que votre instance go2rtc autonome tourne et que l'adresse est correcte."
+      "go2rtc_unreachable": "Aucun serveur RTSP ne répond à cette URL. Vérifiez que votre instance go2rtc autonome tourne et que l'adresse est correcte.",
+      "credentials_missing": "Des identifiants applicatifs manquent : remplissez tous les champs."
     },
     "abort": {
       "already_configured": "Cet appareil Intratone est déjà configuré.",
@@ -135,6 +148,7 @@
           "invalid_format": "Format invalide. Attendu : `XXXXXX-XXXX`.",
           "invalid_code": "Le code d'invitation a été refusé par Intratone. Générez-en un nouveau et réessayez.",
           "auth_failed": "Impossible de s'authentifier auprès d'Intratone après le ré-enregistrement.",
+          "fcm_failed": "Google a refusé d'enregistrer un jeton de notification pour Home Assistant. C'est généralement temporaire côté Google — patientez quelques minutes puis réessayez.",
           "unknown": "Erreur inattendue. Consultez les logs."
         },
         "abort": {
@@ -158,12 +172,27 @@
         "data_description": {
           "video_enabled": "Négocie la vidéo VP8 avec la passerelle Intratone et la transmet à go2rtc. Désactivée, les entités caméra et rétroéclairage ne sont pas créées.",
           "go2rtc_url": "URL RTSP sur laquelle go2rtc écoute. Par défaut : rtsp://127.0.0.1:8554. Le go2rtc intégré à HA ne peut pas accepter ce flux — utilisez plutôt une instance go2rtc autonome. Cette URL est aussi transmise au pipeline stream/WebRTC de HA comme source de la caméra : elle doit être joignable depuis l'endroit où tourne le go2rtc de HA (le 127.0.0.1 par défaut convient aux installations sur un même hôte)."
+        },
+        "sections": {
+          "app_credentials": {
+            "name": "Identifiants applicatifs (avancé)",
+            "description": "Valeurs utilisées pour dialoguer avec Intratone et recevoir les notifications de sonnerie. Modifier une valeur Firebase impose un nouvel appairage pour que les notifications continuent de fonctionner.",
+            "data": {
+              "app_id": "App ID Intratone",
+              "app_token": "Token applicatif Intratone",
+              "fcm_project_id": "ID du projet Firebase",
+              "fcm_app_id": "App ID Firebase",
+              "fcm_api_key": "Clé API Firebase",
+              "fcm_sender_id": "Sender ID Firebase"
+            }
+          }
         }
       }
     },
     "error": {
       "invalid_url": "Saisissez une URL RTSP valide (rtsp://hôte:port).",
-      "go2rtc_unreachable": "Aucun serveur RTSP ne répond à cette URL. Vérifiez que votre instance go2rtc autonome tourne et que l'adresse est correcte."
+      "go2rtc_unreachable": "Aucun serveur RTSP ne répond à cette URL. Vérifiez que votre instance go2rtc autonome tourne et que l'adresse est correcte.",
+      "credentials_missing": "Des identifiants applicatifs manquent : remplissez tous les champs."
     }
   },
   "services": {

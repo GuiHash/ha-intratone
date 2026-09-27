@@ -1,4 +1,4 @@
-"""The Intratone Doorbell integration."""
+"""Unofficial Home Assistant integration for Intratone intercoms."""
 
 from __future__ import annotations
 
@@ -12,11 +12,12 @@ from homeassistant.components.network import async_get_source_ip
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall, callback
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
+from .app_credentials import AppCredentialsMissing, resolve_app_credentials
 from .call_manager import CallManager
 from .const import (
     CONF_FCM_CREDS,
@@ -151,6 +152,13 @@ async def async_setup(hass: HomeAssistant, _config: dict) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: IntratoneConfigEntry) -> bool:
     """Set up Intratone from a config entry."""
+    # Missing app credentials: surface a reauth so the user can enter them,
+    # instead of failing on the first request.
+    try:
+        resolve_app_credentials(entry.options)
+    except AppCredentialsMissing as err:
+        raise ConfigEntryAuthFailed(str(err)) from err
+
     session = async_get_clientsession(hass)
 
     store = IntratoneCredentialsStore(hass, entry.unique_id or entry.entry_id)

@@ -20,10 +20,9 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.event import async_track_time_interval
 
+from .app_credentials import AppCredentials, resolve_app_credentials
 from .const import (
     API_BASE,
-    APP_ID,
-    APP_TOKEN,
     APP_USER_AGENT,
     APP_VERSION,
     CONF_DEVICE_ID,
@@ -319,14 +318,15 @@ class IntratoneAPI:
         indicatif = self._entry.data.get(CONF_INDICATIF) or DEFAULT_INDICATIF
         candidates = _tel_candidates(self.tel, indicatif)
 
+        app_creds = resolve_app_credentials(self._entry.options)
         last_error: Exception | None = None
         for tel in candidates:
             try:
                 body = await self._post_form(
                     "api/auth/device",
                     {
-                        "app_id": APP_ID,
-                        "app_token": APP_TOKEN,
+                        "app_id": app_creds.app_id,
+                        "app_token": app_creds.app_token,
                         "tel": tel,
                         "device_id": self.device_id,
                         "appversion": APP_VERSION,
@@ -732,6 +732,7 @@ def _parse_accesses(body: dict[str, Any]) -> list[IntratoneAccess]:
 async def register_with_invite(
     session: aiohttp.ClientSession,
     *,
+    app_creds: AppCredentials,
     device_id: str,
     fcm_token: str,
     code: str,
@@ -742,8 +743,8 @@ async def register_with_invite(
     Returns the `data` block: {id, tel, ...}. Used during config_flow.
     """
     form = {
-        "app_id": APP_ID,
-        "app_token": APP_TOKEN,
+        "app_id": app_creds.app_id,
+        "app_token": app_creds.app_token,
         "code": code,
         "codepass": codepass,
         "os": DEVICE_OS,
@@ -947,6 +948,7 @@ async def validate_sms_code(
 async def authenticate_for_invite(
     session: aiohttp.ClientSession,
     *,
+    app_creds: AppCredentials,
     tel: str,
     device_id: str,
     indicatif: str = DEFAULT_INDICATIF,
@@ -966,8 +968,8 @@ async def authenticate_for_invite(
             async with session.post(
                 API_BASE + "api/auth/device",
                 data={
-                    "app_id": APP_ID,
-                    "app_token": APP_TOKEN,
+                    "app_id": app_creds.app_id,
+                    "app_token": app_creds.app_token,
                     "tel": candidate,
                     "device_id": device_id,
                     "appversion": APP_VERSION,
