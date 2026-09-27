@@ -360,7 +360,7 @@ async def test_stop_sends_sigterm_and_closes_socket(
 
     await bridge.stop()
 
-    assert getattr(fake_process, "_last_signal") == signal.SIGTERM
+    assert fake_process._last_signal == signal.SIGTERM
     fake_process.wait.assert_awaited()
     assert transport.closed is True
     assert not bridge.is_running
@@ -2050,7 +2050,7 @@ async def test_audio_is_dropped_once_ffmpeg_stdin_is_closing(
 
     await bridge.stop()
     fake_process.stdin.close.assert_not_called()
-    assert getattr(fake_process, "_last_signal") == signal.SIGTERM
+    assert fake_process._last_signal == signal.SIGTERM
 
 
 async def test_audio_forwarding_survives_ffmpeg_broken_pipe(
@@ -2103,7 +2103,7 @@ async def test_stop_tolerates_ffmpeg_stdin_close_error(
 
     await bridge.stop()  # must not raise
 
-    assert getattr(fake_process, "_last_signal") == signal.SIGTERM
+    assert fake_process._last_signal == signal.SIGTERM
     assert not bridge.is_running
 
 
