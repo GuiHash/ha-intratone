@@ -27,6 +27,7 @@ from custom_components.intratone.sip_client import (
     CallEstablished,
     CallState,
     IntratoneSipClient,
+    _first_audio_payload_type,
 )
 
 LOCAL_HOST = "192.168.1.50"
@@ -209,15 +210,20 @@ def _build_200_ok(
     from_tag: str,
     cseq: int,
     contact: str = "<sip:server@178.32.84.99:5060;transport=tcp>",
+    audio_pt: str = "0 101",
 ) -> bytes:
-    """200 OK with TCP Contact by default (matches Cogelec's blocip server)."""
+    """200 OK with TCP Contact by default (matches Cogelec's blocip server).
+
+    `audio_pt` is the format list on the `m=audio` line — override to simulate
+    a gateway answering with a codec other than PCMU first.
+    """
     sdp = (
         "v=0\r\n"
         "o=- 1 1 IN IP4 178.32.84.99\r\n"
         "s=-\r\n"
         "c=IN IP4 178.32.84.99\r\n"
         "t=0 0\r\n"
-        "m=audio 20002 RTP/AVP 0 101\r\n"
+        f"m=audio 20002 RTP/AVP {audio_pt}\r\n"
         "a=rtpmap:0 PCMU/8000\r\n"
         "a=rtpmap:101 telephone-event/8000\r\n"
     )
@@ -260,6 +266,73 @@ def test_200_ok_acks_and_notifies_with_rtp_endpoint(client_setup):
         remote_rtp_port=20002,
         local_rtp_port=LOCAL_RTP,
     )
+    assert client._call.state == CallState.CONFIRMED
+
+
+# --- audio payload-type diagnostics -----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "sdp, expected",
+    [
+        ("m=audio 1234 RTP/AVP 0 101", 0),
+        ("m=audio 1234 RTP/AVP 8 101", 8),
+        ("v=0\r\ns=-\r\nt=0 0\r\n", None),  # no m=audio line
+        ("not an sdp body at all", None),  # garbage
+    ],
+)
+def test_first_audio_payload_type(sdp, expected):
+    assert _first_audio_payload_type(sdp) == expected
+
+
+def test_200_ok_with_non_pcmu_audio_logs_one_warning(client_setup, caplog):
+    """A gateway answering a non-PCMU codec first must produce exactly one
+    WARNING — enough to diagnose a garbled-audio report — without touching
+    call establishment (same callback/state as a PCMU answer)."""
+    client, transport, established, _ = client_setup
+    call_id = client.call(TARGET_URI, LOCAL_RTP, USERNAME, PASSWORD)
+    branch, from_tag = _branch_and_tag_from_invite(transport.sent[0])
+    client.data_received(_build_407(call_id, branch, from_tag))
+
+    with caplog.at_level(
+        logging.WARNING, logger="custom_components.intratone.sip_client"
+    ):
+        caplog.clear()
+        client.data_received(
+            _build_200_ok(call_id, from_tag, 51, audio_pt="8 101")
+        )
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "8" in warnings[0]
+    assert "PCMU" in warnings[0]
+
+    # Call establishment is unaffected by the codec mismatch.
+    assert len(established) == 1
+    assert established[0] == CallEstablished(
+        call_id=call_id,
+        remote_rtp_ip="178.32.84.99",
+        remote_rtp_port=20002,
+        local_rtp_port=LOCAL_RTP,
+    )
+    assert client._call.state == CallState.CONFIRMED
+
+
+def test_200_ok_with_pcmu_audio_logs_no_warning(client_setup, caplog):
+    """The common case (gateway answers PCMU first) must not warn."""
+    client, transport, established, _ = client_setup
+    call_id = client.call(TARGET_URI, LOCAL_RTP, USERNAME, PASSWORD)
+    branch, from_tag = _branch_and_tag_from_invite(transport.sent[0])
+    client.data_received(_build_407(call_id, branch, from_tag))
+
+    with caplog.at_level(
+        logging.WARNING, logger="custom_components.intratone.sip_client"
+    ):
+        caplog.clear()
+        client.data_received(_build_200_ok(call_id, from_tag, 51))
+
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(established) == 1
     assert client._call.state == CallState.CONFIRMED
 
 
