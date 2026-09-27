@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from homeassistant.components.camera.webrtc import CameraWebRTCProvider
 
 from custom_components.intratone.camera import IntratoneCamera
 
@@ -29,8 +30,12 @@ def coordinator(hass, mock_entry):
     return coord
 
 
-class _RecordingProvider:
-    """Fake WebRTC provider capturing what stream_source it was offered."""
+class _RecordingProvider(CameraWebRTCProvider):
+    """Fake WebRTC provider capturing what stream_source it was offered.
+
+    Subclasses core's ABC so the optional callbacks it invokes on selection
+    (async_register_camera & friends) come from core's no-op defaults.
+    """
 
     domain = "fake_go2rtc"
 
@@ -40,6 +45,12 @@ class _RecordingProvider:
     def async_is_supported(self, stream_source: str) -> bool:
         self.seen.append(stream_source)
         return True
+
+    async def async_handle_async_webrtc_offer(self, *args, **kwargs) -> None:
+        raise NotImplementedError
+
+    async def async_on_webrtc_candidate(self, *args, **kwargs) -> None:
+        raise NotImplementedError
 
 
 _PUSH_WITH_SIP = {
