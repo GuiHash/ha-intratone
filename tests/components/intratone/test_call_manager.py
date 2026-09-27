@@ -66,12 +66,11 @@ def ended_calls():
 
 
 @pytest.fixture
-async def manager(hass, fake_bridge, active_calls, ended_calls):
+async def manager(fake_bridge, active_calls, ended_calls):
     """A started CallManager whose `create_connection` is mocked to install
     a fake TCP transport on the protocol. Also stubs `_bind_rtp_socket` so
     pytest-socket's network ban doesn't trip."""
     mgr = CallManager(
-        hass,
         local_host=LOCAL_HOST,
         on_call_active=lambda call_id, url: active_calls.append((call_id, url)),
         on_call_ended=lambda call_id: ended_calls.append(call_id),
@@ -118,9 +117,8 @@ async def test_async_start_is_idempotent(manager):
     assert manager.is_running
 
 
-async def test_start_call_without_starting_returns_none(hass, fake_bridge):
+async def test_start_call_without_starting_returns_none(fake_bridge):
     mgr = CallManager(
-        hass,
         local_host=LOCAL_HOST,
         on_call_active=lambda *_: None,
         on_call_ended=lambda *_: None,
@@ -157,11 +155,10 @@ async def test_second_overlapping_ring_is_ignored(manager):
     assert len(manager._test_transports) == 1  # type: ignore[attr-defined]
 
 
-async def test_sip_tcp_connect_failure_returns_none(hass, fake_bridge):
+async def test_sip_tcp_connect_failure_returns_none(fake_bridge):
     """If `create_connection` raises (DNS failure, refused), `start_call`
     returns None and the RTP socket is closed — next ring isn't blocked."""
     mgr = CallManager(
-        hass,
         local_host=LOCAL_HOST,
         on_call_active=lambda *_: None,
         on_call_ended=lambda *_: None,
@@ -577,11 +574,10 @@ async def test_max_call_duration_forces_teardown(manager, fake_bridge, ended_cal
 # --- ffmpeg prewarm -------------------------------------------------------
 
 
-async def test_start_call_prewarms_video_ffmpeg(hass, fake_bridge):
+async def test_start_call_prewarms_video_ffmpeg(fake_bridge):
     """With video enabled, start_call must kick the ffmpeg prewarm right after
     the INVITE goes out — its startup overlaps the INVITE→200 OK round-trip."""
     mgr = CallManager(
-        hass,
         local_host=LOCAL_HOST,
         on_call_active=lambda *_: None,
         on_call_ended=lambda *_: None,

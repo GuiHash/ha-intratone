@@ -173,7 +173,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: IntratoneConfigEntry) ->
             f"(async_get_source_ip returned {local_ip!r})."
         )
     call_manager = CallManager(
-        hass,
         local_host=local_ip,
         on_call_active=lambda call_id, url: coordinator.set_stream_url(call_id, url),
         on_call_ended=lambda call_id: coordinator.set_stream_url(call_id, None),
