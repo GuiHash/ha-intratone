@@ -133,4 +133,7 @@ actions:
         then:
           - action: lock.unlock
             target:
-              entity_id: !input door_lock
+              # Template, not `!input door_lock`: the input defaults to "",
+              # which fails config validation and kills the whole automation
+              # even though this branch never runs without a lock.
+              entity_id: "{{ door_lock }}"
