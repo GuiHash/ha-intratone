@@ -1,4 +1,4 @@
-pytest-homeassistant-custom-component==0.13.195 ; python_version == "3.12"
+pytest-homeassistant-custom-component==0.13.205 ; python_version == "3.12"
 pytest-homeassistant-custom-component==0.13.316 ; python_version == "3.13"
 pytest-homeassistant-custom-component>=0.13.366 ; python_version >= "3.14"
 pytest-xdist
@@ -11,6 +11,6 @@ voip-utils>=0.5.0
 PyTurboJPEG
 # HA's go2rtc WebRTC provider is exercised for real in test_camera_e2e.py —
 # pinned to what each HA version's go2rtc manifest requires.
-go2rtc-client==0.1.1 ; python_version == "3.12"
+go2rtc-client==0.1.2 ; python_version == "3.12"
 go2rtc-client==0.4.0 ; python_version == "3.13"
 go2rtc-client ; python_version >= "3.14"
