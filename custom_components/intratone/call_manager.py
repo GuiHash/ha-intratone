@@ -31,6 +31,8 @@ import logging
 import socket
 from typing import Callable
 
+from homeassistant.core import HomeAssistant
+
 from .audio_bridge import AudioBridge, BridgeStoppedError
 from .sip_client import CallEstablished, IntratoneSipClient
 
@@ -129,6 +131,7 @@ class CallManager:
 
     def __init__(
         self,
+        hass: HomeAssistant,
         local_host: str,
         on_call_active: Callable[[str, str], None],
         on_call_ended: Callable[[str], None],
@@ -142,6 +145,7 @@ class CallManager:
         self._on_call_ended = on_call_ended
         self._video_enabled = video_enabled
         self._bridge = audio_bridge or AudioBridge(
+            hass,
             rtsp_relay_url=go2rtc_url.rstrip("/"),
             on_relay_status=on_relay_status,
         )

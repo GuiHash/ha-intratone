@@ -412,6 +412,28 @@ def test_send_open_door_with_custom_code(client_setup):
     assert body == b"opendoor:5"
 
 
+def test_send_open_door_never_logs_the_door_code(client_setup, caplog):
+    """The door code physically opens the building and logs get attached to
+    issue reports — it must not appear in any record, INFO or DEBUG. The SIP
+    body is masked the same way the credentials are."""
+    client, transport, _, _ = client_setup
+    call_id, _ = _confirm_call(client, transport)
+
+    with caplog.at_level(
+        logging.DEBUG, logger="custom_components.intratone.sip_client"
+    ):
+        caplog.clear()
+        assert client.send_open_door(call_id, code="1234") is True
+
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "open-door" in text  # the send is still traceable...
+    assert "1234" not in text  # ...without the code
+    assert "opendoor:<redacted>" in text
+    # The code still reaches the server unredacted.
+    _, _, body = _parse(transport.sent[-1])
+    assert body == b"opendoor:1234"
+
+
 def test_send_open_door_fails_when_call_not_confirmed(client_setup):
     """Cannot send in-dialog MESSAGE if the dialog hasn't been established."""
     client, transport, _, _ = client_setup

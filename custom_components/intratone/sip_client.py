@@ -58,6 +58,9 @@ _SESSION_EXPIRES_S = 1800
 _AUTH_MASK_RE = re.compile(
     r"(?im)^((?:proxy-)?authorization):.*$", re.MULTILINE
 )
+# The `opendoor:<code>` MESSAGE body carries the door code, which physically
+# opens the building — mask it like the credentials above.
+_DOOR_CODE_MASK_RE = re.compile(r"(?im)^(opendoor):.*$", re.MULTILINE)
 # Extract every Via header from a raw SIP request — we need all of them in the
 # response per RFC 3261 §17.2.1, but voip_utils' SipMessage uses a single-value
 # dict that collapses multi-Via into one entry.
@@ -96,7 +99,8 @@ def _extract_video_endpoint(sdp_body: str | bytes) -> tuple[str, int] | None:
 
 def _redact_sip(message: bytes) -> str:
     text = message.decode("utf-8", errors="replace")
-    return _AUTH_MASK_RE.sub(lambda m: f"{m.group(1)}: <redacted>", text)
+    text = _AUTH_MASK_RE.sub(lambda m: f"{m.group(1)}: <redacted>", text)
+    return _DOOR_CODE_MASK_RE.sub(lambda m: f"{m.group(1)}:<redacted>", text)
 
 
 def _extract_via_headers(raw_data: bytes) -> list[str]:
@@ -363,8 +367,9 @@ class IntratoneSipClient(asyncio.Protocol):
         """Send in-dialog SIP MESSAGE `opendoor:<code>` to trigger the door
         relay. This rides the same TCP connection that carried the INVITE,
         matching the Cogelec app's behavior (in-dialog ChatRoom.send())."""
+        # `label` is logged at INFO — keep the code out of it (see _redact_sip).
         return self._send_in_dialog_message(
-            call_id, body=f"opendoor:{code}", label=f"open-door (code={code})"
+            call_id, body=f"opendoor:{code}", label="open-door"
         )
 
     def send_mute_off(self, call_id: str) -> bool:
