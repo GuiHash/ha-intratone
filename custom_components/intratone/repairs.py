@@ -29,7 +29,7 @@ from .const import (
     INVITE_RE,
     MOBIPASS_ERRORS,
 )
-from .fcm_listener import fcm_register_standalone
+from .fcm_listener import FcmRegistrationError, fcm_register_standalone
 from .rest_api import (
     IntratoneApiError,
     IntratoneAuthError,
@@ -170,6 +170,9 @@ class FcmTokenStaleRepairFlow(RepairsFlow):
                 except IntratoneApiError as err:
                     _LOGGER.warning("FCM re-pair API error: %s", err)
                     errors["base"] = "auth_failed"
+                except FcmRegistrationError as err:
+                    _LOGGER.warning("FCM registration failed: %s", err)
+                    errors["base"] = "fcm_failed"
                 except Exception:  # noqa: BLE001
                     _LOGGER.exception("Unexpected FCM re-pair error")
                     errors["base"] = "unknown"

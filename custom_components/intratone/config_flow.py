@@ -44,7 +44,7 @@ from .const import (
     REGISTER_METHOD_INVITE,
     REGISTER_METHOD_SMS,
 )
-from .fcm_listener import fcm_register_standalone
+from .fcm_listener import FcmRegistrationError, fcm_register_standalone
 from .go2rtc import async_probe_go2rtc
 from .rest_api import (
     IntratoneApiError,
@@ -325,12 +325,12 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
                 except IntratoneApiError as err:
                     _LOGGER.warning("register API error: %s", err)
                     errors["base"] = "sms_failed"
-                except Exception as err:  # noqa: BLE001
+                except FcmRegistrationError as err:
+                    _LOGGER.warning("FCM registration failed: %s", err)
+                    errors["base"] = "fcm_failed"
+                except Exception:  # noqa: BLE001
                     _LOGGER.exception("Unexpected register error")
-                    if "fcm" in str(err).lower() or "firebase" in str(err).lower():
-                        errors["base"] = "fcm_failed"
-                    else:
-                        errors["base"] = "unknown"
+                    errors["base"] = "unknown"
                 else:
                     self._pending_sms = {
                         "device_id": device_id,
@@ -630,12 +630,12 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
                 except IntratoneApiError as err:
                     _LOGGER.warning("API error during pairing: %s", err)
                     errors["base"] = "auth_failed"
-                except Exception as err:  # noqa: BLE001
+                except FcmRegistrationError as err:
+                    _LOGGER.warning("FCM registration failed: %s", err)
+                    errors["base"] = "fcm_failed"
+                except Exception:  # noqa: BLE001
                     _LOGGER.exception("Unexpected pairing error")
-                    if "fcm" in str(err).lower() or "firebase" in str(err).lower():
-                        errors["base"] = "fcm_failed"
-                    else:
-                        errors["base"] = "unknown"
+                    errors["base"] = "unknown"
                 else:
                     await self.async_set_unique_id(entry_data[CONF_NUMERIC_ID])
 

@@ -79,7 +79,7 @@
       "invalid_code": "Le code d'invitation a été refusé par Intratone. Générez-en un nouveau et réessayez.",
       "invalid_sms_code": "Le code SMS a été refusé. Vérifiez les chiffres saisis et réessayez.",
       "sms_failed": "Intratone refuse d'envoyer un SMS à ce numéro. Vérifiez le numéro et l'indicatif pays.",
-      "fcm_failed": "Impossible de s'enregistrer auprès de Firebase. Vérifiez votre connexion.",
+      "fcm_failed": "Google a refusé d'enregistrer un jeton de notification pour Home Assistant. C'est généralement temporaire côté Google — patientez quelques minutes puis réessayez.",
       "auth_failed": "Impossible de s'authentifier auprès d'Intratone après l'enregistrement.",
       "mobipass_code_invalid": "Le code de transfert a été refusé. Vérifiez-le et réessayez.",
       "mobipass_code_blocked": "Trop de tentatives — le code de transfert est temporairement bloqué. Réessayez plus tard.",
@@ -148,6 +148,7 @@
           "invalid_format": "Format invalide. Attendu : `XXXXXX-XXXX`.",
           "invalid_code": "Le code d'invitation a été refusé par Intratone. Générez-en un nouveau et réessayez.",
           "auth_failed": "Impossible de s'authentifier auprès d'Intratone après le ré-enregistrement.",
+          "fcm_failed": "Google a refusé d'enregistrer un jeton de notification pour Home Assistant. C'est généralement temporaire côté Google — patientez quelques minutes puis réessayez.",
           "unknown": "Erreur inattendue. Consultez les logs."
         },
         "abort": {

@@ -10,7 +10,11 @@ import pytest
 from firebase_messaging.fcmpushclient import FcmPushClientRunState
 
 from custom_components.intratone import fcm_listener
-from custom_components.intratone.fcm_listener import FcmListener
+from custom_components.intratone.fcm_listener import (
+    FcmListener,
+    FcmRegistrationError,
+    fcm_register_standalone,
+)
 
 
 @pytest.fixture
@@ -228,3 +232,21 @@ async def test_async_stop_is_clean(
     await asyncio.sleep(0.05)
     assert fake_client.call_count == client_constructions == 1
     assert states == [True, False]
+
+
+async def test_register_standalone_failure_is_typed_and_closes_session(
+    app_creds,
+) -> None:
+    """A refused registration raises FcmRegistrationError and leaves no
+    unclosed aiohttp session behind (issue #124: "Unclosed client session")."""
+    client = MagicMock()
+    client.checkin_or_register = AsyncMock(
+        side_effect=RuntimeError(
+            "Unable to establish subscription with Google Cloud Messaging."
+        )
+    )
+    with patch("firebase_messaging.FcmPushClient", return_value=client) as cls:
+        with pytest.raises(FcmRegistrationError):
+            await fcm_register_standalone(app_creds)
+    session = cls.call_args.kwargs["http_client_session"]
+    assert session.closed
