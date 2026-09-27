@@ -9,6 +9,7 @@ from homeassistant.core import HomeAssistant
 
 from . import IntratoneConfigEntry
 from .const import (
+    APP_CREDENTIAL_KEYS,
     CONF_DEVICE_ID,
     CONF_FCM_CREDS,
     CONF_FCM_TOKEN,
@@ -29,6 +30,9 @@ REDACT_ENTRY = {
 }
 
 REDACT_STORE = {"jwt", "fcm_token", "fcm_creds"}
+
+# User-supplied app credential overrides (see app_credentials.py).
+REDACT_OPTIONS = set(APP_CREDENTIAL_KEYS)
 
 # door_code is sent as `opendoor:<code>` to trigger the relay — building-
 # security-adjacent, so keep it out of dumps users attach to GitHub issues.
@@ -61,7 +65,7 @@ async def async_get_config_entry_diagnostics(
     return {
         "entry": {
             "data": async_redact_data(dict(entry.data), REDACT_ENTRY),
-            "options": dict(entry.options),
+            "options": async_redact_data(dict(entry.options), REDACT_OPTIONS),
         },
         "store": async_redact_data(store.snapshot(), REDACT_STORE)
         if store is not None

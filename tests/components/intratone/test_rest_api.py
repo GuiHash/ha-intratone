@@ -14,6 +14,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.intratone.const import (
     API_BASE,
+    CONF_APP_TOKEN,
     CONF_DEVICE_ID,
     CONF_INDICATIF,
     CONF_NUMERIC_ID,
@@ -88,6 +89,31 @@ async def test_answer_call_retries_after_jwt_refresh(hass, mock_entry, aiomock) 
     # Refreshed JWT now lives in the Store, not in entry.data.
     assert store.jwt == "newjwt"
 
+
+async def test_authenticate_device_uses_entry_credential_override(
+    hass, mock_entry_data, aiomock, default_credentials
+) -> None:
+    """An app credential set in the entry options wins over the default;
+    the other keys still come from the defaults."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="3844428",
+        data=mock_entry_data,
+        options={CONF_APP_TOKEN: "user-token"},
+    )
+    entry.add_to_hass(hass)
+    store = await _seeded_store(hass)
+    api = IntratoneAPI(hass, async_get_clientsession(hass), entry, store)
+
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={"state": "ok", "data": {"jwt": "newjwt", "id": "3844428"}},
+    )
+    await api.authenticate_device()
+
+    sent = next(iter(aiomock.requests.values()))[0]
+    assert sent.kwargs["data"]["app_token"] == "user-token"
+    assert sent.kwargs["data"]["app_id"] == default_credentials["app_id"]
 
 async def test_open_access_success(hass, mock_entry, aiomock) -> None:
     mock_entry.add_to_hass(hass)
@@ -400,13 +426,14 @@ async def test_mobipass_sms_already_sent_is_not_an_error(
     await api.mobipass_activate()
 
 
-async def test_register_with_invite_returns_data(hass, aiomock) -> None:
+async def test_register_with_invite_returns_data(hass, aiomock, app_creds) -> None:
     aiomock.post(
         f"{API_BASE}api/auth/registercodes",
         payload={"state": "ok", "data": {"id": "999", "tel": "0612345678"}},
     )
     data = await register_with_invite(
         async_get_clientsession(hass),
+        app_creds=app_creds,
         device_id="ha-test",
         fcm_token="tok",
         code="123456",
@@ -414,9 +441,12 @@ async def test_register_with_invite_returns_data(hass, aiomock) -> None:
     )
     assert data["id"] == "999"
     assert data["tel"] == "0612345678"
+    sent = next(iter(aiomock.requests.values()))[0]
+    assert sent.kwargs["data"]["app_id"] == app_creds.app_id
+    assert sent.kwargs["data"]["app_token"] == app_creds.app_token
 
 
-async def test_register_with_invite_rejected(hass, aiomock) -> None:
+async def test_register_with_invite_rejected(hass, aiomock, app_creds) -> None:
     aiomock.post(
         f"{API_BASE}api/auth/registercodes",
         payload={"state": "error", "message": "code expired"},
@@ -424,6 +454,7 @@ async def test_register_with_invite_rejected(hass, aiomock) -> None:
     with pytest.raises(IntratoneAuthError):
         await register_with_invite(
             async_get_clientsession(hass),
+            app_creds=app_creds,
             device_id="ha-test",
             fcm_token="tok",
             code="000000",
@@ -431,7 +462,7 @@ async def test_register_with_invite_rejected(hass, aiomock) -> None:
         )
 
 
-async def test_authenticate_for_invite_tries_normalized_phone(hass, aiomock) -> None:
+async def test_authenticate_for_invite_tries_normalized_phone(hass, aiomock, app_creds) -> None:
     aiomock.post(
         f"{API_BASE}api/auth/device",
         payload={"state": "ok", "data": {}},
@@ -441,7 +472,7 @@ async def test_authenticate_for_invite_tries_normalized_phone(hass, aiomock) -> 
         payload={"state": "ok", "data": {"jwt": "ok", "id": "9"}},
     )
     data = await authenticate_for_invite(
-        async_get_clientsession(hass), tel="0612345678", device_id="ha-test"
+        async_get_clientsession(hass), app_creds=app_creds, tel="0612345678", device_id="ha-test"
     )
     assert data["jwt"] == "ok"
 
@@ -499,11 +530,12 @@ async def test_answer_call_non_json_body_raises_api_error(
     assert store.jwt == "newjwt"
 
 
-async def test_register_with_invite_non_json_raises_api_error(hass, aiomock) -> None:
+async def test_register_with_invite_non_json_raises_api_error(hass, aiomock, app_creds) -> None:
     aiomock.post(f"{API_BASE}api/auth/registercodes", body="<html>oops</html>")
     with pytest.raises(IntratoneApiError):
         await register_with_invite(
             async_get_clientsession(hass),
+            app_creds=app_creds,
             device_id="ha-test",
             fcm_token="tok",
             code="123456",
@@ -511,7 +543,7 @@ async def test_register_with_invite_non_json_raises_api_error(hass, aiomock) -> 
         )
 
 
-async def test_authenticate_for_invite_skips_non_json_candidate(hass, aiomock) -> None:
+async def test_authenticate_for_invite_skips_non_json_candidate(hass, aiomock, app_creds) -> None:
     """A non-JSON body for one candidate moves on to the next (the
     per-candidate `continue` must actually be reachable)."""
     aiomock.post(f"{API_BASE}api/auth/device", body="<html>oops</html>")
@@ -520,7 +552,7 @@ async def test_authenticate_for_invite_skips_non_json_candidate(hass, aiomock) -
         payload={"state": "ok", "data": {"jwt": "ok", "id": "9"}},
     )
     data = await authenticate_for_invite(
-        async_get_clientsession(hass), tel="0612345678", device_id="ha-test"
+        async_get_clientsession(hass), app_creds=app_creds, tel="0612345678", device_id="ha-test"
     )
     assert data["jwt"] == "ok"
 
@@ -580,7 +612,7 @@ async def test_validate_sms_code_timeout_wrapped(hass, aiomock) -> None:
         )
 
 
-async def test_authenticate_for_invite_network_error_wrapped(hass, aiomock) -> None:
+async def test_authenticate_for_invite_network_error_wrapped(hass, aiomock, app_creds) -> None:
     aiomock.post(
         f"{API_BASE}api/auth/device",
         exception=aiohttp.ClientConnectionError("reset"),
@@ -588,7 +620,7 @@ async def test_authenticate_for_invite_network_error_wrapped(hass, aiomock) -> N
     )
     with pytest.raises(IntratoneApiError):
         await authenticate_for_invite(
-            async_get_clientsession(hass), tel="0612345678", device_id="ha-test"
+            async_get_clientsession(hass), app_creds=app_creds, tel="0612345678", device_id="ha-test"
         )
 
 
@@ -732,7 +764,7 @@ async def test_authenticate_device_no_jwt_message_is_helpful(
 
 
 async def test_authenticate_for_invite_failure_masks_credentials(
-    hass, aiomock
+    hass, aiomock, app_creds
 ) -> None:
     """The no-JWT error must not dump tel/device_id from the response body."""
     aiomock.post(
@@ -745,7 +777,7 @@ async def test_authenticate_for_invite_failure_masks_credentials(
     )
     with pytest.raises(IntratoneAuthError) as exc:
         await authenticate_for_invite(
-            async_get_clientsession(hass), tel="0612345678", device_id="devsecret123"
+            async_get_clientsession(hass), app_creds=app_creds, tel="0612345678", device_id="devsecret123"
         )
     assert "0612345678" not in str(exc.value)
     assert "devsecret123" not in str(exc.value)
@@ -920,7 +952,7 @@ def _auth_device_calls(aiomock):
     )
 
 
-async def test_authenticate_for_invite_uses_indicatif_kwarg(hass, aiomock) -> None:
+async def test_authenticate_for_invite_uses_indicatif_kwarg(hass, aiomock, app_creds) -> None:
     aiomock.post(f"{API_BASE}api/auth/device", payload={"state": "ok", "data": {}})
     aiomock.post(
         f"{API_BASE}api/auth/device",
@@ -928,6 +960,7 @@ async def test_authenticate_for_invite_uses_indicatif_kwarg(hass, aiomock) -> No
     )
     data = await authenticate_for_invite(
         async_get_clientsession(hass),
+        app_creds=app_creds,
         tel="0612345678",
         device_id="ha-test",
         indicatif="32",
