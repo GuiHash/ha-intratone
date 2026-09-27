@@ -1,5 +1,5 @@
 {
-  "name": "Intratone Doorbell",
+  "name": "Doorbell for Intratone (unofficial)",
   "render_readme": true,
   "homeassistant": "2025.1.0",
   "country": "FR",

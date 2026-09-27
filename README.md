@@ -1,6 +1,9 @@
-# Intratone Doorbell — Home Assistant integration
+# Doorbell for Intratone (unofficial) — Home Assistant integration
 
-Native Home Assistant integration for the **Intratone** intercom system (manufactured by Cogelec, widely deployed in French apartment buildings). Exposes your apartment intercom as native HA entities and as a HomeKit accessory so calls ring directly on your iPhone, with one-way audio + video and a door-unlock button. It also exposes Intratone's *Clé mobile* / **mobipass** remote-open accesses as lock entities, so you can open your building's gate **on demand without anyone ringing** — including hands-free via a voice assistant.
+> [!IMPORTANT]
+> **This is an unofficial, community-developed project.** It is not affiliated with, endorsed by, sponsored by, or supported by Cogelec. "Intratone" is a registered trademark of Cogelec, used here solely to describe which intercom system this software is compatible with. For support with your Intratone hardware or account, contact Cogelec or your building manager — not this project.
+
+Unofficial Home Assistant integration for the **Intratone** intercom system (manufactured by Cogelec, widely deployed in French apartment buildings). Exposes your apartment intercom as native HA entities and as a HomeKit accessory so calls ring directly on your iPhone, with one-way audio + video and a door-unlock button. It also exposes Intratone's *Clé mobile* / **mobipass** remote-open accesses as lock entities, so you can open your building's gate **on demand without anyone ringing** — including hands-free via a voice assistant.
 
 [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=GuiHash&repository=ha-intratone&category=integration)
 
@@ -125,7 +128,7 @@ Or manually:
 
 1. HACS → ⋮ menu → **Custom repositories**
 2. Add `https://github.com/GuiHash/ha-intratone` with category **Integration**
-3. Search **Intratone Doorbell** → Install
+3. Search **Doorbell for Intratone (unofficial)** → Install
 4. Restart Home Assistant
 
 ### Manual
@@ -140,7 +143,7 @@ cp -r /tmp/ha-intratone/custom_components/intratone <your HA config>/custom_comp
 
 ## Pairing
 
-In Home Assistant: **Settings → Devices & Services → Add Integration → Intratone Doorbell**. Pick one of two paths.
+In Home Assistant: **Settings → Devices & Services → Add Integration → Doorbell for Intratone (unofficial)**. Pick one of two paths.
 
 > **Which path should I pick?** If you want ring-free **remote opening** (the *Clé mobile* / CléMobil, exposed as `lock.intratone_<ID>_<access>`), use **Path B (invitation code)**. SMS pairing only ever gets you the doorbell and opening a door *during a call* — an SMS-registered device is never provisioned for the *Clé mobile* (see [issue #61](https://github.com/GuiHash/ha-intratone/issues/61)).
 
@@ -168,7 +171,7 @@ Since ~mid-2026 Intratone lets **only one device per phone number** hold the rem
 
 To move it onto Home Assistant:
 
-1. **Settings → Devices & Services → Intratone Doorbell → ⋮ → Reconfigure**.
+1. **Settings → Devices & Services → Doorbell for Intratone (unofficial) → ⋮ → Reconfigure**.
 2. Read the warning and confirm. Intratone texts a **one-time transfer code** to your account's phone number.
 3. Enter the code. On success the access locks appear within a few seconds.
 
@@ -292,11 +295,15 @@ The integration stores in the HA config entry:
 
 No call history, audio, or video is persisted to disk by the integration — RTP frames are transcoded and forwarded to go2rtc/HomeKit in real time, then dropped.
 
-**Settings → Devices & Services → Intratone Doorbell → ⋮ → Download diagnostics** produces a JSON dump for issue reports; phone number, JWT, FCM token + credentials, device id, numeric id and the caller SIP login are redacted automatically before download.
+**Settings → Devices & Services → Doorbell for Intratone (unofficial) → ⋮ → Download diagnostics** produces a JSON dump for issue reports; phone number, JWT, FCM token + credentials, device id, numeric id and the caller SIP login are redacted automatically before download.
 
 ## Credits
 
 Reverse-engineered from the official Cogelec / Intratone Android app (APK 4.6.3, plus the mobipass transfer flow from 4.6.4) and iOS app (IPA 4.4.10). HTTP, SIP and RTP behaviour mirrors what the official app does so the integration cohabits cleanly alongside it on the same account. See [`INTRATONE_API.md`](INTRATONE_API.md) for the full API notes, including the *Clé mobile* / mobipass remote-open and transfer endpoints.
+
+## Trademarks
+
+"Intratone" and "Cogelec" are trademarks of Cogelec. This project is independent and is not affiliated with, endorsed by, or sponsored by Cogelec. All product names are used for identification purposes only.
 
 ## License
 
