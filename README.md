@@ -53,7 +53,7 @@ The integration also reacts to two additional FCM push types Cogelec emits:
 - **Intercom door unlock requires an active call.** `lock.intratone_<ID>_door` sends a SIP MESSAGE inside the active call dialog, so it only works in the **~25-second window** starting when the visitor presses the button and ending when the intercom hangs up. To open a gate/door **without anyone ringing**, use the remote-open access locks (*Clé mobile* / mobipass, `lock.intratone_<ID>_<access>`) instead — those work any time.
 - **Audio quality**: bounded by G.711 µ-law @ 8 kHz (Intratone's wire codec). Some accounts receive only comfort-noise µ-law from the server during a call rather than the real microphone stream — same behaviour observed on the official Intratone iOS app for those accounts, only the GSM fallback carries real audio. Not a bug in this integration; it's a server / account-side condition.
 - **Video quality**: bitrate is set by the intercom hardware (~5-10 kbps observed, ~2–5 fps). Equivalent quality to the official app — there's no client-side knob to request higher quality.
-- **Video startup delay**: The Intratone server schedules VP8 keyframes infrequently. After tapping the HomeKit tile, expect a **5–15 second black screen** before video appears. This is not a bug — ffmpeg can't start encoding until it receives an I-frame from the server. If no video appears after ~20 s, see [Troubleshooting](#troubleshooting).
+- **Video startup delay**: The Intratone server schedules VP8 keyframes infrequently. After tapping the HomeKit tile, audio starts right away over a **“Call in progress — waiting for video…” placeholder picture**, and the live video replaces it once the first I-frame arrives (typically 5–15 s). If the server sends no video at all (or it stalls mid-call), the placeholder stays up and audio and door opening keep working. The picture is fitted into a 640×480 frame, with black bars if the camera's aspect ratio differs. If no video appears after ~20 s, see [Troubleshooting](#troubleshooting).
 - **Live view only during a call**: the camera streams from the moment a visitor rings until ~60 s after the call ends. Tapping the tile outside that window shows the placeholder (HomeKit) or a "no stream" error (HA frontend) — there's no on-demand view, the intercom only streams during calls.
 - **France only**: tested against `sip.intratone.info`. Other Cogelec deployments untested.
 - **Both devices ring in parallel.** The official Intratone app on your phone continues to receive rings alongside HA. Whichever device opens first triggers the relay; the other still rings.
@@ -141,7 +141,7 @@ Notes:
 - **Tapping the tile at idle** (nobody ringing) shows an immediate "no stream" error — there's no video to show outside a call, by design.
 - **Do not use `camera_view: live` cards or stream preload** with this camera. A wall panel in live mode would auto-answer every ring the moment the visitor presses the button. Keep the default `camera_view: auto` — the tile shows the placeholder image and only starts the stream when tapped.
 - Remote access through Nabu Casa may fall back to HLS depending on WebRTC connectivity.
-- The 5–15 s video start-up delay (VP8 keyframe scheduling, see [Caveats](#caveats)) applies to every client — HomeKit, Companion, Lovelace alike.
+- The 5–15 s placeholder picture before live video (VP8 keyframe scheduling, see [Caveats](#caveats)) applies to every client — HomeKit, Companion, Lovelace alike.
 
 ### Doorbell notification on your phone
 
@@ -347,7 +347,7 @@ Main fields:
 
 **Tile opens but loading spinner forever** — go2rtc must be running with the `intratone` slot declared. With [debug logs](#enabling-debug-logs) enabled, look for `FFMPEG_PUSH_READY: ... consumable` (the marker confirming our ffmpeg pushed successfully); if absent, look for ffmpeg errors.
 
-**Video enabled but tile loads forever or shows black** — `Error submitting packet to decoder: Invalid data found when processing input` (VP8) lines in the log are **expected at stream start**: they are P-frames arriving before the first I-frame and stop once ffmpeg decodes the keyframe. If `FFMPEG_PUSH_READY: timeout after 5.0s` appears, the Intratone server didn't send a VP8 keyframe within the window; tapping the tile again immediately usually succeeds on a second attempt.
+**Video enabled but the tile stays on “Call in progress — waiting for video…”** — the Intratone server hasn't sent a VP8 keyframe yet (or sent no video at all). In the `STATS` debug lines, `vp8=` counts real video packets forwarded to ffmpeg and `placeholder=` the placeholder frames; `video_stun=0 vp8=0` for the whole call means no video packet reached HA at all. `VIDEO_PLACEHOLDER: real VP8 keyframe — switching ffmpeg to the live stream` marks the moment live video takes over.
 
 **Tile opens but no audio** — look for `Packet size 180 too large` in HA's homekit ffmpeg logs. If present, the `audio_packet_size: 384` setting is missing from the HomeKit `entity_config` above. During a call, the `AUDIO_RX_SUMMARY` debug log line shows how many audio packets the integration received and whether their content was real audio or comfort-noise.
 

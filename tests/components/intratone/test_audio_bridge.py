@@ -21,6 +21,8 @@ from custom_components.intratone.audio_bridge import (
     _RTP_HEADER_SIZE,
     _SAMPLES_PER_PACKET,
     _ULAW_SILENCE_BYTE,
+    _VP8_PLACEHOLDER_KEYFRAME,
+    _VP8_PLACEHOLDER_PACKETS,
     AudioBridge,
     BridgeStoppedError,
     _RtpProtocol,
@@ -1124,6 +1126,222 @@ async def test_video_rtp_gate_drops_interframes_until_keyframe():
     assert [addr for _, addr in transport.sent] == [("127.0.0.1", 12345)] * 2
 
 
+# --- VP8 placeholder until the real video arrives ---------------------------
+
+
+def _vp8_pkt(seq: int, ts: int, payload: bytes, marker: bool = True) -> bytes:
+    return (
+        struct.pack(
+            ">BBHII", 0b10000000, (0x80 if marker else 0) | 96, seq, ts, 0xDEADBEEF
+        )
+        + payload
+    )
+
+
+def _parse_rtp(pkt: bytes) -> tuple[int, int, int, int, int, bytes]:
+    """(pt, marker, seq, ts, ssrc, payload) of an RTP packet."""
+    _, b1, seq, ts, ssrc = struct.unpack(">BBHII", pkt[:12])
+    return b1 & 0x7F, b1 >> 7, seq, ts, ssrc, pkt[12:]
+
+
+_PLACEHOLDER_PKTS = len(_VP8_PLACEHOLDER_PACKETS)  # RTP packets per frame
+_REAL_KEYFRAME = bytes([0x10, 0x00, 0x00, 0x00, 0xAA])  # S=1, PID=0, key
+_REAL_CONTINUATION = bytes([0x00, 0xBB, 0xCC])  # S=0: rest of the same frame
+_REAL_INTERFRAME = bytes([0x10, 0x01, 0x00, 0x00, 0xDD])
+
+
+def _placeholder_patches(interval: float = 0.001, resume: float = 10.0):
+    return (
+        patch(
+            "custom_components.intratone.audio_bridge._VIDEO_PLACEHOLDER_INTERVAL_S",
+            interval,
+        ),
+        patch(
+            "custom_components.intratone.audio_bridge._VIDEO_PLACEHOLDER_RESUME_S",
+            resume,
+        ),
+    )
+
+
+def test_vp8_placeholder_is_a_640x480_keyframe():
+    """RFC 6386 §9.1: keyframe tag, start code 9d 01 2a, then 14-bit width /
+    height — must match the ffmpeg output canvas so it is never rescaled."""
+    frame = _VP8_PLACEHOLDER_KEYFRAME
+    assert frame[0] & 0x01 == 0  # keyframe
+    assert frame[3:6] == b"\x9d\x01\x2a"
+    width = int.from_bytes(frame[6:8], "little") & 0x3FFF
+    height = int.from_bytes(frame[8:10], "little") & 0x3FFF
+    assert (width, height) == (640, 480)
+
+
+def test_vp8_placeholder_is_packetized_per_rfc_7741():
+    """The frame is split into MTU-safe packets: S=1 (start of partition) on
+    the first only, PID=0, and the payloads reassemble into the frame."""
+    pkts = _VP8_PLACEHOLDER_PACKETS
+    assert _PLACEHOLDER_PKTS > 1
+    assert _is_vp8_keyframe(pkts[0])
+    assert [p[0] for p in pkts] == [0x10] + [0x00] * (_PLACEHOLDER_PKTS - 1)
+    assert all(len(p) + _RTP_HEADER_SIZE <= 1300 for p in pkts)
+    assert b"".join(p[1:] for p in pkts) == _VP8_PLACEHOLDER_KEYFRAME
+
+
+async def test_video_placeholder_feeds_ffmpeg_until_real_video():
+    """With no VP8 from the gateway, ffmpeg still gets a valid video stream:
+    the placeholder keyframe, one per tick, as a continuous RTP stream. This
+    is what lets ffmpeg publish (audio included) without the real video."""
+    proto = _VideoRtpProtocol(ffmpeg_target=("127.0.0.1", 12345))
+    transport = _FakeTransport()
+    proto.connection_made(transport)
+    interval, resume = _placeholder_patches()
+    with interval, resume:
+        proto.start_placeholder()
+        # First frame goes out immediately.
+        assert len(transport.sent) == _PLACEHOLDER_PKTS
+        await _wait_until(lambda: len(transport.sent) >= 3 * _PLACEHOLDER_PKTS)
+        proto.close()
+        sent = len(transport.sent)
+        await asyncio.sleep(0.01)
+    assert len(transport.sent) == sent  # close() stops the placeholder
+
+    assert {addr for _, addr in transport.sent} == {("127.0.0.1", 12345)}
+    pkts = [_parse_rtp(data) for data, _ in transport.sent]
+    frames = [
+        pkts[i : i + _PLACEHOLDER_PKTS]
+        for i in range(0, len(pkts), _PLACEHOLDER_PKTS)
+    ]
+    assert all(p[0] == 96 for p in pkts)  # VP8
+    for frame in frames:
+        assert [p[5] for p in frame] == _VP8_PLACEHOLDER_PACKETS
+        assert [p[1] for p in frame] == [0] * (_PLACEHOLDER_PKTS - 1) + [1]
+        assert len({p[3] for p in frame}) == 1  # one timestamp per frame
+    assert len({p[4] for p in pkts}) == 1  # one SSRC
+    seqs = [p[2] for p in pkts]
+    assert seqs == list(range(seqs[0], seqs[0] + len(seqs)))
+    frame_tss = [frame[0][3] for frame in frames]
+    assert all(b > a for a, b in zip(frame_tss, frame_tss[1:]))
+    assert proto.placeholder_frames_sent == len(frames)
+    assert proto.rtp_packets_forwarded == 0  # real-video counter untouched
+
+
+async def test_video_switches_from_placeholder_to_real_vp8_on_keyframe():
+    """The first real keyframe takes over from the placeholder. ffmpeg must
+    see ONE continuous stream: same SSRC, consecutive seq, timestamps moving
+    forward, with the gateway's own frame spacing preserved."""
+    proto = _VideoRtpProtocol(ffmpeg_target=("127.0.0.1", 12345))
+    transport = _FakeTransport()
+    proto.connection_made(transport)
+    interval, resume = _placeholder_patches()
+    with interval, resume:
+        proto.start_placeholder()
+        await _wait_until(lambda: len(transport.sent) >= 2 * _PLACEHOLDER_PKTS)
+
+        proto.datagram_received(_vp8_pkt(6, 1000, _REAL_INTERFRAME), ("x", 1))
+        placeholders = len(transport.sent)
+        proto.datagram_received(
+            _vp8_pkt(7, 5000, _REAL_KEYFRAME, marker=False), ("x", 1)
+        )
+        proto.datagram_received(_vp8_pkt(8, 5000, _REAL_CONTINUATION), ("x", 1))
+        proto.datagram_received(_vp8_pkt(9, 14000, _REAL_INTERFRAME), ("x", 1))
+        # While the real stream is live, no more placeholder frames.
+        await asyncio.sleep(0.02)
+        proto.close()
+
+    pkts = [_parse_rtp(data) for data, _ in transport.sent]
+    assert len(pkts) == placeholders + 3  # pre-keyframe P-frame was dropped
+    assert proto.placeholder_frames_sent * _PLACEHOLDER_PKTS == placeholders
+    assert proto.rtp_packets_forwarded == 3
+    assert len({p[4] for p in pkts}) == 1
+    seqs = [p[2] for p in pkts]
+    assert seqs == list(range(seqs[0], seqs[0] + len(seqs)))
+    last_placeholder, key, cont, inter = pkts[placeholders - 1 :]
+    assert key[3] > last_placeholder[3]
+    assert cont[3] == key[3]  # same frame, same timestamp
+    assert inter[3] - key[3] == 9000  # gateway spacing preserved
+    assert [key[1], cont[1], inter[1]] == [0, 1, 1]  # marker bits kept
+    assert [key[5], cont[5], inter[5]] == [
+        _REAL_KEYFRAME,
+        _REAL_CONTINUATION,
+        _REAL_INTERFRAME,
+    ]
+
+
+async def test_video_placeholder_resumes_when_real_video_stalls():
+    """If the gateway stops sending VP8 mid-call, the placeholder takes over
+    again (otherwise ffmpeg's RTP input times out and the whole stream, audio
+    included, dies). Real video then only resumes on a fresh keyframe — the
+    decoder's reference frame is now the placeholder."""
+    proto = _VideoRtpProtocol(ffmpeg_target=("127.0.0.1", 12345))
+    transport = _FakeTransport()
+    proto.connection_made(transport)
+    interval, resume = _placeholder_patches(interval=0.001, resume=0.01)
+    with interval, resume:
+        proto.start_placeholder()
+        proto.datagram_received(_vp8_pkt(1, 5000, _REAL_KEYFRAME), ("x", 1))
+        before_stall = proto.placeholder_frames_sent
+        await _wait_until(lambda: proto.placeholder_frames_sent > before_stall)
+
+        proto.datagram_received(_vp8_pkt(2, 14000, _REAL_INTERFRAME), ("x", 1))
+        assert proto.rtp_packets_forwarded == 1  # P-frame after stall dropped
+        proto.datagram_received(_vp8_pkt(3, 23000, _REAL_KEYFRAME), ("x", 1))
+        assert proto.rtp_packets_forwarded == 2
+        proto.close()
+
+    pkts = [_parse_rtp(data) for data, _ in transport.sent]
+    seqs = [p[2] for p in pkts]
+    assert seqs == list(range(seqs[0], seqs[0] + len(seqs)))
+    tss = [p[3] for p in pkts]
+    assert tss == sorted(tss)  # never backwards (a frame's packets share one)
+
+
+async def test_video_ffmpeg_letterboxes_into_a_fixed_canvas():
+    """The real camera resolution is unknown and differs from the
+    placeholder's: ffmpeg must fit every input into the same 640x480 canvas
+    (aspect ratio kept, black bars) so the H.264 output never changes size
+    mid-stream. The lavfi placeholder variant has no VP8 input to fit."""
+    with _patch_spawn([_make_fake_process(), _make_fake_process()]) as spawn:
+        bridge = AudioBridge()
+        await bridge._spawn_ffmpeg(video_port=55555)
+        video_args = list(spawn.await_args.args[1:])
+        await bridge._spawn_ffmpeg(video_port=None)
+        lavfi_args = list(spawn.await_args.args[1:])
+
+    vf = video_args[video_args.index("-filter:v") + 1]
+    assert "scale=640:480:force_original_aspect_ratio=decrease" in vf
+    assert "pad=640:480" in vf
+    assert video_args.index("-filter:v") > video_args.index("1:v")
+    assert "-filter:v" not in lavfi_args
+
+
+async def test_video_start_feeds_placeholder_right_away(fake_datagram_endpoint):
+    """start() with video must feed ffmpeg the placeholder immediately — no
+    waiting on the gateway's first keyframe before the push can happen — and
+    stop() must end it."""
+    with _patch_spawn([_make_fake_process()]), _patch_video_port(55555):
+        bridge = AudioBridge()
+        await bridge.start(
+            rtp_socket=_fake_rtp_socket(16384),
+            remote_rtp_ip="178.32.84.135",
+            remote_rtp_port=20000,
+            video_socket=_fake_rtp_socket(16386),
+            remote_video_rtp_ip="178.32.84.135",
+            remote_video_rtp_port=52982,
+            video_rtcp_socket=_fake_rtp_socket(16387),
+        )
+
+        def to_ffmpeg():
+            return [
+                d for d, addr in fake_datagram_endpoint.sent
+                if addr == ("127.0.0.1", 55555)
+            ]
+
+        assert to_ffmpeg()
+        assert _parse_rtp(to_ffmpeg()[0])[5] == _VP8_PLACEHOLDER_PACKETS[0]
+        await bridge.stop()
+        sent = len(to_ffmpeg())
+        await asyncio.sleep(0.6)  # > one placeholder interval
+        assert len(to_ffmpeg()) == sent
+
+
 # --- AudioBridge._pli_loop -------------------------------------------------
 
 
@@ -1167,16 +1385,21 @@ async def test_pli_loop_sends_first_pli_immediately_on_first_rtp():
     task.cancel()
 
 
-async def test_pli_loop_gives_up_without_rtp_and_sends_nothing():
-    """No VP8 RTP within the first-RTP window → loop exits without sending a
-    single PLI and without firing the video-failure callback."""
+async def test_pli_loop_waits_for_late_video_rtp():
+    """Video that only starts flowing late in the call (the placeholder
+    covers the gap) must still get its keyframe request: no PLI and no
+    video-failure callback while nothing arrives, then the PLI goes out as
+    soon as the first RTP does."""
     failure = MagicMock()
     bridge, rtcp_transport = _bridge_with_video(on_video_failure=failure)
-    with patch(
-        "custom_components.intratone.audio_bridge._PLI_WAIT_FIRST_RTP_S", 0.01
-    ):
-        await asyncio.wait_for(bridge._pli_loop(), timeout=2)
+    task = asyncio.create_task(bridge._pli_loop())
+    await asyncio.sleep(0.05)
+    assert not task.done()
     assert rtcp_transport.sent == []
+
+    bridge._video_rtp.datagram_received(_VP8_INTERFRAME_PKT, ("x", 1))
+    await _wait_until(lambda: rtcp_transport.sent)
+    task.cancel()
     failure.assert_not_called()
 
 
