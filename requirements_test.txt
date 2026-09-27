@@ -9,3 +9,8 @@ firebase-messaging>=0.4.5
 voip-utils>=0.4.0
 # HA's camera component imports turbojpeg unconditionally → required for tests.
 PyTurboJPEG
+# HA's go2rtc WebRTC provider is exercised for real in test_camera_e2e.py —
+# pinned to what each HA version's go2rtc manifest requires.
+go2rtc-client==0.1.1 ; python_version == "3.12"
+go2rtc-client==0.4.0 ; python_version == "3.13"
+go2rtc-client ; python_version >= "3.14"
