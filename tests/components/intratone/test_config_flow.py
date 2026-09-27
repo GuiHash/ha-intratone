@@ -10,6 +10,7 @@ from homeassistant import config_entries
 from homeassistant.data_entry_flow import FlowResultType
 
 from custom_components.intratone.config_flow import _normalize_phone
+from custom_components.intratone.fcm_listener import FcmRegistrationError
 from custom_components.intratone.const import (
     API_BASE,
     CONF_GO2RTC_URL,
@@ -222,6 +223,35 @@ async def test_rejected_invite_shows_error(
     )
     assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {"base": "invalid_code"}
+
+
+async def test_invite_fcm_registration_failure_shows_fcm_failed(hass) -> None:
+    """Google refusing the push-token registration (issue #124) maps to
+    `fcm_failed`, not the generic `unknown` error."""
+    with patch(
+        "custom_components.intratone.config_flow.fcm_register_standalone",
+        new=AsyncMock(side_effect=FcmRegistrationError("PHONE_REGISTRATION_ERROR")),
+    ):
+        result = await _pick_invite_step(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_INVITE_CODE: "448789-1206"}
+        )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "fcm_failed"}
+
+
+async def test_sms_fcm_registration_failure_shows_fcm_failed(hass, aiomock) -> None:
+    aiomock.post(f"{API_BASE}api/auth/verify", payload={"state": "ok", "data": {}})
+    with patch(
+        "custom_components.intratone.config_flow.fcm_register_standalone",
+        new=AsyncMock(side_effect=FcmRegistrationError("PHONE_REGISTRATION_ERROR")),
+    ):
+        result = await _pick_phone_step(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"phone": "0671124546", "indicatif": "33"}
+        )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "fcm_failed"}
 
 
 async def test_duplicate_invite_aborts_without_store_write(

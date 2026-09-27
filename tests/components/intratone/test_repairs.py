@@ -285,3 +285,41 @@ async def test_fcm_token_stale_fix_flow_invalid_code(
     assert data["type"] == "form"
     assert data["errors"] == {"base": "invalid_code"}
     assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is not None
+
+
+async def test_fcm_token_stale_fix_flow_fcm_registration_failure(
+    hass,
+    hass_client,
+    mock_entry: MockConfigEntry,
+    mock_fcm_client,
+    mock_call_manager,
+    aiomock,
+) -> None:
+    """Google refusing the new push token shows `fcm_failed`, not `unknown`."""
+    from unittest.mock import AsyncMock, patch
+
+    from custom_components.intratone.fcm_listener import FcmRegistrationError
+
+    assert await async_setup_component(hass, "repairs", {})
+    issue_id = await _setup_entry_with_stale_token(
+        hass, mock_entry, mock_fcm_client, aiomock
+    )
+
+    client = await hass_client()
+    resp = await client.post(
+        "/api/repairs/issues/fix",
+        json={"handler": DOMAIN, "issue_id": issue_id},
+    )
+    flow_id = (await resp.json())["flow_id"]
+
+    with patch(
+        "custom_components.intratone.repairs.fcm_register_standalone",
+        new=AsyncMock(side_effect=FcmRegistrationError("PHONE_REGISTRATION_ERROR")),
+    ):
+        resp = await client.post(
+            f"/api/repairs/issues/fix/{flow_id}", json={"invite_code": "448789-1206"}
+        )
+    data = await resp.json()
+    assert data["type"] == "form"
+    assert data["errors"] == {"base": "fcm_failed"}
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is not None

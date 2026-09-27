@@ -17,6 +17,8 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+import aiohttp
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import issue_registry as ir
@@ -65,6 +67,13 @@ def _fcm_config():
     )
 
 
+class FcmRegistrationError(Exception):
+    """Google refused to register a push token (e.g. PHONE_REGISTRATION_ERROR).
+
+    Usually transient on Google's side — retrying later typically works.
+    """
+
+
 async def fcm_register_standalone(
     existing_creds: dict | None = None,
 ) -> tuple[str, dict | None]:
@@ -79,13 +88,20 @@ async def fcm_register_standalone(
     def _on_creds_updated(new_creds: dict) -> None:
         holder["creds"] = new_creds
 
-    client = FcmPushClient(
-        callback=lambda *_: None,
-        fcm_config=_fcm_config(),
-        credentials=existing_creds,
-        credentials_updated_callback=_on_creds_updated,
-    )
-    token = await client.checkin_or_register()
+    # Own the HTTP session: the library only closes its internal one on
+    # success, leaking it ("Unclosed client session") when registration fails.
+    async with aiohttp.ClientSession() as session:
+        client = FcmPushClient(
+            callback=lambda *_: None,
+            fcm_config=_fcm_config(),
+            credentials=existing_creds,
+            credentials_updated_callback=_on_creds_updated,
+            http_client_session=session,
+        )
+        try:
+            token = await client.checkin_or_register()
+        except RuntimeError as err:
+            raise FcmRegistrationError(str(err)) from err
     return token, holder["creds"]
 
 

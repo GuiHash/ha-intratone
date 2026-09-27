@@ -67,7 +67,7 @@
       "invalid_code": "The invitation code was rejected by Intratone. Generate a fresh one and try again.",
       "invalid_sms_code": "The SMS code was rejected. Check the number you entered and try again.",
       "sms_failed": "Intratone refused to send an SMS to this phone. Check the number and country code.",
-      "fcm_failed": "Could not register with Firebase Cloud Messaging. Check your internet connection.",
+      "fcm_failed": "Google refused to register a push token for Home Assistant. This is usually temporary on Google's side — wait a few minutes and try again.",
       "auth_failed": "Could not authenticate with Intratone after registration.",
       "mobipass_code_invalid": "The transfer code was rejected. Check it and try again.",
       "mobipass_code_blocked": "Too many attempts — the transfer code is temporarily blocked. Try again later.",
@@ -135,6 +135,7 @@
           "invalid_format": "Invalid format. Expected `XXXXXX-XXXX`.",
           "invalid_code": "The invitation code was rejected by Intratone. Generate a fresh one and try again.",
           "auth_failed": "Could not authenticate with Intratone after re-registration.",
+          "fcm_failed": "Google refused to register a push token for Home Assistant. This is usually temporary on Google's side — wait a few minutes and try again.",
           "unknown": "Unexpected error. Check the logs."
         },
         "abort": {
