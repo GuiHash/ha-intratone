@@ -1,4 +1,4 @@
-"""The Intratone Doorbell integration."""
+"""Unofficial Home Assistant integration for Intratone intercoms."""
 
 from __future__ import annotations
 
