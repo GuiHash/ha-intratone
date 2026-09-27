@@ -25,8 +25,11 @@ jobs:
 
       - name: Build integration zip
         if: ${{ steps.release.outputs.release_created }}
+        env:
+          APP_DEFAULTS: ${{ vars.APP_DEFAULTS }}
         run: |
           cd custom_components/intratone
+          if [ -n "$APP_DEFAULTS" ]; then printf '%s' "$APP_DEFAULTS" > defaults.json; fi
           zip -r "$GITHUB_WORKSPACE/ha-intratone.zip" . -x '*__pycache__*' '*.pyc'
 
       - name: Attach zip to release
