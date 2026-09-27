@@ -9,6 +9,7 @@ itself is exercised through the manager via the fake TCP transport.
 from __future__ import annotations
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -127,6 +128,19 @@ async def test_start_call_without_starting_returns_none(fake_bridge):
     # Without async_start() the manager refuses calls.
     call_id = await mgr.start_call(TARGET_URI, SERVER_IP, SIP_USER, SIP_PASS)
     assert call_id is None
+
+
+async def test_start_call_never_logs_sip_identities(manager, caplog):
+    """The INVITE target is `sip:<LOGIN_TO_CALL>@<server ip>` — both masked
+    in diagnostics and FCM push logs, so no record may carry them."""
+    with caplog.at_level(logging.DEBUG, logger="custom_components.intratone"):
+        await manager.start_call(TARGET_URI, SERVER_IP, SIP_USER, SIP_PASS)
+
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "Outgoing SIP INVITE" in text
+    assert "LOGIN_TO_CALL_TOKEN" not in text
+    assert SIP_USER not in text
+    assert SIP_PASS not in text
 
 
 async def test_start_call_opens_tcp_and_sends_invite(manager):

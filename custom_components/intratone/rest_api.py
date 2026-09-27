@@ -225,7 +225,8 @@ async def _parse_json_response(
 
     if not isinstance(body, dict):
         raise IntratoneApiError(
-            f"Unexpected response shape from {path} (HTTP {status}): {body!r}",
+            f"Unexpected response shape from {path} (HTTP {status}): "
+            f"{type(body).__name__}",
             status=status,
             body=body,
         )
@@ -447,7 +448,7 @@ class IntratoneAPI:
         # mobipass install can confirm/refine the parser below.
         _LOGGER.debug("Access list raw response: %s", body)
         accesses = _parse_accesses(body)
-        _LOGGER.info("Intratone: %d remote-openable access(es) found", len(accesses))
+        _LOGGER.debug("Intratone: %d remote-openable access(es) found", len(accesses))
         return accesses
 
     async def open_access(self, access: IntratoneAccess) -> bool:
@@ -787,7 +788,11 @@ async def register_with_invite(
         ) from err
 
     if not isinstance(body, dict) or body.get("state") == "error":
-        msg = body.get("message") or body.get("code") if isinstance(body, dict) else body
+        msg = (
+            body.get("message") or body.get("code")
+            if isinstance(body, dict)
+            else type(body).__name__
+        )
         raise IntratoneAuthError(f"registercodes rejected: {msg}")
 
     data = body.get("data") or {}
@@ -890,7 +895,7 @@ async def register_phone_for_sms(
         msg = (
             body.get("message") or body.get("code")
             if isinstance(body, dict)
-            else body
+            else type(body).__name__
         )
         raise IntratoneAuthError(f"register rejected: {msg}")
 
@@ -940,7 +945,7 @@ async def validate_sms_code(
         msg = (
             body.get("message") or body.get("code")
             if isinstance(body, dict)
-            else body
+            else type(body).__name__
         )
         raise IntratoneAuthError(f"validate rejected: {msg}")
 

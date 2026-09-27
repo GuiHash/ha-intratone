@@ -435,7 +435,7 @@ class IntratoneCoordinator(DataUpdateCoordinator[CallState | None]):
             # Out-of-order cancel for a previous ring — don't kill the new
             # ring that just arrived. Cancels without an id keep the
             # historical unconditional-abort behavior.
-            _LOGGER.info(
+            _LOGGER.debug(
                 "callCancel for %s ignored — active ring is %s",
                 canceled_id,
                 self.data.call_id,

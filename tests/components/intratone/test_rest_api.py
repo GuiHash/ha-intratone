@@ -32,6 +32,7 @@ from custom_components.intratone.rest_api import (
     IntratoneAuthError,
     IntratoneConnectionError,
     IntratoneMobipassError,
+    _parse_json_response,
     authenticate_for_invite,
     register_phone_for_sms,
     register_with_invite,
@@ -994,3 +995,68 @@ async def test_authenticate_device_uses_entry_indicatif(hass, aiomock) -> None:
     assert data["jwt"] == "j"
     calls = _auth_device_calls(aiomock)
     assert calls[1].kwargs["data"]["tel"] == "352671124546"
+
+
+# --- Raw response bodies stay out of exception messages ---------------------
+# Exception text lands in WARNING logs and UI toasts; the body is kept on
+# `err.body` for debugging instead.
+
+_BODY_SECRET = "raw-body-secret"
+
+
+async def test_unexpected_shape_message_omits_body() -> None:
+    class _Resp:
+        status = 200
+
+        async def json(self, content_type=None):
+            return [_BODY_SECRET]
+
+    with pytest.raises(IntratoneApiError) as excinfo:
+        await _parse_json_response(_Resp(), "api/x")  # type: ignore[arg-type]
+    assert _BODY_SECRET not in str(excinfo.value)
+    assert excinfo.value.body == [_BODY_SECRET]
+
+
+@pytest.mark.parametrize(
+    ("path", "call"),
+    [
+        (
+            "api/auth/registercodes",
+            lambda session, creds: register_with_invite(
+                session,
+                app_creds=creds,
+                device_id="ha-test",
+                fcm_token="tok",
+                code="000000",
+                codepass="0000",
+            ),
+        ),
+        (
+            "api/auth/register",
+            lambda session, creds: register_phone_for_sms(
+                session,
+                device_id="ha-test",
+                fcm_token="tok",
+                tel="612345678",
+                indicatif="33",
+            ),
+        ),
+        (
+            "api/auth/validate",
+            lambda session, creds: validate_sms_code(
+                session,
+                tel="612345678",
+                indicatif="33",
+                device_id="ha-test",
+                code="1234",
+            ),
+        ),
+    ],
+)
+async def test_rejected_non_dict_body_kept_out_of_message(
+    hass, aiomock, app_creds, path, call
+) -> None:
+    aiomock.post(f"{API_BASE}{path}", payload=[_BODY_SECRET])
+    with pytest.raises(IntratoneAuthError) as excinfo:
+        await call(async_get_clientsession(hass), app_creds)
+    assert _BODY_SECRET not in str(excinfo.value)

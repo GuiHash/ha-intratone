@@ -1249,10 +1249,10 @@ async def test_pli_loop_periodic_resets_gate_and_reopens_on_keyframe():
 # --- diagnostics log levels -------------------------------------------------
 
 
-async def test_audio_rx_summary_detail_lines_are_debug(caplog):
-    """README promises diagnostics at debug level. Keep ONE `AUDIO_RX_SUMMARY`
-    aggregate line at INFO (troubleshooting docs grep for the marker) and
-    demote the per-source / per-PT / per-SSRC detail loops to DEBUG."""
+async def test_audio_rx_summary_is_debug_only(caplog):
+    """Per-call telemetry stays out of the default log: the aggregate
+    `AUDIO_RX_SUMMARY` line and its per-source / per-PT / per-SSRC detail are
+    all DEBUG (README: enable debug logs to troubleshoot)."""
     import logging
 
     proto = _RtpProtocol(
@@ -1272,13 +1272,13 @@ async def test_audio_rx_summary_detail_lines_are_debug(caplog):
     proto.close()
 
     summary = [r for r in caplog.records if "AUDIO_RX_SUMMARY" in r.message]
-    assert len([r for r in summary if r.levelno == logging.INFO]) == 1
-    assert [r for r in summary if r.levelno == logging.DEBUG]
+    assert len(summary) > 1  # aggregate line + detail
+    assert all(r.levelno == logging.DEBUG for r in summary)
 
 
-async def test_video_rx_summary_detail_lines_are_debug(caplog):
-    """Same contract for the video side: one `VIDEO_RX_SUMMARY` marker line
-    at INFO, per-source / per-PT detail at DEBUG."""
+async def test_video_rx_summary_is_debug_only(caplog):
+    """Same contract for the video side: every `VIDEO_RX_SUMMARY` line is
+    DEBUG."""
     import logging
 
     proto = _VideoRtpProtocol(ffmpeg_target=("127.0.0.1", 12345))
@@ -1291,5 +1291,5 @@ async def test_video_rx_summary_detail_lines_are_debug(caplog):
         proto.close()
 
     summary = [r for r in caplog.records if "VIDEO_RX_SUMMARY" in r.message]
-    assert len([r for r in summary if r.levelno == logging.INFO]) == 1
-    assert [r for r in summary if r.levelno == logging.DEBUG]
+    assert len(summary) > 1  # aggregate line + detail
+    assert all(r.levelno == logging.DEBUG for r in summary)

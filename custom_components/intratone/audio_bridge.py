@@ -341,21 +341,21 @@ class _RtpProtocol(asyncio.DatagramProtocol):
     def dump_summary(self) -> None:
         """One-shot dump of all aggregated stats — call on close/stop."""
         elapsed = (time.monotonic() - self._start_time) if self._start_time else 0.0
-        _LOGGER.info(
+        _LOGGER.debug(
             "AUDIO_RX_SUMMARY: %d packets / %d bytes over %.1fs (avg %.0f B/s) "
             "from %d source(s); PTs=%s STUN=%d nonRTP=%d seq_gaps=%d",
             self.packets_received, self.bytes_received_total, elapsed,
             (self.bytes_received_total / elapsed) if elapsed > 0 else 0,
             len(self.unique_sources),
-            # PT counts on the INFO line: README's troubleshooting flow relies
-            # on it to tell real audio (PT=0 PCMU) from comfort-noise (PT=13).
+            # PT counts on the aggregate line: README's troubleshooting flow
+            # relies on it to tell real audio (PT=0 PCMU) from comfort-noise
+            # (PT=13).
             {pt: st["count"] for pt, st in sorted(self.pt_stats.items())},
             self.stun_count, self.non_rtp_count,
             self.seq_gaps,
         )
-        # Per-source / per-PT / per-SSRC detail stays at DEBUG (README:
-        # diagnostics at debug level) — the aggregate line above is the one
-        # INFO marker the troubleshooting docs grep for.
+        # Per-source / per-PT / per-SSRC detail — the aggregate line above is
+        # the marker the troubleshooting docs grep for.
         for src in self.unique_sources:
             _LOGGER.debug("AUDIO_RX_SUMMARY: source %s:%d", src[0], src[1])
         for pt, st in sorted(self.pt_stats.items()):
@@ -531,7 +531,7 @@ class _VideoRtpProtocol(asyncio.DatagramProtocol):
                 if self._start_time is not None
                 else 0
             )
-            _LOGGER.info(
+            _LOGGER.debug(
                 "VIDEO_KEYFRAME: VP8 I-frame received %.0fms after first RTP",
                 elapsed_ms,
             )
@@ -548,7 +548,7 @@ class _VideoRtpProtocol(asyncio.DatagramProtocol):
 
         try:
             if self.rtp_packets_forwarded == 0:
-                _LOGGER.info(
+                _LOGGER.debug(
                     "VIDEO_FORWARD_FIRST: first VP8 RTP forwarded to ffmpeg :%d",
                     self._ffmpeg_target[1],
                 )
@@ -573,14 +573,14 @@ class _VideoRtpProtocol(asyncio.DatagramProtocol):
             if self._start_time is not None
             else 0.0
         )
-        _LOGGER.info(
+        _LOGGER.debug(
             "VIDEO_RX_SUMMARY: stun_requests=%d vp8_forwarded=%d non_rtp=%d "
             "over %.1fs from %d source(s)",
             self.stun_requests, self.rtp_packets_forwarded, self.non_rtp_count,
             elapsed, len(self.unique_sources),
         )
-        # Detail lines at DEBUG — mirrors dump_summary: one INFO marker line
-        # per category, the rest only when debug logging is on.
+        # Detail lines — mirrors dump_summary: one marker line per category,
+        # then the per-source / per-PT breakdown.
         for src in self.unique_sources:
             _LOGGER.debug("VIDEO_RX_SUMMARY: source %s:%d", src[0], src[1])
         for pt, st in sorted(self.pt_stats.items()):
@@ -952,12 +952,12 @@ class AudioBridge:
             self._stderr_task = prewarmed.stderr_task
             self._ffmpeg_push_ready = prewarmed.push_ready
             ffmpeg_video_port = prewarmed.video_port
-            _LOGGER.info(
+            _LOGGER.debug(
                 "FFMPEG_PREWARM: adopting ffmpeg spawned during SIP negotiation"
             )
         else:
             if prewarmed is not None:
-                _LOGGER.info(
+                _LOGGER.debug(
                     "FFMPEG_PREWARM: discarding (prewarm video=%s, negotiated "
                     "video=%s, rc=%s)",
                     prewarmed.video,
@@ -992,7 +992,7 @@ class AudioBridge:
                 return
             try:
                 if self._bytes_written_to_ffmpeg == 0:
-                    _LOGGER.info(
+                    _LOGGER.debug(
                         "AUDIO_STDIN_FIRST: first µ-law byte written %.0fms after ffmpeg spawn",
                         (time.monotonic() - spawn_t0) * 1000,
                     )
@@ -1091,7 +1091,7 @@ class AudioBridge:
                 raise BridgeStoppedError("stopped during video endpoint wrap")
 
         local_port = rtp_socket.getsockname()[1]
-        _LOGGER.info(
+        _LOGGER.debug(
             "RTP audio :%d ↔ %s:%d ; video %s",
             local_port,
             remote_rtp_ip,
@@ -1126,7 +1126,7 @@ class AudioBridge:
             raise BridgeStoppedError("stopped while waiting for ffmpeg push")
         if not timed_out:
             elapsed_ms = (time.monotonic() - t0) * 1000
-            _LOGGER.info(
+            _LOGGER.debug(
                 "FFMPEG_PUSH_READY: %s consumable (waited %.0fms after spawn)",
                 self.rtsp_url,
                 elapsed_ms,
@@ -1194,7 +1194,7 @@ class AudioBridge:
                     return
                 if self._video_rtp.keyframe_received:
                     elapsed_ms = (time.monotonic() - t0) * 1000
-                    _LOGGER.info(
+                    _LOGGER.debug(
                         "PLI_LOOP: keyframe arrived after %d PLI(s) in %.0fms",
                         i, elapsed_ms,
                     )
@@ -1202,7 +1202,7 @@ class AudioBridge:
                     break
                 self._video_rtcp.send_pli(media_ssrc)
                 if i == 0:
-                    _LOGGER.info(
+                    _LOGGER.debug(
                         "PLI_LOOP: first PLI sent to %s for media_ssrc=0x%08x",
                         self._video_rtcp.remote_addr, media_ssrc,
                     )
@@ -1224,7 +1224,7 @@ class AudioBridge:
                 and self._video_rtp.keyframe_received
             ):
                 got_keyframe = True
-                _LOGGER.info(
+                _LOGGER.debug(
                     "PLI_LOOP: keyframe arrived after %d PLI(s)", _PLI_MAX_SENDS
                 )
 
@@ -1295,7 +1295,7 @@ class AudioBridge:
         rtp = self._rtp
         if rtp is not None:
             rtp.dump_summary()
-            _LOGGER.info(
+            _LOGGER.debug(
                 "AUDIO_FFMPEG_SUMMARY: wrote %d bytes to stdin during call "
                 "(expected ~8000 B/s for G.711 µ-law 20ms)",
                 self._bytes_written_to_ffmpeg,
@@ -1311,7 +1311,7 @@ class AudioBridge:
         pli_task = self._pli_task
         push_ready = self._ffmpeg_push_ready
         if video_rtcp is not None:
-            _LOGGER.info(
+            _LOGGER.debug(
                 "VIDEO_RTCP_SUMMARY: %d PLI sent, %d incoming RTCP received",
                 video_rtcp.pli_sent, video_rtcp.rtcp_received,
             )
@@ -1643,11 +1643,10 @@ class AudioBridge:
         # "Failed", "Broken pipe". Forward those at WARNING so prod users see
         # them without enabling debug; everything else stays at DEBUG.
         warn_keywords = ("Error", "Invalid", "Failed", "Broken pipe", "fatal")
-        # Surface a small set of ffmpeg startup milestones at INFO so a quick
-        # log scan can confirm spawn / input parsing / output mux init timing
-        # without enabling DEBUG. Validated 2026-05-24: with the low-latency
-        # flags on both inputs, "Press [q]" emits ~280 ms after spawn (vs
-        # ~14 s with the previous defaults).
+        # Tag a small set of ffmpeg startup milestones so a quick log scan can
+        # confirm spawn / input parsing / output mux init timing. Validated
+        # 2026-05-24: with the low-latency flags on both inputs, "Press [q]"
+        # emits ~280 ms after spawn (vs ~14 s with the previous defaults).
         startup_markers = ("Stream mapping", "Input #0", "Input #1", "Press [q]")
         startup_t0 = time.monotonic()
         try:
@@ -1666,7 +1665,7 @@ class AudioBridge:
                 if any(kw in text for kw in warn_keywords):
                     _LOGGER.warning("ffmpeg: %s", text)
                 elif any(m in text for m in startup_markers):
-                    _LOGGER.info(
+                    _LOGGER.debug(
                         "FFMPEG_STARTUP[+%.0fms]: %s",
                         (time.monotonic() - startup_t0) * 1000, text,
                     )

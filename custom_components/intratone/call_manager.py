@@ -314,10 +314,10 @@ class CallManager:
         self._max_duration_task = asyncio.create_task(
             self._auto_terminate_after(call_id, effective_max_s)
         )
-        _LOGGER.info(
-            "Outgoing SIP INVITE: call_id=%s target=%s local_rtp_port=%d",
+        # No target_uri: it carries LOGIN_TO_CALL (see _redact_sip).
+        _LOGGER.debug(
+            "Outgoing SIP INVITE: call_id=%s local_rtp_port=%d",
             call_id,
-            target_uri,
             rtp_port,
         )
         return call_id
@@ -556,7 +556,7 @@ class CallManager:
             )
             await self._bridge.stop()
             return
-        _LOGGER.info(
+        _LOGGER.debug(
             "Bridge up: %s (audio peer %s:%d%s)",
             rtsp_url,
             info.remote_rtp_ip,
