@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.10.0](https://github.com/GuiHash/ha-intratone/compare/v0.9.3...v0.10.0) (2026-09-27)
+
+
+### Features
+
+* **camera:** native HA frontend & Companion app viewing via WebRTC/HLS ([#98](https://github.com/GuiHash/ha-intratone/issues/98)) ([7d5e0de](https://github.com/GuiHash/ha-intratone/commit/7d5e0de862967d023fbd008e2e26c54bddb7cecf))
+* **config-flow:** let users enter the app credentials instead of shipping them ([#130](https://github.com/GuiHash/ha-intratone/issues/130)) ([143db0b](https://github.com/GuiHash/ha-intratone/commit/143db0becea77d9a63e784295d9cfe239a6a093c))
+
+
+### Bug Fixes
+
+* address frenck's HACS review — door code in logs, blocking SDP file I/O ([#114](https://github.com/GuiHash/ha-intratone/issues/114)) ([bc2faa5](https://github.com/GuiHash/ha-intratone/commit/bc2faa511a47d472e1d74db8da8262e492171337))
+* **brand:** add unofficial disclaimer and replace trademarked brand assets ([#127](https://github.com/GuiHash/ha-intratone/issues/127)) ([101810d](https://github.com/GuiHash/ha-intratone/commit/101810d08f859a5c37c0187f746fac5086cd1b06))
+* **config-flow:** surface FCM registration failures and close leaked session ([#131](https://github.com/GuiHash/ha-intratone/issues/131)) ([1fd25f2](https://github.com/GuiHash/ha-intratone/commit/1fd25f280e26e3e79901f442ba3f42026ad0078d))
+* **logging:** keep SIP identities and raw bodies out of logs ([#133](https://github.com/GuiHash/ha-intratone/issues/133)) ([1568319](https://github.com/GuiHash/ha-intratone/commit/15683196abb3dca713d0841d6756b715d5e3f24a))
+
+
+### Performance Improvements
+
+* **audio-bridge:** pass the video SDP to ffmpeg inline, no temp file ([#129](https://github.com/GuiHash/ha-intratone/issues/129)) ([c964b15](https://github.com/GuiHash/ha-intratone/commit/c964b158165e1c256308ac34491b95ef75fef73f))
+
 ## [0.9.3](https://github.com/GuiHash/ha-intratone/compare/v0.9.2...v0.9.3) (2026-07-13)
 
 
