@@ -43,3 +43,12 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 # opuslib uses `is not 0` instead of `!= 0` — upstream bug, not ours
 filterwarnings = ["ignore::SyntaxWarning:opuslib"]
+
+[tool.mypy]
+python_version = "3.13"
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+# voip-utils ships neither a py.typed marker nor stubs.
+module = ["voip_utils", "voip_utils.*"]
+ignore_missing_imports = true
