@@ -25,8 +25,9 @@ Behavior by state:
 - Real request at idle: return None. HomeKit falls back to the still-image
   placeholder; HA's go2rtc provider raises immediately (clear frontend
   error instead of a dead-slot pull timeout). Side effect inherited from
-  core: `go2rtc/__init__.py::_update_stream_source` runs a provider-wide
-  teardown() before raising, momentarily re-signaling other go2rtc cameras.
+  core up to at least 2026.2: `go2rtc/__init__.py::_update_stream_source`
+  runs a provider-wide teardown() before raising, momentarily re-signaling
+  other go2rtc cameras (2026.9 only closes this camera's sessions).
 """
 
 from __future__ import annotations
