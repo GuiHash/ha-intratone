@@ -988,12 +988,12 @@ async def test_cancel_prewarm_kills_process_without_stop(hass):
         bridge.prewarm(video=True)
         await asyncio.sleep(0)
         bridge.cancel_prewarm()
-        for _ in range(10):
-            await asyncio.sleep(0)
-            if proc.kill.called:
-                break
-        proc.kill.assert_called_once()
         assert bridge._prewarm_task is None
+        # The reap is a background task that first awaits the in-flight
+        # prewarm (which round-trips through the executor for the SDP write),
+        # so await it rather than spinning on bare event-loop ticks.
+        await bridge._prewarm_cleanup_task
+        proc.kill.assert_called_once()
         await bridge.stop()  # still safe afterwards
 
 
