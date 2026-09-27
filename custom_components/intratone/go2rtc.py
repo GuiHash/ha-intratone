@@ -179,7 +179,7 @@ async def async_selftest_go2rtc(
             except (OSError, asyncio.TimeoutError):
                 status = ""
             if _is_rtsp_ok(status):
-                _LOGGER.info("go2rtc self-test OK: %s publishes and serves", url)
+                _LOGGER.debug("go2rtc self-test OK: %s publishes and serves", url)
                 return None
             await asyncio.sleep(_SELFTEST_DESCRIBE_INTERVAL_S)
         _LOGGER.error(

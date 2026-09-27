@@ -61,6 +61,11 @@ _AUTH_MASK_RE = re.compile(
 # The `opendoor:<code>` MESSAGE body carries the door code, which physically
 # opens the building — mask it like the credentials above.
 _DOOR_CODE_MASK_RE = re.compile(r"(?im)^(opendoor):.*$", re.MULTILINE)
+# SIP identities (our LOGIN, the LOGIN_TO_CALL target) are masked in FCM push
+# logs and diagnostics — mask them in the trace too: the user part of every
+# SIP URI and the SDP `o=` username.
+_SIP_USER_MASK_RE = re.compile(r"(?i)\b(sips?:)[^@\s<>;\"]+@")
+_SDP_ORIGIN_MASK_RE = re.compile(r"(?m)^o=\S+")
 # Extract every Via header from a raw SIP request — we need all of them in the
 # response per RFC 3261 §17.2.1, but voip_utils' SipMessage uses a single-value
 # dict that collapses multi-Via into one entry.
@@ -100,6 +105,8 @@ def _extract_video_endpoint(sdp_body: str | bytes) -> tuple[str, int] | None:
 def _redact_sip(message: bytes) -> str:
     text = message.decode("utf-8", errors="replace")
     text = _AUTH_MASK_RE.sub(lambda m: f"{m.group(1)}: <redacted>", text)
+    text = _SIP_USER_MASK_RE.sub(lambda m: f"{m.group(1)}<redacted>@", text)
+    text = _SDP_ORIGIN_MASK_RE.sub("o=<redacted>", text)
     return _DOOR_CODE_MASK_RE.sub(lambda m: f"{m.group(1)}:<redacted>", text)
 
 
@@ -239,7 +246,7 @@ class IntratoneSipClient(asyncio.Protocol):
 
     def connection_lost(self, exc: BaseException | None) -> None:
         if exc is not None:
-            _LOGGER.info("SIP TCP connection lost: %s", exc)
+            _LOGGER.debug("SIP TCP connection lost: %s", exc)
         if self._call is not None and self._call.state != CallState.TERMINATED:
             self._terminate(self._call)
         self._transport = None
@@ -285,7 +292,9 @@ class IntratoneSipClient(asyncio.Protocol):
                     # A real message we couldn't parse — surface it, this is
                     # the only default-level trace when a call hangs on it.
                     _LOGGER.warning(
-                        "Dropping unparseable SIP message: %r", raw, exc_info=True
+                        "Dropping unparseable SIP message: %r",
+                        _redact_sip(raw),
+                        exc_info=True,
                     )
                 else:
                     # RFC 5626 CRLF keep-alive — routine, not worth a warning.
@@ -367,7 +376,7 @@ class IntratoneSipClient(asyncio.Protocol):
         """Send in-dialog SIP MESSAGE `opendoor:<code>` to trigger the door
         relay. This rides the same TCP connection that carried the INVITE,
         matching the Cogelec app's behavior (in-dialog ChatRoom.send())."""
-        # `label` is logged at INFO — keep the code out of it (see _redact_sip).
+        # `label` is logged — keep the code out of it (see _redact_sip).
         return self._send_in_dialog_message(
             call_id, body=f"opendoor:{code}", label="open-door"
         )
@@ -430,7 +439,7 @@ class IntratoneSipClient(asyncio.Protocol):
         call.cseq += 1
         call.via_branch = f"z9hG4bK-{secrets.token_hex(8)}"
         self._send(self._build_reinvite(call))
-        _LOGGER.info(
+        _LOGGER.debug(
             "Call %s: sent audio-only re-INVITE (CSeq=%d)",
             call_id, call.cseq,
         )
@@ -474,7 +483,7 @@ class IntratoneSipClient(asyncio.Protocol):
             return False
         call.cseq += 1
         self._send(self._build_message(call, body=body))
-        _LOGGER.info(
+        _LOGGER.debug(
             "Call %s: sent %s SIP MESSAGE (CSeq=%d)",
             call_id, label, call.cseq,
         )
@@ -521,7 +530,7 @@ class IntratoneSipClient(asyncio.Protocol):
                 cseq_method = msg.headers.get("cseq", "").split()
                 if len(cseq_method) == 2 and cseq_method[1].upper() == "INVITE":
                     if call.reinvite_in_progress:
-                        _LOGGER.info(
+                        _LOGGER.debug(
                             "Call %s: re-INVITE accepted (200 OK)",
                             call.call_id,
                         )
@@ -623,7 +632,7 @@ class IntratoneSipClient(asyncio.Protocol):
         rr = _extract_record_routes(raw)
         call.route_set = list(reversed(rr)) if rr else None
 
-        _LOGGER.info("Call %s: 200 OK — sending ACK", call.call_id)
+        _LOGGER.debug("Call %s: 200 OK — sending ACK", call.call_id)
         self._send(
             self._build_ack(call, msg, request_uri=call.remote_target_uri)
         )
@@ -637,7 +646,7 @@ class IntratoneSipClient(asyncio.Protocol):
 
         video_endpoint = _extract_video_endpoint(msg.body) if call.local_video_rtp_port else None
         if call.local_video_rtp_port and video_endpoint is None:
-            _LOGGER.info(
+            _LOGGER.debug(
                 "Call %s: server rejected video media (no m=video > 0 in 200 OK)",
                 call.call_id,
             )
@@ -660,7 +669,7 @@ class IntratoneSipClient(asyncio.Protocol):
     ) -> None:
         """In-dialog INVITE = RFC 4028 session-timer refresh. 200 OK with the
         original SDP keeps the media path unchanged."""
-        _LOGGER.info("Call %s: session-timer re-INVITE — extending session", call.call_id)
+        _LOGGER.debug("Call %s: session-timer re-INVITE — extending session", call.call_id)
         sdp = self._build_sdp(call).encode("utf-8")
         via_headers = _extract_via_headers(raw_data)
         lines = ["SIP/2.0 200 OK"]
@@ -685,7 +694,7 @@ class IntratoneSipClient(asyncio.Protocol):
     def _handle_bye(
         self, call: _PendingCall, msg: SipMessage, raw_data: bytes
     ) -> None:
-        _LOGGER.info("Call %s: BYE received — terminating", call.call_id)
+        _LOGGER.debug("Call %s: BYE received — terminating", call.call_id)
         self._send(self._build_200_for(msg, raw_data))
         self._terminate(call)
 

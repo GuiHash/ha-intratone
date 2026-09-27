@@ -19,6 +19,7 @@ import hashlib
 import logging
 import re
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -432,6 +433,56 @@ def test_send_open_door_never_logs_the_door_code(client_setup, caplog):
     # The code still reaches the server unredacted.
     _, _, body = _parse(transport.sent[-1])
     assert body == b"opendoor:1234"
+
+
+def test_sip_trace_never_logs_sip_identities(client_setup, caplog):
+    """SIP usernames (ours and the LOGIN_TO_CALL target) are masked in FCM
+    push logs and diagnostics — the raw SIP trace must mask them too, in the
+    URIs and in the SDP `o=` line."""
+    client, transport, _, _ = client_setup
+    target_user = TARGET_URI.removeprefix("sip:").split("@")[0]
+
+    with caplog.at_level(
+        logging.DEBUG, logger="custom_components.intratone.sip_client"
+    ):
+        call_id, _ = _confirm_call(client, transport)
+        client.send_open_door(call_id)
+
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "SIP TX" in text and "SIP RX" in text
+    assert USERNAME not in text
+    assert target_user not in text
+    assert "sip:<redacted>@" in text
+    # Only the log is masked — the wire still carries the real identities.
+    assert USERNAME.encode() in transport.sent[0]
+    assert target_user.encode() in transport.sent[0]
+
+
+def test_unparseable_sip_warning_is_redacted(client_setup, caplog):
+    """The WARNING for a dropped message is default-level — same masking as
+    the DEBUG trace."""
+    client, _, _, _ = client_setup
+    raw = (
+        f"MESSAGE <sip:{USERNAME}@{LOCAL_HOST}> SIP/2.0\r\n"
+        "Content-Length: 11\r\n\r\n"
+        "opendoor:42"
+    ).encode()
+
+    with (
+        patch(
+            "custom_components.intratone.sip_client.SipMessage.parse_sip",
+            side_effect=ValueError("bad"),
+        ),
+        caplog.at_level(
+            logging.WARNING, logger="custom_components.intratone.sip_client"
+        ),
+    ):
+        client.data_received(raw)
+
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "Dropping unparseable SIP message" in text
+    assert USERNAME not in text
+    assert "opendoor:42" not in text
 
 
 def test_send_open_door_fails_when_call_not_confirmed(client_setup):

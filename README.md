@@ -327,7 +327,7 @@ logger:
     custom_components.intratone: debug
 ```
 
-At `debug` level the integration logs every SIP message sent and received (TX/RX, credentials redacted), every FCM push received, and the exact ffmpeg command lines. Use these to diagnose ring delivery, audio, or video problems before opening an issue.
+At `debug` level the integration logs every SIP message sent and received (TX/RX, credentials, SIP identities and door code redacted), every FCM push received, the exact ffmpeg command lines and the per-call media markers (`FFMPEG_PUSH_READY`, `AUDIO_RX_SUMMARY`…) referenced below. Use these to diagnose ring delivery, audio, or video problems before opening an issue.
 
 ### Testing without a visitor: `intratone.simulate_ring`
 
@@ -345,11 +345,11 @@ Main fields:
 
 **Ring doesn't reach iPhone** — verify `event.intratone_<ID>_doorbell` fires in HA (Developer Tools → Events) when someone rings. Check the FCM listener heartbeat in logs (`firebase_messaging` lines every ~20 s). Make sure your HomeKit Bridge accessory is paired and the `linked_doorbell_sensor` is set. If rings **silently stopped after working fine**, Google may have rotated HA's FCM push token — Intratone keeps sending pushes to the old one. The integration detects this and raises a fixable Repair (**Settings → System → Repairs**) that asks for a fresh invitation code to re-register the new token.
 
-**Tile opens but loading spinner forever** — go2rtc must be running with the `intratone` slot declared. Look for `FFMPEG_PUSH_READY: ... consumable` in HA logs (the marker confirming our ffmpeg pushed successfully); if absent, enable `custom_components.intratone: debug` and look for ffmpeg errors.
+**Tile opens but loading spinner forever** — go2rtc must be running with the `intratone` slot declared. With [debug logs](#enabling-debug-logs) enabled, look for `FFMPEG_PUSH_READY: ... consumable` (the marker confirming our ffmpeg pushed successfully); if absent, look for ffmpeg errors.
 
 **Video enabled but tile loads forever or shows black** — `Error submitting packet to decoder: Invalid data found when processing input` (VP8) lines in the log are **expected at stream start**: they are P-frames arriving before the first I-frame and stop once ffmpeg decodes the keyframe. If `FFMPEG_PUSH_READY: timeout after 5.0s` appears, the Intratone server didn't send a VP8 keyframe within the window; tapping the tile again immediately usually succeeds on a second attempt.
 
-**Tile opens but no audio** — look for `Packet size 180 too large` in HA's homekit ffmpeg logs. If present, the `audio_packet_size: 384` setting is missing from the HomeKit `entity_config` above. During a call, the `AUDIO_RX_SUMMARY` log line shows how many audio packets the integration received and whether their content was real audio or comfort-noise.
+**Tile opens but no audio** — look for `Packet size 180 too large` in HA's homekit ffmpeg logs. If present, the `audio_packet_size: 384` setting is missing from the HomeKit `entity_config` above. During a call, the `AUDIO_RX_SUMMARY` debug log line shows how many audio packets the integration received and whether their content was real audio or comfort-noise.
 
 **Door doesn't open** — the unlock action only works during the active call dialog (see [Caveats](#caveats)). Open the camera tile first to trigger the call, then tap the lock within ~25 s.
 
