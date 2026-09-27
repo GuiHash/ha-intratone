@@ -206,13 +206,19 @@ class FcmListener:
         def _on_creds_updated(new_creds: dict) -> None:
             self._hass.loop.call_soon_threadsafe(self._persist_creds, new_creds)
 
-        self._client = FcmPushClient(
-            callback=_on_push,
-            fcm_config=_fcm_config(resolve_app_credentials(self._entry.options)),
-            credentials=creds,
-            credentials_updated_callback=_on_creds_updated,
-        )
-        token = await self._client.checkin_or_register()
+        # Own the HTTP session, as in fcm_register_standalone(): the library
+        # leaks its internal one on every failed checkin. It only uses it
+        # inside checkin_or_register() (MCS runs on its own TLS socket), so
+        # it can be closed as soon as checkin is done.
+        async with aiohttp.ClientSession() as session:
+            self._client = FcmPushClient(
+                callback=_on_push,
+                fcm_config=_fcm_config(resolve_app_credentials(self._entry.options)),
+                credentials=creds,
+                credentials_updated_callback=_on_creds_updated,
+                http_client_session=session,
+            )
+            token = await self._client.checkin_or_register()
         await self._client.start()
         # start() only spawns the login tasks (STARTING_TASKS) — don't claim
         # connectivity until the client actually reports STARTED. Login

@@ -221,6 +221,53 @@ async def test_healthcheck_keeps_client_while_listen_task_runs(
             await task
 
 
+async def test_run_once_closes_http_session_when_checkin_fails(
+    listener, fake_client
+) -> None:
+    """A failed checkin must not leak the aiohttp session: the library only
+    closes the one it creates itself on success."""
+    session_closed_during_checkin: list[bool] = []
+
+    async def failing_checkin() -> str:
+        session = fake_client.call_args.kwargs["http_client_session"]
+        session_closed_during_checkin.append(session.closed)
+        raise RuntimeError(
+            "Unable to establish subscription with Google Cloud Messaging."
+        )
+
+    fake_client.instance.checkin_or_register = AsyncMock(
+        side_effect=failing_checkin
+    )
+
+    with pytest.raises(RuntimeError, match="Unable to establish subscription"):
+        await listener._run_once()
+
+    assert session_closed_during_checkin == [False]
+    assert fake_client.call_args.kwargs["http_client_session"].closed
+
+
+async def test_run_once_closes_http_session_after_successful_checkin(
+    hass, listener, fake_client, monkeypatch
+) -> None:
+    """The library only uses the HTTP session inside checkin_or_register()
+    (MCS runs on its own TLS socket), so it is closed once checkin is done."""
+    monkeypatch.setattr(
+        fcm_listener, "STARTUP_POLL_INTERVAL_S", 0.01, raising=False
+    )
+    fake_client.instance.run_state = FcmPushClientRunState.STARTED
+    task = hass.async_create_background_task(
+        listener._run_once(), name="test_fcm_run_once"
+    )
+    await asyncio.sleep(0.05)
+
+    assert listener.connected is True
+    assert fake_client.call_args.kwargs["http_client_session"].closed
+
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
 async def test_connected_only_reported_once_client_started(
     hass, listener, fake_client, monkeypatch
 ) -> None:
