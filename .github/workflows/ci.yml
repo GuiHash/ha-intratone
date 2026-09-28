@@ -67,3 +67,35 @@ jobs:
           category: integration
         env:
           REPOSITORY_REF: ${{ github.head_ref || github.ref_name }}
+
+  mypy:
+    name: mypy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 #v4.3.1
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 #v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 #v10.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "requirements_test.txt"
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libturbojpeg0-dev libopus0
+
+      - name: Install Python dependencies
+        # Python 3.13 resolves the pinned HA 2026.2.3 test lane. The typed
+        # third-party deps the integration imports are pinned here too, so a
+        # new upstream release can't change the type-check result.
+        run: >-
+          uv pip install --system --prerelease=allow -r requirements_test.txt
+          mypy==2.3.1 firebase-messaging==0.4.5 voip-utils==0.5.0
+
+      - name: Run mypy
+        run: mypy custom_components/intratone
