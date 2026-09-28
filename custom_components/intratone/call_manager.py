@@ -29,7 +29,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import socket
-from typing import Callable
+from collections.abc import Callable
 
 from .audio_bridge import AudioBridge, BridgeStoppedError
 from .sip_client import CallEstablished, IntratoneSipClient
@@ -274,7 +274,7 @@ class CallManager:
                 ),
                 timeout=_SIP_CONNECT_TIMEOUT_S,
             )
-        except (asyncio.TimeoutError, OSError) as err:
+        except (TimeoutError, OSError) as err:
             _LOGGER.error(
                 "SIP TCP connect to %s:%d failed: %s",
                 target_host,
@@ -538,7 +538,7 @@ class CallManager:
                 info.call_id,
             )
             return
-        except Exception as err:  # noqa: BLE001
+        except Exception as err:
             _LOGGER.exception("Audio bridge failed to start: %s", err)
             if self._sip_client is not None:
                 self._sip_client.hang_up(info.call_id)
@@ -591,5 +591,5 @@ class CallManager:
             return
         try:
             self._sip_client.send_reinvite_audio_only(self._active_call_id)
-        except Exception:  # noqa: BLE001 — never let bridge crashes propagate
+        except Exception:  # never let bridge crashes propagate
             _LOGGER.exception("re-INVITE audio-only failed")

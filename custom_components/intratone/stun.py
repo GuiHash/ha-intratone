@@ -50,7 +50,9 @@ def build_binding_response(request: bytes, reflexive_addr: tuple[str, int]) -> b
     # XOR rules (RFC 5389 §15.2): port ^ high 16 bits of magic cookie;
     # IPv4 address ^ full magic cookie.
     x_port = port ^ (_MAGIC_COOKIE >> 16)
-    x_addr = bytes(b ^ c for b, c in zip(addr_bytes, _MAGIC_COOKIE.to_bytes(4, "big")))
+    x_addr = bytes(
+        b ^ c for b, c in zip(addr_bytes, _MAGIC_COOKIE.to_bytes(4, "big"), strict=False)
+    )
     # Attribute: type(2) + length(2) + reserved(1)+family(1) + x-port(2) + x-addr(4)
     attr = struct.pack(
         ">HHBBH4s",

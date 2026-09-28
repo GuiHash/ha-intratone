@@ -328,7 +328,7 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
                 except FcmRegistrationError as err:
                     _LOGGER.warning("FCM registration failed: %s", err)
                     errors["base"] = "fcm_failed"
-                except Exception:  # noqa: BLE001
+                except Exception:
                     _LOGGER.exception("Unexpected register error")
                     errors["base"] = "unknown"
                 else:
@@ -374,7 +374,7 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
             except IntratoneApiError as err:
                 _LOGGER.warning("validate API error: %s", err)
                 errors["base"] = "auth_failed"
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _LOGGER.exception("Unexpected validate/auth error")
                 errors["base"] = "unknown"
             else:
@@ -492,7 +492,7 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
             except (IntratoneAuthError, IntratoneApiError) as err:
                 _LOGGER.warning("mobipass activate failed: %s", err)
                 errors["base"] = "mobipass_failed"
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _LOGGER.exception("Unexpected mobipass activate error")
                 errors["base"] = "unknown"
             else:
@@ -521,7 +521,7 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
             except (IntratoneAuthError, IntratoneApiError) as err:
                 _LOGGER.warning("mobipass verify failed: %s", err)
                 errors["base"] = "mobipass_failed"
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _LOGGER.exception("Unexpected mobipass verify error")
                 errors["base"] = "unknown"
             else:
@@ -586,7 +586,7 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
                 "Silent reauth rejected (%s) — prompting for invite code", err
             )
             return None
-        except Exception:  # noqa: BLE001
+        except Exception:
             _LOGGER.exception(
                 "Silent reauth crashed — prompting for invite code"
             )
@@ -633,7 +633,7 @@ class IntratoneConfigFlow(ConfigFlow, domain=DOMAIN):
                 except FcmRegistrationError as err:
                     _LOGGER.warning("FCM registration failed: %s", err)
                     errors["base"] = "fcm_failed"
-                except Exception:  # noqa: BLE001
+                except Exception:
                     _LOGGER.exception("Unexpected pairing error")
                     errors["base"] = "unknown"
                 else:

@@ -91,7 +91,7 @@ async def async_probe_go2rtc(
         status = await asyncio.wait_for(
             _rtsp_request(host, port, request), timeout
         )
-    except (OSError, asyncio.TimeoutError) as err:
+    except (OSError, TimeoutError) as err:
         _LOGGER.debug("go2rtc probe of %s failed: %r", url, err)
         return ERR_UNREACHABLE
     if not _is_rtsp_ok(status):
@@ -176,7 +176,7 @@ async def async_selftest_go2rtc(
                 status = await asyncio.wait_for(
                     _rtsp_request(host, port, describe), _PROBE_TIMEOUT_S
                 )
-            except (OSError, asyncio.TimeoutError):
+            except (OSError, TimeoutError):
                 status = ""
             if _is_rtsp_ok(status):
                 _LOGGER.debug("go2rtc self-test OK: %s publishes and serves", url)

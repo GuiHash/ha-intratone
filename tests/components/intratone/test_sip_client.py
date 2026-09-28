@@ -910,14 +910,14 @@ def test_stray_response_for_unknown_call_ignored(client_setup):
     client, transport, _, _ = client_setup
     sent_before = len(transport.sent)
     junk = (
-        "SIP/2.0 200 OK\r\n"
-        "Via: SIP/2.0/TCP 1.2.3.4;branch=z9hG4bK-stray\r\n"
-        "From: <sip:nobody@nowhere>;tag=x\r\n"
-        "To: <sip:nobody@nowhere>;tag=y\r\n"
-        "Call-ID: not-our-call@somewhere\r\n"
-        "CSeq: 1 INVITE\r\n"
-        "Content-Length: 0\r\n\r\n"
-    ).encode()
+        b"SIP/2.0 200 OK\r\n"
+        b"Via: SIP/2.0/TCP 1.2.3.4;branch=z9hG4bK-stray\r\n"
+        b"From: <sip:nobody@nowhere>;tag=x\r\n"
+        b"To: <sip:nobody@nowhere>;tag=y\r\n"
+        b"Call-ID: not-our-call@somewhere\r\n"
+        b"CSeq: 1 INVITE\r\n"
+        b"Content-Length: 0\r\n\r\n"
+    )
     client.data_received(junk)
     assert len(transport.sent) == sent_before
 
@@ -1022,7 +1022,7 @@ def test_invite_contact_includes_sip_instance(client_setup):
 def test_connection_lost_terminates_active_call(client_setup):
     """If the TCP connection drops mid-call, we fire on_call_terminated so
     CallManager can clean up — otherwise the next ring is silently dropped."""
-    client, transport, _, terminated = client_setup
+    client, _, _, terminated = client_setup
     call_id = client.call(TARGET_URI, LOCAL_RTP, USERNAME, PASSWORD)
     client.connection_lost(ConnectionResetError("peer closed"))
     assert terminated == [call_id]

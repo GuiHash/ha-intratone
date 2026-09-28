@@ -303,7 +303,7 @@ class IntratoneAPI:
                 API_BASE + path, data=form, headers=headers, timeout=REQUEST_TIMEOUT
             ) as resp:
                 return await _parse_json_response(resp, path)
-        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+        except (aiohttp.ClientError, TimeoutError) as err:
             # Wrap transport errors so callers' typed retry logic triggers.
             raise IntratoneConnectionError(f"Network error calling {path}: {err}") from err
 
@@ -423,7 +423,7 @@ class IntratoneAPI:
                     API_BASE + path, headers=headers, timeout=REQUEST_TIMEOUT
                 ) as resp:
                     return await _parse_json_response(resp, path)
-            except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+            except (aiohttp.ClientError, TimeoutError) as err:
                 raise IntratoneConnectionError(
                     f"Network error calling {path}: {err}"
                 ) from err
@@ -782,7 +782,7 @@ async def register_with_invite(
                 body = await resp.json(content_type=None)
             except ValueError as err:
                 raise IntratoneApiError(f"Non-JSON response: {err}") from err
-    except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+    except (aiohttp.ClientError, TimeoutError) as err:
         raise IntratoneConnectionError(
             f"Network error calling registercodes: {err}"
         ) from err
@@ -837,7 +837,7 @@ async def verify_user(
             timeout=REQUEST_TIMEOUT,
         ) as resp:
             body = await resp.json(content_type=None)
-    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+    except (aiohttp.ClientError, TimeoutError, ValueError):
         # ValueError covers a non-JSON/empty body (e.g. an HTML 5xx page).
         return {}
     if not isinstance(body, dict):
@@ -888,7 +888,7 @@ async def register_phone_for_sms(
                 body = await resp.json(content_type=None)
             except ValueError as err:
                 raise IntratoneApiError(f"Non-JSON response: {err}") from err
-    except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+    except (aiohttp.ClientError, TimeoutError) as err:
         raise IntratoneConnectionError(f"Network error calling register: {err}") from err
 
     if not isinstance(body, dict) or body.get("state") == "error":
@@ -938,7 +938,7 @@ async def validate_sms_code(
                 body = await resp.json(content_type=None)
             except ValueError as err:
                 raise IntratoneApiError(f"Non-JSON response: {err}") from err
-    except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+    except (aiohttp.ClientError, TimeoutError) as err:
         raise IntratoneConnectionError(f"Network error calling validate: {err}") from err
 
     if not isinstance(body, dict) or body.get("state") == "error":
@@ -983,7 +983,7 @@ async def authenticate_for_invite(
                 timeout=REQUEST_TIMEOUT,
             ) as resp:
                 last = await resp.json(content_type=None)
-        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
+        except (aiohttp.ClientError, TimeoutError, ValueError) as err:
             # Transport failure or non-JSON body — try the next candidate.
             last_error = err
             continue

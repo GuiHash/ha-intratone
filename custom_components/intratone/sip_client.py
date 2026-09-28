@@ -32,7 +32,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable
+from collections.abc import Callable
 
 from voip_utils.sip import SipMessage, get_rtp_info
 
@@ -639,7 +639,7 @@ class IntratoneSipClient(asyncio.Protocol):
 
         try:
             rtp_info = get_rtp_info(msg.body)
-        except Exception:  # noqa: BLE001
+        except Exception:
             _LOGGER.exception("Call %s: SDP parse failed", call.call_id)
             self._terminate(call)
             return
