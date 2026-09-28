@@ -11,16 +11,17 @@ permissions:
 jobs:
   release-please:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - id: release
-        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 #v5
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       # The steps below only run when release-please cut a new GitHub release.
       # They package the integration and attach it as a release asset so HACS
       # can install from the zip (which also feeds GitHub's download_count).
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 #v4.3.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: ${{ steps.release.outputs.release_created }}
 
       - name: Build integration zip
