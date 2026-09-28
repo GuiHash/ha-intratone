@@ -323,3 +323,387 @@ async def test_fcm_token_stale_fix_flow_fcm_registration_failure(
     assert data["type"] == "form"
     assert data["errors"] == {"base": "fcm_failed"}
     assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is not None
+
+
+async def test_mobipass_repair_confirm_not_loaded_aborts(
+    hass,
+    hass_client,
+    mock_entry: MockConfigEntry,
+    mock_fcm_client,
+    mock_call_manager,
+    aiomock,
+) -> None:
+    """A fix flow for an issue whose entry_id is missing (or gone) aborts
+    instead of crashing — e.g. a stale issue surviving entry removal.
+
+    A sibling entry is loaded so the `intratone` repairs platform is
+    registered at all (HA only discovers it for a set-up domain); the
+    orphan issue itself is intentionally unlinked from any entry.
+    """
+    assert await async_setup_component(hass, "repairs", {})
+    await _setup_entry_needing_transfer(hass, mock_entry, aiomock)
+
+    issue_id = "mobipass_transfer_orphan"
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        issue_id,
+        is_fixable=True,
+        severity=ir.IssueSeverity.WARNING,
+        translation_key="mobipass_transfer",
+    )
+
+    client = await hass_client()
+    resp = await client.post(
+        "/api/repairs/issues/fix",
+        json={"handler": DOMAIN, "issue_id": issue_id},
+    )
+    data = await resp.json()
+    assert data["type"] == "abort"
+    assert data["reason"] == "not_loaded"
+
+
+async def test_mobipass_repair_confirm_activate_mobipass_error_shows_mapped_message(
+    hass,
+    hass_client,
+    mock_entry: MockConfigEntry,
+    mock_fcm_client,
+    mock_call_manager,
+    aiomock,
+) -> None:
+    """A Mobipass-specific refusal on activate maps to its own error key."""
+    assert await async_setup_component(hass, "repairs", {})
+    issue_id = await _setup_entry_needing_transfer(hass, mock_entry, aiomock)
+
+    aiomock.post(
+        f"{API_BASE}{PATH_MOBIPASS_ACTIVATE}",
+        payload={
+            "state": "ok",
+            "error": 1,
+            "code": "MOBIPASS_NOT_AVAILABLE",
+            "message": "not eligible",
+        },
+    )
+
+    client = await hass_client()
+    resp = await client.post(
+        "/api/repairs/issues/fix",
+        json={"handler": DOMAIN, "issue_id": issue_id},
+    )
+    flow_id = (await resp.json())["flow_id"]
+
+    resp = await client.post(f"/api/repairs/issues/fix/{flow_id}", json={})
+    data = await resp.json()
+    assert data["type"] == "form"
+    assert data["step_id"] == "confirm"
+    assert data["errors"] == {"base": "mobipass_not_available"}
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is not None
+
+
+async def test_mobipass_repair_confirm_activate_generic_api_error_shows_mobipass_failed(
+    hass,
+    hass_client,
+    mock_entry: MockConfigEntry,
+    mock_fcm_client,
+    mock_call_manager,
+    aiomock,
+) -> None:
+    """A non-Mobipass API failure on activate (e.g. a server hiccup) still
+    keeps the user on the confirm form, mapped to the generic key."""
+    assert await async_setup_component(hass, "repairs", {})
+    issue_id = await _setup_entry_needing_transfer(hass, mock_entry, aiomock)
+
+    aiomock.post(
+        f"{API_BASE}{PATH_MOBIPASS_ACTIVATE}",
+        payload={"state": "error", "message": "server hiccup"},
+        repeat=True,
+    )
+
+    client = await hass_client()
+    resp = await client.post(
+        "/api/repairs/issues/fix",
+        json={"handler": DOMAIN, "issue_id": issue_id},
+    )
+    flow_id = (await resp.json())["flow_id"]
+
+    resp = await client.post(f"/api/repairs/issues/fix/{flow_id}", json={})
+    data = await resp.json()
+    assert data["type"] == "form"
+    assert data["errors"] == {"base": "mobipass_failed"}
+
+
+async def test_mobipass_repair_confirm_activate_unexpected_error_shows_unknown(
+    hass,
+    hass_client,
+    mock_entry: MockConfigEntry,
+    mock_fcm_client,
+    mock_call_manager,
+    aiomock,
+) -> None:
+    """A bug/crash during activate is caught and mapped to `unknown`."""
+    from unittest.mock import AsyncMock
+
+    assert await async_setup_component(hass, "repairs", {})
+    issue_id = await _setup_entry_needing_transfer(hass, mock_entry, aiomock)
+    mock_entry.runtime_data.api.mobipass_activate = AsyncMock(
+        side_effect=RuntimeError("boom")
+    )
+
+    client = await hass_client()
+    resp = await client.post(
+        "/api/repairs/issues/fix",
+        json={"handler": DOMAIN, "issue_id": issue_id},
+    )
+    flow_id = (await resp.json())["flow_id"]
+
+    resp = await client.post(f"/api/repairs/issues/fix/{flow_id}", json={})
+    data = await resp.json()
+    assert data["type"] == "form"
+    assert data["errors"] == {"base": "unknown"}
+
+
+async def test_mobipass_repair_otp_not_loaded_aborts_if_entry_unloads(
+    hass,
+    hass_client,
+    mock_entry: MockConfigEntry,
+    mock_fcm_client,
+    mock_call_manager,
+    aiomock,
+) -> None:
+    """The entry can be unloaded while the OTP form is still open (e.g. the
+    user removes the integration mid-transfer) — the next submit aborts
+    instead of crashing on a missing API client."""
+    assert await async_setup_component(hass, "repairs", {})
+    issue_id = await _setup_entry_needing_transfer(hass, mock_entry, aiomock)
+    aiomock.post(
+        f"{API_BASE}{PATH_MOBIPASS_ACTIVATE}", payload={"state": "ok", "error": 0}
+    )
+
+    client = await hass_client()
+    resp = await client.post(
+        "/api/repairs/issues/fix",
+        json={"handler": DOMAIN, "issue_id": issue_id},
+    )
+    flow_id = (await resp.json())["flow_id"]
+    resp = await client.post(f"/api/repairs/issues/fix/{flow_id}", json={})
+    assert (await resp.json())["step_id"] == "otp"
+
+    assert await hass.config_entries.async_unload(mock_entry.entry_id)
+    await hass.async_block_till_done()
+
+    resp = await client.post(
+        f"/api/repairs/issues/fix/{flow_id}", json={"code": "123456"}
+    )
+    data = await resp.json()
+    assert data["type"] == "abort"
+    assert data["reason"] == "not_loaded"
+
+
+async def test_mobipass_repair_otp_verify_generic_api_error_shows_mobipass_failed(
+    hass,
+    hass_client,
+    mock_entry: MockConfigEntry,
+    mock_fcm_client,
+    mock_call_manager,
+    aiomock,
+) -> None:
+    """A non-Mobipass API failure on verify keeps the user on the OTP form,
+    mapped to the generic key (not the OTP-specific one)."""
+    assert await async_setup_component(hass, "repairs", {})
+    issue_id = await _setup_entry_needing_transfer(hass, mock_entry, aiomock)
+    aiomock.post(
+        f"{API_BASE}{PATH_MOBIPASS_ACTIVATE}", payload={"state": "ok", "error": 0}
+    )
+    aiomock.post(
+        f"{API_BASE}{PATH_MOBIPASS_VERIFY}",
+        payload={"state": "error", "message": "server hiccup"},
+        repeat=True,
+    )
+
+    client = await hass_client()
+    resp = await client.post(
+        "/api/repairs/issues/fix",
+        json={"handler": DOMAIN, "issue_id": issue_id},
+    )
+    flow_id = (await resp.json())["flow_id"]
+    resp = await client.post(f"/api/repairs/issues/fix/{flow_id}", json={})
+    assert (await resp.json())["step_id"] == "otp"
+
+    resp = await client.post(
+        f"/api/repairs/issues/fix/{flow_id}", json={"code": "123456"}
+    )
+    data = await resp.json()
+    assert data["type"] == "form"
+    assert data["errors"] == {"base": "mobipass_failed"}
+
+
+async def test_mobipass_repair_otp_verify_unexpected_error_shows_unknown(
+    hass,
+    hass_client,
+    mock_entry: MockConfigEntry,
+    mock_fcm_client,
+    mock_call_manager,
+    aiomock,
+) -> None:
+    """A bug/crash during verify is caught and mapped to `unknown`."""
+    from unittest.mock import AsyncMock
+
+    assert await async_setup_component(hass, "repairs", {})
+    issue_id = await _setup_entry_needing_transfer(hass, mock_entry, aiomock)
+    aiomock.post(
+        f"{API_BASE}{PATH_MOBIPASS_ACTIVATE}", payload={"state": "ok", "error": 0}
+    )
+
+    client = await hass_client()
+    resp = await client.post(
+        "/api/repairs/issues/fix",
+        json={"handler": DOMAIN, "issue_id": issue_id},
+    )
+    flow_id = (await resp.json())["flow_id"]
+    resp = await client.post(f"/api/repairs/issues/fix/{flow_id}", json={})
+    assert (await resp.json())["step_id"] == "otp"
+
+    mock_entry.runtime_data.api.mobipass_verify = AsyncMock(
+        side_effect=RuntimeError("boom")
+    )
+    resp = await client.post(
+        f"/api/repairs/issues/fix/{flow_id}", json={"code": "123456"}
+    )
+    data = await resp.json()
+    assert data["type"] == "form"
+    assert data["errors"] == {"base": "unknown"}
+
+
+async def test_fcm_repair_confirm_not_loaded_aborts(
+    hass,
+    hass_client,
+    mock_entry: MockConfigEntry,
+    mock_fcm_client,
+    mock_call_manager,
+    aiomock,
+) -> None:
+    """A fix flow for an issue whose entry_id is missing (or gone) aborts
+    instead of crashing.
+
+    A sibling entry is loaded so the `intratone` repairs platform is
+    registered at all (HA only discovers it for a set-up domain); the
+    orphan issue itself is intentionally unlinked from any entry.
+    """
+    assert await async_setup_component(hass, "repairs", {})
+    await _setup_entry_with_stale_token(hass, mock_entry, mock_fcm_client, aiomock)
+
+    issue_id = "fcm_token_stale_orphan"
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        issue_id,
+        is_fixable=True,
+        severity=ir.IssueSeverity.WARNING,
+        translation_key="fcm_token_stale",
+    )
+
+    client = await hass_client()
+    resp = await client.post(
+        "/api/repairs/issues/fix",
+        json={"handler": DOMAIN, "issue_id": issue_id},
+    )
+    data = await resp.json()
+    assert data["type"] == "abort"
+    assert data["reason"] == "not_loaded"
+
+
+async def test_fcm_repair_confirm_invalid_invite_format_shows_error(
+    hass,
+    hass_client,
+    mock_entry: MockConfigEntry,
+    mock_fcm_client,
+    mock_call_manager,
+    aiomock,
+) -> None:
+    """A malformed invite code keeps the user on the form with its own key."""
+    assert await async_setup_component(hass, "repairs", {})
+    issue_id = await _setup_entry_with_stale_token(
+        hass, mock_entry, mock_fcm_client, aiomock
+    )
+
+    client = await hass_client()
+    resp = await client.post(
+        "/api/repairs/issues/fix",
+        json={"handler": DOMAIN, "issue_id": issue_id},
+    )
+    flow_id = (await resp.json())["flow_id"]
+
+    resp = await client.post(
+        f"/api/repairs/issues/fix/{flow_id}", json={"invite_code": "not-a-code"}
+    )
+    data = await resp.json()
+    assert data["type"] == "form"
+    assert data["errors"] == {"base": "invalid_format"}
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is not None
+
+
+async def test_fcm_repair_confirm_api_error_shows_auth_failed(
+    hass,
+    hass_client,
+    mock_entry: MockConfigEntry,
+    mock_fcm_client,
+    mock_call_manager,
+    aiomock,
+) -> None:
+    """A non-JSON registercodes response is a generic API error, distinct
+    from a rejected code (`invalid_code`)."""
+    assert await async_setup_component(hass, "repairs", {})
+    issue_id = await _setup_entry_with_stale_token(
+        hass, mock_entry, mock_fcm_client, aiomock
+    )
+
+    aiomock.post(f"{API_BASE}api/auth/registercodes", body="not json")
+
+    client = await hass_client()
+    resp = await client.post(
+        "/api/repairs/issues/fix",
+        json={"handler": DOMAIN, "issue_id": issue_id},
+    )
+    flow_id = (await resp.json())["flow_id"]
+
+    resp = await client.post(
+        f"/api/repairs/issues/fix/{flow_id}", json={"invite_code": "448789-1206"}
+    )
+    data = await resp.json()
+    assert data["type"] == "form"
+    assert data["errors"] == {"base": "auth_failed"}
+
+
+async def test_fcm_repair_confirm_unexpected_error_shows_unknown(
+    hass,
+    hass_client,
+    mock_entry: MockConfigEntry,
+    mock_fcm_client,
+    mock_call_manager,
+    aiomock,
+) -> None:
+    """A bug/crash during the re-pair is caught and mapped to `unknown`."""
+    from unittest.mock import AsyncMock, patch
+
+    assert await async_setup_component(hass, "repairs", {})
+    issue_id = await _setup_entry_with_stale_token(
+        hass, mock_entry, mock_fcm_client, aiomock
+    )
+
+    client = await hass_client()
+    resp = await client.post(
+        "/api/repairs/issues/fix",
+        json={"handler": DOMAIN, "issue_id": issue_id},
+    )
+    flow_id = (await resp.json())["flow_id"]
+
+    with patch(
+        "custom_components.intratone.repairs.fcm_register_standalone",
+        new=AsyncMock(side_effect=RuntimeError("boom")),
+    ):
+        resp = await client.post(
+            f"/api/repairs/issues/fix/{flow_id}", json={"invite_code": "448789-1206"}
+        )
+    data = await resp.json()
+    assert data["type"] == "form"
+    assert data["errors"] == {"base": "unknown"}

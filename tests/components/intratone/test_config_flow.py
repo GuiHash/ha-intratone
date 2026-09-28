@@ -16,6 +16,7 @@ from custom_components.intratone.config_flow import (
 from custom_components.intratone.fcm_listener import FcmRegistrationError
 from custom_components.intratone.const import (
     API_BASE,
+    CONF_DEVICE_ID,
     CONF_GO2RTC_URL,
     CONF_INDICATIF,
     CONF_INVITE_CODE,
@@ -802,3 +803,393 @@ async def test_missing_credentials_at_setup_start_reauth_for_them(
     assert result["reason"] == "reauth_successful"
     assert mock_entry.options["app_token"] == USER_CREDENTIALS["app_token"]
     assert mock_entry.state is config_entries.ConfigEntryState.LOADED
+
+
+async def test_phone_register_rejected_shows_sms_failed(
+    hass, aiomock, patched_fcm_register
+) -> None:
+    """A rejected /api/auth/register call (IntratoneAuthError) maps to
+    `sms_failed`, distinct from an invalid phone number."""
+    aiomock.post(f"{API_BASE}api/auth/verify", payload={"state": "ok", "data": {}})
+    aiomock.post(
+        f"{API_BASE}api/auth/register",
+        payload={"state": "error", "message": "phone blocked"},
+    )
+    result = await _pick_phone_step(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"phone": "0671124546", "indicatif": "33"}
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "sms_failed"}
+
+
+async def test_phone_register_api_error_shows_sms_failed(
+    hass, aiomock, patched_fcm_register
+) -> None:
+    """A non-JSON /api/auth/register response (IntratoneApiError) also
+    maps to `sms_failed`."""
+    aiomock.post(f"{API_BASE}api/auth/verify", payload={"state": "ok", "data": {}})
+    aiomock.post(f"{API_BASE}api/auth/register", body="not json")
+    result = await _pick_phone_step(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"phone": "0671124546", "indicatif": "33"}
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "sms_failed"}
+
+
+async def test_phone_register_unexpected_error_shows_unknown(
+    hass, aiomock, patched_fcm_register
+) -> None:
+    """A bug/crash while registering the phone is caught and mapped to
+    `unknown` instead of propagating."""
+    aiomock.post(f"{API_BASE}api/auth/verify", payload={"state": "ok", "data": {}})
+    with patch(
+        "custom_components.intratone.config_flow.register_phone_for_sms",
+        new=AsyncMock(side_effect=RuntimeError("boom")),
+    ):
+        result = await _pick_phone_step(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"phone": "0671124546", "indicatif": "33"}
+        )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "unknown"}
+
+
+async def test_sms_validate_api_error_shows_auth_failed(
+    hass, aiomock, patched_fcm_register
+) -> None:
+    """A non-JSON /api/auth/validate response (IntratoneApiError) is
+    distinct from a rejected code (`invalid_sms_code`)."""
+    aiomock.post(f"{API_BASE}api/auth/verify", payload={"state": "ok", "data": {}})
+    aiomock.post(
+        f"{API_BASE}api/auth/register",
+        payload={"state": "ok", "data": {"id": "3844428"}},
+    )
+    aiomock.post(f"{API_BASE}api/auth/validate", body="not json")
+
+    result = await _pick_phone_step(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"phone": "0671124546", "indicatif": "33"}
+    )
+    assert result["step_id"] == "sms"
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"code": "1234"}
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "auth_failed"}
+
+
+async def test_sms_unexpected_error_shows_unknown(
+    hass, aiomock, patched_fcm_register
+) -> None:
+    """A bug/crash minting the JWT after a valid SMS code is caught and
+    mapped to `unknown`."""
+    aiomock.post(f"{API_BASE}api/auth/verify", payload={"state": "ok", "data": {}})
+    aiomock.post(
+        f"{API_BASE}api/auth/register",
+        payload={"state": "ok", "data": {"id": "3844428"}},
+    )
+    aiomock.post(f"{API_BASE}api/auth/validate", payload={"state": "ok"})
+
+    result = await _pick_phone_step(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"phone": "0671124546", "indicatif": "33"}
+    )
+    assert result["step_id"] == "sms"
+
+    with patch(
+        "custom_components.intratone.config_flow.authenticate_for_invite",
+        new=AsyncMock(side_effect=RuntimeError("boom")),
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"code": "1234"}
+        )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "unknown"}
+
+
+async def test_invite_pairing_api_error_shows_auth_failed(
+    hass, aiomock, patched_fcm_register
+) -> None:
+    """A non-JSON /api/auth/registercodes response (IntratoneApiError) is
+    distinct from a rejected code (`invalid_code`)."""
+    aiomock.post(f"{API_BASE}api/auth/registercodes", body="not json")
+    result = await _pick_invite_step(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_INVITE_CODE: "448789-1206"}
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "auth_failed"}
+
+
+async def test_invite_pairing_unexpected_error_shows_unknown(
+    hass, patched_fcm_register
+) -> None:
+    """A bug/crash during pairing is caught and mapped to `unknown`."""
+    with patch(
+        "custom_components.intratone.config_flow.register_with_invite",
+        new=AsyncMock(side_effect=RuntimeError("boom")),
+    ):
+        result = await _pick_invite_step(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_INVITE_CODE: "448789-1206"}
+        )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "unknown"}
+
+
+async def test_mobipass_reconfigure_not_loaded_aborts(
+    hass, mock_entry: MockConfigEntry
+) -> None:
+    """Reconfigure on an entry that was never loaded aborts as not_loaded
+    instead of crashing on a missing API client."""
+    mock_entry.add_to_hass(hass)
+    result = await mock_entry.start_reconfigure_flow(hass)
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "not_loaded"
+
+
+async def test_mobipass_reconfigure_precheck_crash_still_shows_form(
+    hass, mock_entry: MockConfigEntry, aiomock, mock_fcm_client, mock_call_manager
+) -> None:
+    """A transient failure refreshing the mobipass flags doesn't block the
+    reconfigure flow — it falls through to the form with the last known
+    state instead of propagating."""
+    await _setup_loaded_entry(hass, mock_entry, aiomock)
+    mock_entry.runtime_data.api.authenticate_device = AsyncMock(
+        side_effect=RuntimeError("boom")
+    )
+
+    result = await mock_entry.start_reconfigure_flow(hass)
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "reconfigure"
+
+
+async def test_mobipass_reconfigure_activate_mobipass_error_shows_mapped_message(
+    hass, mock_entry: MockConfigEntry, aiomock, mock_fcm_client, mock_call_manager
+) -> None:
+    """A Mobipass-specific refusal on activate maps to its own error key."""
+    await _setup_loaded_entry(hass, mock_entry, aiomock)
+    aiomock.post(
+        f"{API_BASE}{PATH_MOBIPASS_ACTIVATE}",
+        payload={
+            "state": "ok",
+            "error": 1,
+            "code": "MOBIPASS_NOT_AVAILABLE",
+            "message": "not eligible",
+        },
+    )
+
+    result = await mock_entry.start_reconfigure_flow(hass)
+    assert result["step_id"] == "reconfigure"
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "mobipass_not_available"}
+
+
+async def test_mobipass_reconfigure_activate_generic_api_error_shows_mobipass_failed(
+    hass, mock_entry: MockConfigEntry, aiomock, mock_fcm_client, mock_call_manager
+) -> None:
+    """A non-Mobipass API failure on activate (e.g. a server hiccup) maps
+    to the generic `mobipass_failed` key."""
+    await _setup_loaded_entry(hass, mock_entry, aiomock)
+    aiomock.post(
+        f"{API_BASE}{PATH_MOBIPASS_ACTIVATE}",
+        payload={"state": "error", "message": "server hiccup"},
+        repeat=True,
+    )
+
+    result = await mock_entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "mobipass_failed"}
+
+
+async def test_mobipass_reconfigure_activate_unexpected_error_shows_unknown(
+    hass, mock_entry: MockConfigEntry, aiomock, mock_fcm_client, mock_call_manager
+) -> None:
+    """A bug/crash during activate is caught and mapped to `unknown`."""
+    await _setup_loaded_entry(hass, mock_entry, aiomock)
+    mock_entry.runtime_data.api.mobipass_activate = AsyncMock(
+        side_effect=RuntimeError("boom")
+    )
+
+    result = await mock_entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "unknown"}
+
+
+async def test_mobipass_otp_not_loaded_aborts_if_entry_unloads(
+    hass, mock_entry: MockConfigEntry, aiomock, mock_fcm_client, mock_call_manager
+) -> None:
+    """The entry can be unloaded while the OTP form is still open — the
+    next submit aborts instead of crashing on a missing API client."""
+    await _setup_loaded_entry(hass, mock_entry, aiomock)
+    aiomock.post(
+        f"{API_BASE}{PATH_MOBIPASS_ACTIVATE}", payload={"state": "ok", "error": 0}
+    )
+
+    result = await mock_entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["step_id"] == "mobipass_otp"
+
+    assert await hass.config_entries.async_unload(mock_entry.entry_id)
+    await hass.async_block_till_done()
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"code": "123456"}
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "not_loaded"
+
+
+async def test_mobipass_otp_verify_generic_api_error_shows_mobipass_failed(
+    hass, mock_entry: MockConfigEntry, aiomock, mock_fcm_client, mock_call_manager
+) -> None:
+    """A non-Mobipass API failure on verify maps to the generic
+    `mobipass_failed` key (not the OTP-specific one)."""
+    await _setup_loaded_entry(hass, mock_entry, aiomock)
+    aiomock.post(
+        f"{API_BASE}{PATH_MOBIPASS_ACTIVATE}", payload={"state": "ok", "error": 0}
+    )
+    aiomock.post(
+        f"{API_BASE}{PATH_MOBIPASS_VERIFY}",
+        payload={"state": "error", "message": "server hiccup"},
+        repeat=True,
+    )
+
+    result = await mock_entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["step_id"] == "mobipass_otp"
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"code": "123456"}
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "mobipass_failed"}
+
+
+async def test_mobipass_otp_verify_unexpected_error_shows_unknown(
+    hass, mock_entry: MockConfigEntry, aiomock, mock_fcm_client, mock_call_manager
+) -> None:
+    """A bug/crash during verify is caught and mapped to `unknown`."""
+    await _setup_loaded_entry(hass, mock_entry, aiomock)
+    aiomock.post(
+        f"{API_BASE}{PATH_MOBIPASS_ACTIVATE}", payload={"state": "ok", "error": 0}
+    )
+
+    result = await mock_entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["step_id"] == "mobipass_otp"
+
+    mock_entry.runtime_data.api.mobipass_verify = AsyncMock(
+        side_effect=RuntimeError("boom")
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"code": "123456"}
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "unknown"}
+
+
+async def test_reauth_silent_refresh_skipped_when_device_id_missing(
+    hass, mock_entry_data
+) -> None:
+    """A legacy entry without a stored device_id skips the silent refresh
+    entirely (no network call attempted) and goes straight to the
+    invite-code form."""
+    data = {k: v for k, v in mock_entry_data.items() if k != CONF_DEVICE_ID}
+    entry = MockConfigEntry(
+        domain=DOMAIN, unique_id="3844428", title="Intratone (legacy)", data=data
+    )
+    entry.add_to_hass(hass)
+
+    result = await entry.start_reauth_flow(hass)
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "reauth_confirm"
+
+
+async def test_reauth_silent_refresh_crash_falls_back_to_form(
+    hass, mock_entry: MockConfigEntry, aiomock, mock_fcm_client, mock_call_manager
+) -> None:
+    """An unexpected crash during the silent refresh still shows the
+    invite form instead of propagating."""
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={"state": "ok", "data": {"jwt": "j", "id": "3844428"}},
+        repeat=True,
+    )
+    mock_entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(mock_entry.entry_id)
+    await hass.async_block_till_done()
+
+    with patch(
+        "custom_components.intratone.config_flow.authenticate_for_invite",
+        new=AsyncMock(side_effect=RuntimeError("boom")),
+    ):
+        result = await mock_entry.start_reauth_flow(hass)
+        await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "reauth_confirm"
+
+
+async def test_reauth_silent_refresh_succeeds_without_id_in_response(
+    hass, mock_entry: MockConfigEntry, aiomock, mock_fcm_client, mock_call_manager
+) -> None:
+    """A refreshed JWT with no `id` field in the response leaves the
+    stored numeric_id untouched — some servers omit it on a plain
+    refresh."""
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={"state": "ok", "data": {"jwt": "renewed.jwt"}},
+        repeat=True,
+    )
+    mock_entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(mock_entry.entry_id)
+    await hass.async_block_till_done()
+
+    result = await mock_entry.start_reauth_flow(hass)
+    await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reauth_successful"
+    assert mock_entry.data[CONF_NUMERIC_ID] == "3844428"
+    assert mock_entry.runtime_data.store.jwt == "renewed.jwt"
+
+
+async def test_reauth_with_same_account_invite_succeeds(
+    hass, mock_entry: MockConfigEntry, aiomock, patched_fcm_register
+) -> None:
+    """Re-entering a valid invite code for the SAME account completes the
+    reauth (rather than aborting on a unique_id mismatch)."""
+    mock_entry.add_to_hass(hass)
+
+    # Silent reauth tries api/auth/device first — reject it so the flow
+    # falls through to the invite-code form. authenticate_for_invite tries
+    # up to 3 tel candidates, so register one rejection per candidate.
+    for _ in range(3):
+        aiomock.post(
+            f"{API_BASE}api/auth/device",
+            payload={"state": "error", "message": "device unknown"},
+        )
+    aiomock.post(
+        f"{API_BASE}api/auth/registercodes",
+        payload={"state": "ok", "data": {"id": "3844428", "tel": "0671124546"}},
+    )
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={"state": "ok", "data": {"jwt": "new.jwt", "id": "3844428"}},
+    )
+
+    result = await mock_entry.start_reauth_flow(hass)
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "reauth_confirm"
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_INVITE_CODE: "448789-1206"}
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reauth_successful"
+    assert mock_entry.data[CONF_NUMERIC_ID] == "3844428"
