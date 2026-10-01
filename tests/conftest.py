@@ -50,3 +50,25 @@ if "stream_writer" in inspect.signature(_ClientResponse.__init__).parameters:
 def auto_enable_custom_integrations(enable_custom_integrations):
     """Force HA to discover custom_components/ in every test."""
     yield
+
+
+# ---------------------------------------------------------------------------
+# pytest-homeassistant-custom-component defines its own `snapshot` fixture to
+# route syrupy through HomeAssistantSnapshotExtension (snapshots land under
+# `snapshots/`, the HA convention, instead of syrupy's default
+# `__snapshots__/`). In this project, syrupy's own pytest11 entry point is
+# registered after pytest-homeassistant-custom-component's, so its plain
+# fixture wins instead. Re-declaring the override here — in our own
+# conftest.py, which always takes precedence over any plugin-level fixture —
+# restores the intended behavior.
+# ---------------------------------------------------------------------------
+from pytest_homeassistant_custom_component.syrupy import (  # noqa: E402
+    HomeAssistantSnapshotExtension,
+)
+from syrupy.assertion import SnapshotAssertion  # noqa: E402
+
+
+@pytest.fixture
+def snapshot(snapshot: SnapshotAssertion) -> SnapshotAssertion:
+    """Return snapshot assertion fixture with the Home Assistant extension."""
+    return snapshot.use_extension(HomeAssistantSnapshotExtension)

@@ -259,6 +259,51 @@ async def test_legacy_creds_in_entry_data_migrate_to_store(
     assert runtime.store.fcm_creds == {"gcm": {"android_id": 1, "security_token": 2}}
 
 
+async def test_modern_entry_reads_creds_from_store_migration_is_noop(
+    hass,
+    mock_entry_modern,
+    mock_fcm_client,
+    mock_call_manager,
+    aiomock,
+    hass_storage,
+) -> None:
+    """Current installs keep entry.data free of rotated credentials — they
+    already live in the Store (written by config_flow / a previous JWT
+    refresh). Setup must read them from there, and `_async_migrate_legacy_creds`
+    is a no-op since entry.data has nothing to migrate."""
+    storage_key = f"intratone.{mock_entry_modern.unique_id}.creds"
+    hass_storage[storage_key] = {
+        "version": 1,
+        "minor_version": 1,
+        "key": storage_key,
+        "data": {
+            "jwt": "stored.jwt.token",
+            "fcm_token": "fake-fcm-token",
+            "fcm_creds": {"gcm": {"android_id": 3, "security_token": 4}},
+        },
+    }
+    original_data = dict(mock_entry_modern.data)
+
+    mock_entry_modern.add_to_hass(hass)
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={"state": "ok", "data": {"jwt": "stored.jwt.token", "id": "3844428"}},
+        repeat=True,
+    )
+
+    assert await hass.config_entries.async_setup(mock_entry_modern.entry_id)
+    await hass.async_block_till_done()
+
+    runtime = mock_entry_modern.runtime_data
+    assert runtime.store.jwt == "stored.jwt.token"
+    assert runtime.store.fcm_token == "fake-fcm-token"
+    assert runtime.store.fcm_creds == {"gcm": {"android_id": 3, "security_token": 4}}
+
+    # Migration is a no-op: nothing to move, entry.data is untouched.
+    reloaded = hass.config_entries.async_get_entry(mock_entry_modern.entry_id)
+    assert reloaded.data == original_data
+
+
 async def test_remove_entry_deletes_credentials_store(
     hass, mock_entry, mock_fcm_client, mock_call_manager, aiomock, hass_storage
 ) -> None:

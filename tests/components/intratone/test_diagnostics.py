@@ -68,6 +68,50 @@ async def test_diagnostics_redacts_credentials_and_dumps_state(
     assert last_call["ring_seq"] == 1
 
 
+async def test_diagnostics_snapshot(
+    hass, mock_entry, mock_fcm_client, mock_call_manager, aiomock, freezer, snapshot
+) -> None:
+    """Full diagnostics payload, byte for byte — catches accidental shape
+    changes (new/renamed/reordered keys) that the targeted assertions above
+    wouldn't notice.
+
+    Deterministic: time is frozen (the only "live" value in the payload is
+    `received_at`), and everything else comes from fixed fixtures (entry.data,
+    the credentials Store, the push payload below). The payload is also
+    HA-version independent — it only serializes plain dicts/strings/bools
+    built by the integration itself, nothing from HA core.
+    """
+    freezer.move_to("2024-01-15T10:30:00+00:00")
+    mock_entry.add_to_hass(hass)
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={"state": "ok", "data": {"jwt": "fake.jwt.token", "id": "3844428"}},
+        repeat=True,
+    )
+    assert await hass.config_entries.async_setup(mock_entry.entry_id)
+    await hass.async_block_till_done()
+
+    await mock_entry.runtime_data.coordinator.async_handle_push(
+        {
+            "call_id": "300705065",
+            "message": "PORTE RUE",
+            "LOGIN_TO_CALL": "SECRET_SIP_LOGIN",
+            "LOGIN": "cogelecTest",
+            "PASS": "CogeleC",
+            "ip_adress": "178.32.84.135",
+        }
+    )
+    await hass.async_block_till_done()
+
+    diag = await async_get_config_entry_diagnostics(hass, mock_entry)
+
+    # Secrets are redacted, not merely absent.
+    assert diag["store"]["jwt"] == "**REDACTED**"
+    assert diag["entry"]["data"]["device_id"] == "**REDACTED**"
+
+    assert diag == snapshot
+
+
 async def test_diagnostics_redacts_app_credential_overrides(hass) -> None:
     entry = MockConfigEntry(
         domain=DOMAIN,

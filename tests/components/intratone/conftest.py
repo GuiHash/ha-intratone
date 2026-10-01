@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 import threading
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, create_autospec, patch
 
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -24,6 +24,7 @@ from custom_components.intratone.app_credentials import (
     AppCredentials,
     resolve_app_credentials,
 )
+from custom_components.intratone.call_manager import CallManager
 from custom_components.intratone.const import (
     CONF_DEVICE_ID,
     CONF_FCM_CREDS,
@@ -86,16 +87,52 @@ def mock_entry(mock_entry_data) -> MockConfigEntry:
 
 
 @pytest.fixture
+def mock_entry_data_modern() -> dict:
+    """Current-shape entry.data: no rotated credentials.
+
+    Current installs never write JWT / FCM token / FCM creds to entry.data —
+    they live in the Store from the start (see `mock_entry_data` for the
+    legacy shape, still covered by the migration test)."""
+    return {
+        CONF_DEVICE_ID: "ha-intratone-test",
+        CONF_NUMERIC_ID: "3844428",
+        CONF_TEL: "0671124546",
+        CONF_REGISTER_METHOD: REGISTER_METHOD_INVITE,
+    }
+
+
+@pytest.fixture
+def mock_entry_modern(mock_entry_data_modern) -> MockConfigEntry:
+    return MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="3844428",
+        title="Intratone (0671124546)",
+        data=mock_entry_data_modern,
+    )
+
+
+@pytest.fixture
 def mock_fcm_client():
     """Patch FcmPushClient so no MCS connection is opened during setup.
 
     `FcmPushClient` is imported lazily inside the listener, so we patch
-    the source module instead of the consumer.
+    the source module instead of the consumer. Autospec'd against the real
+    class so a call to a method it doesn't have fails the test instead of
+    silently succeeding.
     """
-    client = MagicMock()
+    from firebase_messaging import FcmPushClient
+    from firebase_messaging.fcmpushclient import FcmPushClientRunState
+
+    client = create_autospec(FcmPushClient, instance=True)
     client.checkin_or_register = AsyncMock(return_value="fake-fcm-token")
     client.start = AsyncMock()
     client.stop = AsyncMock()
+    # `run_state`/`tasks` are set on the instance inside __init__, so autospec
+    # (which only inspects the class) doesn't know about them. Set them to the
+    # values a successfully-started client would have — fcm_listener.py reads
+    # `run_state` via getattr() to detect the client silently stopping itself.
+    client.run_state = FcmPushClientRunState.STARTED
+    client.tasks = []
     with patch("firebase_messaging.FcmPushClient", return_value=client) as cls:
         cls.instance = client
         yield cls
@@ -107,8 +144,10 @@ def mock_call_manager():
 
     pytest-socket blocks real socket creation in the suite. Returns the
     MagicMock so tests can assert on start_call / hang_up if they want.
+    Autospec'd against the real class so a call to a method it doesn't have
+    fails the test instead of silently succeeding.
     """
-    cm = MagicMock()
+    cm = create_autospec(CallManager, instance=True)
     cm.async_start = AsyncMock()
     cm.async_stop = AsyncMock()
     cm.start_call = AsyncMock(return_value="fake-call-id")
