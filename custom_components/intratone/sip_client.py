@@ -85,6 +85,10 @@ _M_VIDEO_RE = re.compile(r"^m=video\s+(\d+)\b", re.MULTILINE)
 # Connection IP at the session level (`c=IN IP4 1.2.3.4`). SDP allows a per-
 # media `c=` override but Intratone's 200 OK has it only at session level.
 _SDP_CONN_IP_RE = re.compile(r"^c=IN\s+IP4\s+(\S+)", re.MULTILINE)
+# `m=audio <port> RTP/AVP <fmt> ...` — the first format listed is the one the
+# answerer will send (RFC 3264 §6.1). We only decode PCMU (payload type 0);
+# the audio bridge assumes G.711 µ-law no matter what actually arrives.
+_M_AUDIO_RE = re.compile(r"^m=audio\s+\d+\s+RTP/AVP\s+(\d+)", re.MULTILINE)
 
 
 def _extract_video_endpoint(sdp_body: str | bytes) -> tuple[str, int] | None:
@@ -100,6 +104,15 @@ def _extract_video_endpoint(sdp_body: str | bytes) -> tuple[str, int] | None:
     if not ip_match:
         return None
     return ip_match.group(1), port
+
+
+def _first_audio_payload_type(sdp_body: str | bytes) -> int | None:
+    """Return the first payload type on the answer's m=audio line, or None if
+    the line is absent or doesn't match — used only for a diagnostic log, so a
+    parse miss is silent rather than raised."""
+    text = sdp_body.decode("utf-8", errors="replace") if isinstance(sdp_body, bytes) else sdp_body
+    match = _M_AUDIO_RE.search(text)
+    return int(match.group(1)) if match else None
 
 
 def _redact_sip(message: bytes) -> str:
@@ -643,6 +656,22 @@ class IntratoneSipClient(asyncio.Protocol):
             _LOGGER.exception("Call %s: SDP parse failed", call.call_id)
             self._terminate(call)
             return
+
+        # Diagnostic only — never let a parsing hiccup here affect call
+        # establishment. We don't act on the result, just warn so a garbled-
+        # audio report can be diagnosed from logs (see audio_bridge.py, which
+        # always decodes incoming RTP as PCMU regardless of what's offered).
+        try:
+            audio_pt = _first_audio_payload_type(msg.body)
+        except Exception:  # noqa: BLE001
+            audio_pt = None
+        if audio_pt is not None and audio_pt != 0:
+            _LOGGER.warning(
+                "Call %s: gateway answered audio payload type %s, but only "
+                "PCMU (0) is decoded — call audio may be distorted",
+                call.call_id,
+                audio_pt,
+            )
 
         video_endpoint = _extract_video_endpoint(msg.body) if call.local_video_rtp_port else None
         if call.local_video_rtp_port and video_endpoint is None:
