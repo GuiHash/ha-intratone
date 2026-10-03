@@ -7,6 +7,7 @@ write-only trigger. We report `locked` at rest, briefly flip to `unlocked` on
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from homeassistant.components.lock import LockEntity
@@ -16,11 +17,34 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import IntratoneConfigEntry
 from .entity import IntratoneEntity, MomentaryRevertMixin
-from .rest_api import IntratoneAccess, IntratoneApiError, IntratoneAuthError
+from .rest_api import (
+    IntratoneAccess,
+    IntratoneApiError,
+    IntratoneAuthError,
+    IntratoneConnectionError,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 UNLOCK_VISIBLE_S = 3.0
+
+# Backoff between retries when the initial remote-open accesses fetch fails
+# transiently (network blip, server outage) — bounded and not aggressive.
+# Read at call time (not captured as a default arg) so tests can shrink it.
+ACCESS_LOCKS_RETRY_DELAYS_S: tuple[float, ...] = (30.0, 60.0, 120.0, 300.0, 600.0)
+
+
+def _is_transient_access_error(err: Exception) -> bool:
+    """True for a network blip or a 5xx — worth a retry.
+
+    An `IntratoneAuthError` (credentials revoked) or a 4xx `IntratoneApiError`
+    is a definitive answer, not a hiccup — never retry those.
+    """
+    if isinstance(err, IntratoneConnectionError):
+        return True
+    return isinstance(err, IntratoneApiError) and (
+        err.status is None or err.status >= 500
+    )
 
 
 async def async_setup_entry(
@@ -35,10 +59,30 @@ async def async_setup_entry(
     async_add_entities([IntratoneDoorLock(coordinator)])
 
     async def _add_access_locks() -> None:
-        try:
-            accesses = await entry.runtime_data.api.list_access()
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.warning("Could not fetch remote-open accesses: %s", err)
+        last_err: Exception | None = None
+        delays = (0.0, *ACCESS_LOCKS_RETRY_DELAYS_S)
+        for attempt, delay in enumerate(delays):
+            if delay:
+                _LOGGER.debug(
+                    "Remote-open accesses fetch failed transiently, retrying "
+                    "in %ss (attempt %d/%d): %s",
+                    delay,
+                    attempt + 1,
+                    len(delays),
+                    last_err,
+                )
+                await asyncio.sleep(delay)
+            try:
+                accesses = await entry.runtime_data.api.list_access()
+            except Exception as err:  # noqa: BLE001
+                if not _is_transient_access_error(err):
+                    _LOGGER.warning("Could not fetch remote-open accesses: %s", err)
+                    return
+                last_err = err
+                continue
+            break
+        else:
+            _LOGGER.warning("Could not fetch remote-open accesses: %s", last_err)
             return
         if accesses:
             _LOGGER.debug(
