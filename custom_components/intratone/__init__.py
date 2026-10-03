@@ -15,6 +15,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.service import async_register_admin_service
 
 from .app_credentials import AppCredentialsMissing, resolve_app_credentials
 from .call_manager import CallManager
@@ -143,8 +144,8 @@ async def async_setup(hass: HomeAssistant, _config: dict) -> bool:
         for entry in entries:
             await entry.runtime_data.coordinator.async_handle_push(payload)
 
-    hass.services.async_register(
-        DOMAIN, SERVICE_SIMULATE_RING, _simulate_ring, schema=SIMULATE_RING_SCHEMA
+    async_register_admin_service(
+        hass, DOMAIN, SERVICE_SIMULATE_RING, _simulate_ring, schema=SIMULATE_RING_SCHEMA
     )
     return True
 

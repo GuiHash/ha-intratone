@@ -331,7 +331,7 @@ At `debug` level the integration logs every SIP message sent and received (TX/RX
 
 ### Testing without a visitor: `intratone.simulate_ring`
 
-The integration registers an `intratone.simulate_ring` service (Developer Tools → Actions) that injects a fake FCM ring payload into the coordinator, as if a visitor had pressed the button. By default it only fires the doorbell event (the fake `call_id` means the in-call door unlock would be rejected by the server). If you also set `sip_server_ip`, the **full call pipeline** fires — SIP INVITE → RTP → ffmpeg → go2rtc → HomeKit — which is designed for end-to-end testing against [`dev/mock_asterisk.py`](dev/mock_asterisk.py), a tiny mock SIP server that answers the INVITE and streams a 440 Hz sine over G.711 µ-law.
+The integration registers an `intratone.simulate_ring` service (Developer Tools → Actions), restricted to admin users, that injects a fake FCM ring payload into the coordinator, as if a visitor had pressed the button. By default it only fires the doorbell event (the fake `call_id` means the in-call door unlock would be rejected by the server). If you also set `sip_server_ip`, the **full call pipeline** fires — SIP INVITE → RTP → ffmpeg → go2rtc → HomeKit — which is designed for end-to-end testing against [`dev/mock_asterisk.py`](dev/mock_asterisk.py), a tiny mock SIP server that answers the INVITE and streams a 440 Hz sine over G.711 µ-law.
 
 Main fields:
 
