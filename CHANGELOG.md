@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.0](https://github.com/GuiHash/ha-intratone/compare/v0.10.1...v0.11.0) (2026-10-04)
+
+
+### Features
+
+* **sip:** warn when the gateway answers an audio codec other than PCMU ([#137](https://github.com/GuiHash/ha-intratone/issues/137)) ([9a1808b](https://github.com/GuiHash/ha-intratone/commit/9a1808b59d8f109163347a6ef70a44b7dd75a6cb))
+
 ## [0.10.1](https://github.com/GuiHash/ha-intratone/compare/v0.10.0...v0.10.1) (2026-09-27)
 
 
