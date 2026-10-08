@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
 from aioresponses import aioresponses
+from homeassistant.core import Context
+from homeassistant.exceptions import Unauthorized
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 
@@ -346,6 +350,67 @@ async def test_simulate_ring_service(
         "simulate_ring",
         {"door_name": "PORTE COUR", "call_id": "sim-test"},
         blocking=True,
+    )
+    await hass.async_block_till_done()
+
+    state = mock_entry.runtime_data.coordinator.data
+    assert state is not None
+    assert state.call_id == "sim-test"
+    assert state.door_name == "PORTE COUR"
+
+
+async def test_simulate_ring_service_requires_admin(
+    hass,
+    mock_entry,
+    mock_fcm_client,
+    mock_call_manager,
+    aiomock,
+    hass_read_only_user,
+) -> None:
+    """Non-admin users can't call simulate_ring (it can trigger an arbitrary SIP INVITE)."""
+    mock_entry.add_to_hass(hass)
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={"state": "ok", "data": {"jwt": "fake.jwt.token", "id": "3844428"}},
+        repeat=True,
+    )
+    assert await hass.config_entries.async_setup(mock_entry.entry_id)
+    await hass.async_block_till_done()
+
+    with patch.object(
+        mock_entry.runtime_data.coordinator, "async_handle_push", AsyncMock()
+    ) as handle_push:
+        with pytest.raises(Unauthorized):
+            await hass.services.async_call(
+                DOMAIN,
+                "simulate_ring",
+                {"door_name": "PORTE COUR", "call_id": "sim-test"},
+                blocking=True,
+                context=Context(user_id=hass_read_only_user.id),
+            )
+        await hass.async_block_till_done()
+        handle_push.assert_not_called()
+
+
+async def test_simulate_ring_service_admin_user_allowed(
+    hass, mock_entry, mock_fcm_client, mock_call_manager, aiomock, hass_admin_user
+) -> None:
+    """Admin users can still call simulate_ring."""
+    mock_entry.add_to_hass(hass)
+    aiomock.post(
+        f"{API_BASE}api/auth/device",
+        payload={"state": "ok", "data": {"jwt": "fake.jwt.token", "id": "3844428"}},
+        repeat=True,
+    )
+    assert await hass.config_entries.async_setup(mock_entry.entry_id)
+    await hass.async_block_till_done()
+
+    await hass.services.async_call(
+        DOMAIN,
+        "simulate_ring",
+        {"door_name": "PORTE COUR", "call_id": "sim-test"},
+        blocking=True,
+        context=Context(user_id=hass_admin_user.id),
     )
     await hass.async_block_till_done()
 
